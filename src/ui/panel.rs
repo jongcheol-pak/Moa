@@ -561,50 +561,57 @@ impl PanelState {
     /// 「이 프레임에 온 것을 모아 한 번」을 택한다
     fn poll_load(&mut self, ctx: &egui::Context, icons: &mut IconCache, cache: &mut DirCache) {
         self.try_cache_hit(icons, cache);
-        let mut pending: Vec<crate::fs::enumerate::FileEntry> = Vec::new();
+        // 첫 배치는 그대로 넣어 두고 둘째부터 이어 붙인다 — 배치가 하나뿐인 흔한 프레임에서는
+        // 채널이 준 Vec을 옮겨 담지 않고 그대로 넘긴다(`Vec::new()`에 `extend`하면 그 몫을
+        // 한 번 더 옮긴다)
+        let mut pending: Option<Vec<crate::fs::enumerate::FileEntry>> = None;
         while let Some(chunk) = self.load.poll() {
             match chunk {
-                EnumChunk::Partial(entries) => pending.extend(entries),
+                EnumChunk::Partial(entries) => match &mut pending {
+                    Some(acc) => acc.extend(entries),
+                    None => pending = Some(entries),
+                },
                 EnumChunk::Done(outcome) => {
                     // 완료 조각은 **직전까지 모은 중간 몫을 먼저 반영한 뒤** 처리한다 —
                     // 순서가 뒤집히면 `apply_enumerated`의 `streamed` 분기가 어긋난다
                     self.flush_pending_partial(&mut pending, icons);
                     let t_apply = std::time::Instant::now();
                     self.apply_enumerated(outcome, icons, cache, ctx);
-                    let d_apply = t_apply.elapsed();
-                    crate::perf::log(|| {
-                        let (dirs, files) = self.list.counts();
-                        format!(
-                            "apply done dirs={dirs} files={files} | apply={:.1} (ms)",
-                            d_apply.as_secs_f32() * 1000.0
-                        )
-                    });
+                    self.log_apply("done", t_apply.elapsed());
                 }
             }
         }
-        // 이 프레임에 `Done`이 오지 않았으면 모은 중간 몫만 반영한다
+        // 이 프레임에 `Done`이 오지 않았으면 모은 중간 몫만 반영한다.
+        //
+        // **여기서 `apply_partial`을 부르는 것이 안전한 근거**: `DirLoad::poll`이 `Done`을
+        // 꺼내는 순간 수신부를 버리므로(`pending = None`), 같은 열거에서 `Done` 뒤에 `Partial`이
+        // 더 오는 일은 없다. 이 불변식이 깨지면 위 `Done` 분기가 `pending_dir`을 비운 뒤
+        // 이 flush가 빈 경로로 커밋해 목록을 지운다 — 그래서 두 곳의 계약을 여기 적어 둔다
         self.flush_pending_partial(&mut pending, icons);
     }
 
     /// 이 프레임에 모은 중간 배치를 **한 번에** 목록에 반영한다 (위 `poll_load` 참조).
     fn flush_pending_partial(
         &mut self,
-        pending: &mut Vec<crate::fs::enumerate::FileEntry>,
+        pending: &mut Option<Vec<crate::fs::enumerate::FileEntry>>,
         icons: &mut IconCache,
     ) {
-        if pending.is_empty() {
+        let Some(entries) = pending.take() else {
             return;
-        }
-        let entries = std::mem::take(pending);
+        };
         // 임시 계측 (`crate::perf`) — UI 스레드가 이 프레임 몫을 목록에 세우는 시간이다
         let t_apply = std::time::Instant::now();
         let added = entries.len();
         self.apply_partial(entries, icons);
-        let d_apply = t_apply.elapsed();
+        self.log_apply(&format!("partial+{added}"), t_apply.elapsed());
+    }
+
+    /// 배치 반영 시간을 임시 계측 로그에 남긴다 (`crate::perf`) — `poll_load`의 두 갈래가 함께 쓴다.
+    fn log_apply(&self, label: &str, d_apply: std::time::Duration) {
         crate::perf::log(|| {
             let (dirs, files) = self.list.counts();
             format!(
-                "apply partial+{added} dirs={dirs} files={files} | apply={:.1} (ms)",
+                "apply {label} dirs={dirs} files={files} | apply={:.1} (ms)",
                 d_apply.as_secs_f32() * 1000.0
             )
         });
