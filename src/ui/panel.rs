@@ -553,36 +553,61 @@ impl PanelState {
 
     /// 워커가 흘려보낸 조각을 목록에 반영한다.
     ///
-    /// **그 프레임에 도착한 것을 모두 소비한다** — 하나씩만 꺼내면 배치 수만큼 프레임이 들어
-    /// 완주가 되레 늦어진다(10만 항목이면 50프레임)
+    /// **그 프레임에 도착한 것을 모두 소비하되, 중간 조각(`Partial`)은 한 번에 합쳐 반영한다.**
+    /// `apply_partial`이 매번 `rebuild_visible`로 누적 전체를 다시 정렬·복제하므로(FR-69),
+    /// 워커가 UI보다 빨라 한 프레임에 배치가 여럿 쌓이면 그 프레임에서만 정렬이 수십 번 돌아
+    /// 앱이 멎는다(10만 항목 ≈ 1초 — 실측). 합쳐 반영하면 **프레임당 정렬이 한 번**으로 준다.
+    /// 하나씩만 꺼내면 반대로 배치 수만큼 프레임이 들어 완주가 늦어지므로, 그 절충으로
+    /// 「이 프레임에 온 것을 모아 한 번」을 택한다
     fn poll_load(&mut self, ctx: &egui::Context, icons: &mut IconCache, cache: &mut DirCache) {
         self.try_cache_hit(icons, cache);
+        let mut pending: Vec<crate::fs::enumerate::FileEntry> = Vec::new();
         while let Some(chunk) = self.load.poll() {
-            // 임시 계측 (`crate::perf`) — UI 스레드가 **배치 한 몫**을 목록에 세우는 시간이다
-            // (`set_entries`·`append_entries`의 확장자별 종류 조회가 여기 들어 있다)
-            let t_apply = std::time::Instant::now();
-            // 어느 조각을 반영했는지 로그에 싣는다 — 누적 개수만 적으면 그 줄이 배치 한 몫인지
-            // 마지막 확정인지 읽히지 않는다(이 로그로 개선 효과를 실측한다)
-            let kind = match chunk {
-                EnumChunk::Partial(entries) => {
-                    let added = entries.len();
-                    self.apply_partial(entries, icons);
-                    format!("partial+{added}")
-                }
+            match chunk {
+                EnumChunk::Partial(entries) => pending.extend(entries),
                 EnumChunk::Done(outcome) => {
+                    // 완료 조각은 **직전까지 모은 중간 몫을 먼저 반영한 뒤** 처리한다 —
+                    // 순서가 뒤집히면 `apply_enumerated`의 `streamed` 분기가 어긋난다
+                    self.flush_pending_partial(&mut pending, icons);
+                    let t_apply = std::time::Instant::now();
                     self.apply_enumerated(outcome, icons, cache, ctx);
-                    "done".to_string()
+                    let d_apply = t_apply.elapsed();
+                    crate::perf::log(|| {
+                        let (dirs, files) = self.list.counts();
+                        format!(
+                            "apply done dirs={dirs} files={files} | apply={:.1} (ms)",
+                            d_apply.as_secs_f32() * 1000.0
+                        )
+                    });
                 }
-            };
-            let d_apply = t_apply.elapsed();
-            crate::perf::log(|| {
-                let (dirs, files) = self.list.counts();
-                format!(
-                    "apply {kind} dirs={dirs} files={files} | apply={:.1} (ms)",
-                    d_apply.as_secs_f32() * 1000.0
-                )
-            });
+            }
         }
+        // 이 프레임에 `Done`이 오지 않았으면 모은 중간 몫만 반영한다
+        self.flush_pending_partial(&mut pending, icons);
+    }
+
+    /// 이 프레임에 모은 중간 배치를 **한 번에** 목록에 반영한다 (위 `poll_load` 참조).
+    fn flush_pending_partial(
+        &mut self,
+        pending: &mut Vec<crate::fs::enumerate::FileEntry>,
+        icons: &mut IconCache,
+    ) {
+        if pending.is_empty() {
+            return;
+        }
+        let entries = std::mem::take(pending);
+        // 임시 계측 (`crate::perf`) — UI 스레드가 이 프레임 몫을 목록에 세우는 시간이다
+        let t_apply = std::time::Instant::now();
+        let added = entries.len();
+        self.apply_partial(entries, icons);
+        let d_apply = t_apply.elapsed();
+        crate::perf::log(|| {
+            let (dirs, files) = self.list.counts();
+            format!(
+                "apply partial+{added} dirs={dirs} files={files} | apply={:.1} (ms)",
+                d_apply.as_secs_f32() * 1000.0
+            )
+        });
     }
 
     /// 탐색을 커밋한다 — 활성 탭의 경로·히스토리와 썸네일 세대를 새 폴더에 맞춘다.

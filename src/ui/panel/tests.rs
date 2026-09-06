@@ -4035,3 +4035,53 @@ fn 격자_보기의_빈_영역_클릭은_선택을_푼다() {
         "빈 영역을 눌러도 선택이 풀리지 않았다"
     );
 }
+
+#[test]
+fn 한_프레임에_쌓인_배치를_합쳐_반영해도_목록이_온전하다() {
+    // 회귀 — `poll_load`가 한 프레임에 쌓인 여러 배치를 **합쳐** 반영해도 항목이
+    // 누락·중복·뒤섞이지 않는다. 합치기 이전에는 배치마다 `rebuild_visible`이 돌아
+    // (누적 전체 재필터·재정렬·재복제) 워커가 UI보다 빠른 큰 폴더에서 그 한 프레임에
+    // 정렬이 수십 번 몰려 앱이 멎었다(10만 항목 ≈ 1초 — 조사 시 실측).
+    let dir = std::env::temp_dir().join(format!("moa_coalesce_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("임시 폴더");
+    // 여러 배치가 나오도록 임계의 두 배 남짓을 만든다
+    let count = crate::ui::panel::workers::PARTIAL_BATCH * 2 + 37;
+    for i in 0..count {
+        std::fs::write(dir.join(format!("f{i:05}.txt")), b"x").expect("파일");
+    }
+
+    let ctx = egui::Context::default();
+    let mut icons = IconCache::new();
+    let mut cache = crate::panel::dir_cache::DirCache::new();
+    let mut panel = PanelState::new(dir.clone());
+    panel.start_load(dir.clone(), PendingNav::None, &ctx);
+
+    // 워커가 여러 배치를 채널에 쌓도록 짧게 기다린 뒤 소비 → 「한 프레임에 합치기」 경로를 태운다
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while panel.load.is_loading() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        panel.poll_load(&ctx, &mut icons, &mut cache);
+    }
+    assert!(!panel.load.is_loading(), "열거가 제때 끝나지 않았다");
+
+    let entries = panel.list.entries().expect("로컬 목록");
+    // 맨 위 `..` 줄을 뺀 나머지가 만든 파일 전부여야 한다
+    let names: Vec<String> = entries
+        .iter()
+        .map(|e| e.name_string())
+        .filter(|n| n != "..")
+        .collect();
+    assert_eq!(names.len(), count, "합치기 반영에서 항목이 누락·중복됐다");
+
+    use std::collections::HashSet;
+    let unique: HashSet<&String> = names.iter().collect();
+    assert_eq!(unique.len(), count, "중복된 항목이 있다");
+
+    // 이름 오름차순으로 정렬돼 있어야 한다(전량 재정렬과 같은 결과)
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "합쳐 반영한 목록이 정렬돼 있지 않다");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
