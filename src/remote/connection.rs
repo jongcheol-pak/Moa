@@ -1379,7 +1379,22 @@ mod tests {
             path: RemotePath::root(),
             quiet: false,
         });
-        std::thread::sleep(Duration::from_millis(30));
+        // 워커가 그 명령을 **실제로 집어 막혔다**를 확인한 뒤에 단언한다 — 고정 시간을 재우면
+        // CPU가 붐빌 때 워커가 아직 시작도 못 한 채 단언이 돌아 「목록이 없다」가 우연히 참이 된다.
+        // `FakeSession::connect`가 `record` 뒤에 `tick`에서 멈추므로(`remote::testing`), `"connect"`가
+        // 보이면 그 스레드는 hang 루프 안이고 뒤이어 보낸 `List`는 큐에 남아 있다
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !blocked_server
+            .calls()
+            .iter()
+            .any(|c| c.as_str() == "connect")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "막힌 연결의 워커가 명령을 집지 못했다"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
         assert!(
             !blocked
                 .poll()
