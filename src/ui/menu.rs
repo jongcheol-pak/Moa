@@ -9,6 +9,7 @@
 use crate::app::layout::{SplitDir, SplitPlace};
 use crate::remote::types::SiteId;
 use crate::ui::list_details::{ALL_COLUMNS, ColumnFlags, ColumnKind};
+use crate::ui::queue_panel::QueueColumnKind;
 use crate::ui::shell_host::AppNav;
 use crate::ui::theme;
 use crate::ui::view_mode::ViewMode;
@@ -222,6 +223,75 @@ pub fn column_menu_items(ui: &mut egui::Ui, flags: ColumnFlags, out: &mut Option
             ui.close();
         }
     }
+}
+
+/// 큐 표의 열 메뉴 (FR-36) — 그 탭에 있는 열만 보이고 고정 열은 눌러도 바뀌지 않는다.
+///
+/// **위 `column_menu_items`와 합치지 않는 이유**: 그쪽은 `ColumnFlags`(권한·소유자 두 bool)를
+/// 받는 파일 목록 전용 형태이고, 큐는 종류가 아홉이며 **탭마다 후보가 다르다**. 재료가 달라
+/// 합치면 분기 인자만 늘고, 반복은 아직 2회째라 공통화 문턱(3회)에도 미달한다 (plan D6)
+pub fn queue_column_menu_items(
+    ui: &mut egui::Ui,
+    kinds: &[QueueColumnKind],
+    hidden: &[QueueColumnKind],
+    out: &mut Option<QueueColumnKind>,
+) {
+    ui.set_width(COLUMN_MENU_WIDTH);
+    ui.label(
+        egui::RichText::new(crate::i18n::menu_columns())
+            .size(COLUMN_MENU_CAPTION_PX)
+            .color(theme::TEXT_MUTED),
+    );
+    for &kind in kinds {
+        let shown = !hidden.contains(&kind);
+        let response = ui.add(egui::Button::new(queue_column_menu_label(ui, kind, shown)));
+        // 고정 열도 그리기는 한다 — 클릭만 무시한다(파일 목록 열 메뉴와 같은 규칙)
+        if kind.is_fixed() {
+            response.on_hover_cursor(egui::CursorIcon::Default);
+            continue;
+        }
+        if response.clicked() {
+            *out = Some(kind);
+            ui.close();
+        }
+    }
+}
+
+/// 큐 열 메뉴 한 줄의 글자 — 위 `column_menu_label`과 같은 모양이되 종류가 다르다
+fn queue_column_menu_label(
+    ui: &egui::Ui,
+    kind: QueueColumnKind,
+    checked: bool,
+) -> egui::text::LayoutJob {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        if checked {
+            egui_phosphor::regular::CHECK
+        } else {
+            " "
+        },
+        0.0,
+        egui::TextFormat {
+            font_id: font.clone(),
+            color: theme::OK_TEXT,
+            ..Default::default()
+        },
+    );
+    job.append(
+        kind.header(),
+        COLUMN_CHECK_WIDTH,
+        egui::TextFormat {
+            font_id: font,
+            color: if kind.is_fixed() {
+                theme::TEXT_DIM
+            } else {
+                theme::TEXT
+            },
+            ..Default::default()
+        },
+    );
+    job
 }
 
 /// 열 메뉴 한 줄의 글자 — 체크 글리프만 초록이고 라벨은 켤 수 있는지에 따라 색이 다르다

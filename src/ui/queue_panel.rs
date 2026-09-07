@@ -72,8 +72,11 @@ pub enum QueueColumnKind {
 }
 
 impl QueueColumnKind {
-    /// 머리글 문구 — 언어를 따르므로 상수가 아니라 그때그때 만든다 (인벤토리 #37~#43)
-    fn header(self) -> &'static str {
+    /// 머리글 문구 — 언어를 따르므로 상수가 아니라 그때그때 만든다 (인벤토리 #37~#43).
+    ///
+    /// **열 메뉴도 이 문구를 쓴다** — 메뉴에서 고르는 것과 표에 서는 것이 같은 이름이어야
+    /// 무엇을 켜고 끄는지 알 수 있다 (`list_details::ColumnKind::label`과 같은 규칙)
+    pub fn header(self) -> &'static str {
         match self {
             QueueColumnKind::Direction => crate::i18n::queue_column_direction(),
             QueueColumnKind::Local => crate::i18n::queue_column_local(),
@@ -721,6 +724,11 @@ impl QueueColumns {
         self.tab(filter).visible()
     }
 
+    /// 그 탭에서 숨긴 열 — 열 메뉴가 체크 표시를 가르는 데 쓴다
+    pub fn hidden_kinds(&self, filter: QueueFilter) -> Vec<QueueColumnKind> {
+        self.tab(filter).hidden.clone()
+    }
+
     /// 열을 끄고 켠다 — **고정 열에는 아무 일도 하지 않는다**
     pub fn toggle(&mut self, filter: QueueFilter, kind: QueueColumnKind) {
         if kind.is_fixed() || !columns_for(filter).contains(&kind) {
@@ -841,11 +849,12 @@ pub fn show_queue(
         egui::vec2(rect.width(), HEADER_HEIGHT),
     );
     // **열 구성은 지금 고른 탭이 정한다** (FR-36) — `DockState`가 이미 그 값을 들고 있어
-    // 화면이 따로 탭 종류를 알 필요가 없다
+    // 화면이 따로 탭 종류를 알 필요가 없다.
+    // **`columns_for`가 아니라 `visible`을 쓴다** — 사용자가 끈 열과 바꾼 차례가 여기 반영된다
     let filter = state.filter;
-    let kinds = columns_for(filter);
+    let kinds = state.columns.visible(filter);
     let widths = state.columns.effective(filter, rect.width());
-    let guide_x = show_header(ui, header, kinds, &widths, &mut state.columns, filter);
+    let guide_x = show_header(ui, header, &kinds, &widths, &mut state.columns, filter);
 
     let body = egui::Rect::from_min_max(
         egui::pos2(rect.left(), header.bottom()),
@@ -886,7 +895,7 @@ pub fn show_queue(
     // `retry`가 그것을 되살리므로 취소만 있는 목록에서도 눌러 일이 일어난다
     let has_retryable_in_view = items.iter().any(|item| item.state.is_retryable());
     let row_ctx = RowContext {
-        kinds,
+        kinds: &kinds,
         widths: &widths,
         sites,
         selection: &state.queue_selection,
@@ -1105,23 +1114,74 @@ fn show_header(
     filter: QueueFilter,
 ) -> Option<f32> {
     ui.painter().rect_filled(rect, 0.0, theme::HEADER_BG);
+
+    // 각 열의 왼쪽 끝 — 차례 드래그가 「어느 열 위인가」를 재는 데 쓴다
+    let mut offsets = Vec::with_capacity(kinds.len());
     let mut left = rect.left();
-    for (index, kind) in kinds.iter().enumerate() {
+    for index in 0..kinds.len() {
+        offsets.push(left);
+        left += widths.get(index).copied().unwrap_or_default();
+    }
+
+    // 이번 프레임에 놓인 열 — 고리를 다 돈 뒤에 반영한다(고리 안에서 `columns`를 바꾸면
+    // 이미 계산해 둔 `widths`·`offsets`와 어긋난 채로 나머지 열을 그리게 된다)
+    let mut dropped: Option<(usize, usize)> = None;
+    let mut reorder_guide = None;
+    for (slot, kind) in kinds.iter().enumerate() {
+        let width = widths.get(slot).copied().unwrap_or_default();
+        let cell = egui::Rect::from_min_size(
+            egui::pos2(offsets[slot], rect.top()),
+            egui::vec2(width, rect.height()),
+        );
+        // **`click_and_drag`인 이유**(D5): 머리글 가운데를 끌면 열 차례가 바뀐다. 경계 근처는
+        // 아래에서 **더 나중에** 등록하는 폭 조절 핸들이 가져가므로 둘이 겹치지 않는다
+        let resp = ui.interact(
+            cell,
+            ui.id().with(("queue_head", kind.as_key())),
+            egui::Sense::click_and_drag(),
+        );
+        // 열이 하나뿐이면 옮길 자리가 없다
+        if kinds.len() > 1
+            && (resp.dragged() || resp.drag_stopped())
+            && let Some(pointer) = ui.ctx().pointer_interact_pos()
+            && let Some(target) = slot_at_x(&offsets, widths, pointer.x)
+            && target != slot
+        {
+            // 왼쪽으로 끌면 그 열의 왼쪽 경계에, 오른쪽으로 끌면 오른쪽 경계에 놓인다
+            reorder_guide = Some(if target < slot {
+                offsets[target]
+            } else {
+                offsets[target] + widths.get(target).copied().unwrap_or_default()
+            });
+            if resp.drag_stopped() {
+                dropped = Some((slot, target));
+            }
+        }
+        queue_column_menu_popup(&resp, kinds, columns, filter);
         ui.painter().text(
-            egui::pos2(left + CELL_PAD_X, rect.center().y),
+            egui::pos2(offsets[slot] + CELL_PAD_X, rect.center().y),
             egui::Align2::LEFT_CENTER,
             kind.header(),
             egui::FontId::proportional(FONT_PX),
             theme::HEADER_TEXT,
         );
-        left += widths.get(index).copied().unwrap_or_default();
+    }
+
+    if let Some((from, to)) = dropped {
+        columns.reorder(filter, from, to);
     }
 
     // 평소에도 경계가 보여야 어디를 잡을지 알 수 있다 (2026-08-18 사용자 보고).
-    // 마지막 열의 오른쪽 끝에는 긋지 않는다 — 그것은 표 바깥 경계다
+    // 마지막 열의 오른쪽 끝에는 긋지 않는다 — 그것은 표 바깥 경계다.
+    // **머리글 셀보다 나중에 등록한다** — egui는 겹칠 때 나중 위젯을 위로 보므로,
+    // 경계 위에서 누른 것이 차례 드래그로 새지 않는다 (D5)
     let mut boundary = rect.left();
     let mut dragging = None;
-    for (slot, width) in widths.iter().take(widths.len() - 1).enumerate() {
+    for (slot, width) in widths
+        .iter()
+        .take(widths.len().saturating_sub(1))
+        .enumerate()
+    {
         boundary += width;
         ui.painter().vline(
             boundary,
@@ -1145,7 +1205,46 @@ fn show_header(
             dragging = Some(boundary);
         }
     }
+    // 차례를 바꾸는 중이면 놓일 자리에 선을 긋는다 — 폭 조절 가이드와 색이 같아도
+    // 둘이 동시에 서는 일은 없다(경계를 잡으면 차례 드래그가 서지 않는다)
+    if let Some(x) = reorder_guide {
+        ui.painter().vline(
+            x,
+            rect.top()..=rect.bottom(),
+            egui::Stroke::new(widgets::INSERT_LINE_HEIGHT, theme::ACCENT),
+        );
+    }
     dragging
+}
+
+/// 그 x가 몇 번째 열 위인가 — 차례 드래그의 놓을 자리 판정
+fn slot_at_x(offsets: &[f32], widths: &[f32], x: f32) -> Option<usize> {
+    offsets.iter().enumerate().position(|(slot, &start)| {
+        let width = widths.get(slot).copied().unwrap_or_default();
+        x >= start && x < start + width
+    })
+}
+
+/// 머리글 우클릭 — 열을 끄고 켠다 (FR-36).
+///
+/// 고른 열은 그 자리에서 반영한다 — `list_details`가 결과를 `DetailsOutcome`으로 올려
+/// 보내는 것과 달리, 큐 표는 열 상태(`QueueColumns`)를 이미 손에 쥐고 있어 거쳐 갈
+/// 이유가 없다
+fn queue_column_menu_popup(
+    response: &egui::Response,
+    kinds: &[QueueColumnKind],
+    columns: &mut QueueColumns,
+    filter: QueueFilter,
+) {
+    let mut toggled = None;
+    let hidden = columns.hidden_kinds(filter);
+    egui::Popup::context_menu(response).show(|ui| {
+        theme::menu_style(ui);
+        crate::ui::menu::queue_column_menu_items(ui, kinds, &hidden, &mut toggled);
+    });
+    if let Some(kind) = toggled {
+        columns.toggle(filter, kind);
+    }
 }
 
 /// 항목 한 줄
@@ -1573,6 +1672,64 @@ mod tests {
             "고정 열이 숨겨졌다"
         );
         assert!(!보이는.contains(&QueueColumnKind::Server));
+    }
+
+    /// 머리글에 실제로 그려진 문구를 차례대로 모은다 — 끌기 제스처를 재현하지 않고도
+    /// 「무엇이 어느 차례로 섰는가」는 이렇게 잴 수 있다 (plan T4 `[면제 ④]`)
+    #[cfg(test)]
+    fn 머리글_문구들(columns: &mut QueueColumns, filter: QueueFilter) -> Vec<String> {
+        let kinds = columns.visible(filter);
+        let widths: Vec<f32> = kinds.iter().map(|k| k.default_width()).collect();
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(widths.iter().sum(), HEADER_HEIGHT),
+                );
+                show_header(ui, rect, &kinds, &widths, columns, filter);
+            });
+        });
+        let mut 문구 = Vec::new();
+        for clipped in &output.shapes {
+            if let egui::Shape::Text(text) = &clipped.shape {
+                문구.push((text.pos.x, text.galley.text().to_owned()));
+            }
+        }
+        문구.sort_by(|a, b| a.0.total_cmp(&b.0));
+        문구.into_iter().map(|(_, t)| t).collect()
+    }
+
+    #[test]
+    fn 끈_열의_머리글은_그려지지_않는다() {
+        let _guard =
+            crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+        let mut columns = QueueColumns::default();
+        assert!(
+            머리글_문구들(&mut columns, QueueFilter::All).contains(&"서버".to_owned()),
+            "끄기 전에는 서버 열이 그려져야 한다 — 이 시험이 아무것도 보지 않는다"
+        );
+        columns.toggle(QueueFilter::All, QueueColumnKind::Server);
+        assert!(
+            !머리글_문구들(&mut columns, QueueFilter::All).contains(&"서버".to_owned()),
+            "끈 열의 머리글이 그대로 그려진다 — `show_queue`가 `visible`을 쓰지 않는다"
+        );
+    }
+
+    #[test]
+    fn 바꾼_차례대로_머리글이_선다() {
+        let _guard =
+            crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+        let mut columns = QueueColumns::default();
+        let 원래 = 머리글_문구들(&mut columns, QueueFilter::All);
+        assert_eq!(원래[0], "방향");
+
+        // `상태`(마지막)를 맨 앞으로 옮긴다
+        let 마지막 = columns.visible(QueueFilter::All).len() - 1;
+        columns.reorder(QueueFilter::All, 마지막, 0);
+        let 바뀐 = 머리글_문구들(&mut columns, QueueFilter::All);
+        assert_eq!(바뀐[0], "상태", "바꾼 차례가 머리글에 닿지 않았다");
+        assert_eq!(바뀐.len(), 원래.len(), "열이 사라지거나 늘었다");
     }
 
     #[test]
