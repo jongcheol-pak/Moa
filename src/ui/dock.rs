@@ -122,6 +122,12 @@ impl DockState {
             columns: self.columns.to_saved(QueueFilter::All),
             columns_done: self.columns.to_saved(QueueFilter::Done),
             columns_error: self.columns.to_saved(QueueFilter::Error),
+            column_order: self.columns.order_saved(QueueFilter::All),
+            column_order_done: self.columns.order_saved(QueueFilter::Done),
+            column_order_error: self.columns.order_saved(QueueFilter::Error),
+            column_hidden: self.columns.hidden_saved(QueueFilter::All),
+            column_hidden_done: self.columns.hidden_saved(QueueFilter::Done),
+            column_hidden_error: self.columns.hidden_saved(QueueFilter::Error),
         }
     }
 
@@ -138,11 +144,32 @@ impl DockState {
                 _ => QueueFilter::All,
             },
             site: None,
-            columns: crate::ui::queue_panel::QueueColumns::from_saved(
-                &saved.columns,
-                &saved.columns_done,
-                &saved.columns_error,
-            ),
+            columns: {
+                // 폭을 먼저 세우고 차례·숨김을 얹는다 — 셋이 서로를 건드리지 않으므로
+                // 순서 자체에 뜻은 없으나, 폭이 정본이라 그것을 먼저 둔다
+                let mut columns = crate::ui::queue_panel::QueueColumns::from_saved(
+                    &saved.columns,
+                    &saved.columns_done,
+                    &saved.columns_error,
+                );
+                for (filter, order, hidden) in [
+                    (QueueFilter::All, &saved.column_order, &saved.column_hidden),
+                    (
+                        QueueFilter::Done,
+                        &saved.column_order_done,
+                        &saved.column_hidden_done,
+                    ),
+                    (
+                        QueueFilter::Error,
+                        &saved.column_order_error,
+                        &saved.column_hidden_error,
+                    ),
+                ] {
+                    columns.apply_saved_order(filter, order);
+                    columns.apply_saved_hidden(filter, hidden);
+                }
+                columns
+            },
             // 고른 행은 담지 않는다 — 큐 항목 자체가 완료·취소분을 버리고 되살아나므로
             // 번호를 되살려 봐야 가리킬 곳이 없다 (`site`와 같은 이유)
             queue_selection: HashSet::new(),
@@ -384,6 +411,56 @@ pub fn show_strip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 열_배치가_세션을_왕복한다() {
+        // G3 — 탭마다 따로 왕복해야 한다. 한 벌만 담으면 탭을 옮길 때 배치가 흔들린다
+        use crate::ui::queue_panel::QueueColumnKind;
+        let mut state = DockState::default();
+        state
+            .columns
+            .toggle(QueueFilter::All, QueueColumnKind::Server);
+        state.columns.reorder(QueueFilter::All, 0, 2);
+        state
+            .columns
+            .toggle(QueueFilter::Done, QueueColumnKind::Size);
+
+        let back = DockState::from_session(&state.to_session());
+        for filter in [QueueFilter::All, QueueFilter::Done, QueueFilter::Error] {
+            assert_eq!(
+                back.columns.visible(filter),
+                state.columns.visible(filter),
+                "{filter:?} 탭의 배치가 왕복하지 않는다"
+            );
+            assert_eq!(
+                back.columns.to_saved(filter),
+                state.columns.to_saved(filter),
+                "{filter:?} 탭의 폭이 왕복하지 않는다"
+            );
+        }
+    }
+
+    #[test]
+    fn 열_배치가_없는_옛_세션은_기본_배치로_선다() {
+        // G4의 짝 — 키가 비어 있어도 그 탭의 기본 차례가 서고 숨긴 열은 없다
+        let 기본 = DockState::default();
+        let mut 옛것 = 기본.to_session();
+        옛것.column_order = Vec::new();
+        옛것.column_order_done = Vec::new();
+        옛것.column_order_error = Vec::new();
+        옛것.column_hidden = Vec::new();
+        옛것.column_hidden_done = Vec::new();
+        옛것.column_hidden_error = Vec::new();
+
+        let back = DockState::from_session(&옛것);
+        for filter in [QueueFilter::All, QueueFilter::Done, QueueFilter::Error] {
+            assert_eq!(
+                back.columns.visible(filter),
+                기본.columns.visible(filter),
+                "{filter:?} 탭이 기본 배치로 서지 않았다"
+            );
+        }
+    }
 
     #[test]
     fn 도크_치수는_원본과_같다() {

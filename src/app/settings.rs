@@ -327,6 +327,28 @@ pub struct DockSession {
     /// `실패` 탭의 열 폭 — 위와 같은 이유로 따로 든다
     #[serde(default)]
     pub columns_error: Vec<f32>,
+    /// 탭마다 열이 서는 차례 — 저장 키(`QueueColumnKind::as_key`)를 담는다 (FR-36).
+    ///
+    /// **폭과 마찬가지로 탭마다 따로 든다.** 폭 배열이 그 탭의 **기본** 차례를 뜻하는 것과
+    /// 달리 이 목록은 **사용자가 바꾼 차례**다 — 둘을 한 배열로 합치면 폭의 뜻이 순서에
+    /// 딸려 흔들린다. 이 키가 없는 옛 파일은 기본 차례로 선다
+    #[serde(default)]
+    pub column_order: Vec<String>,
+    /// `성공` 탭의 열 차례
+    #[serde(default)]
+    pub column_order_done: Vec<String>,
+    /// `실패` 탭의 열 차례
+    #[serde(default)]
+    pub column_order_error: Vec<String>,
+    /// 탭마다 숨긴 열 — 저장 키를 담는다. 고정 열(방향·로컬·원격)은 담기지 않는다
+    #[serde(default)]
+    pub column_hidden: Vec<String>,
+    /// `성공` 탭의 숨긴 열
+    #[serde(default)]
+    pub column_hidden_done: Vec<String>,
+    /// `실패` 탭의 숨긴 열
+    #[serde(default)]
+    pub column_hidden_error: Vec<String>,
 }
 
 /// 사이드바 표시 상태 (FR-19·FR-20) — 화면 상태 타입과 구분해 `Session` 접미사
@@ -972,8 +994,10 @@ mod tests {
         session.dock = DockSession {
             filter: "error".to_owned(),
             columns: vec![34.0, 300.0, 300.0, 120.0, 84.0, 118.0, 150.0],
-            columns_done: Vec::new(),
-            columns_error: Vec::new(),
+            // 나머지는 기본값이다 — **`..Default::default()`를 쓰는 이유**: 이 리터럴이
+            // 모든 필드를 적고 있으면 도크 세션에 키가 하나 늘 때마다 여기가 컴파일되지
+            // 않는다(2026-09-07에 실제로 그랬다)
+            ..Default::default()
         };
 
         let text = serde_json::to_string(&session).expect("직렬화");
@@ -995,8 +1019,10 @@ mod tests {
         session.dock = DockSession {
             filter: "error".to_owned(),
             columns: vec![34.0, 300.0, 300.0, 120.0, 84.0, 118.0, 150.0],
-            columns_done: Vec::new(),
-            columns_error: Vec::new(),
+            // 나머지는 기본값이다 — **`..Default::default()`를 쓰는 이유**: 이 리터럴이
+            // 모든 필드를 적고 있으면 도크 세션에 키가 하나 늘 때마다 여기가 컴파일되지
+            // 않는다(2026-09-07에 실제로 그랬다)
+            ..Default::default()
         };
         let text = serde_json::to_string(&session).expect("직렬화");
         // 걷어낸 키를 손으로 다시 끼워 넣는다 — 옛 버전이 적어 둔 파일과 같은 모양이다
@@ -1008,6 +1034,49 @@ mod tests {
         let back = parse_session(&옛_파일).expect("옛 키 하나 때문에 세션을 통째로 잃었다");
         assert_eq!(back.dock.filter, "error", "나머지 값은 그대로 읽힌다");
         assert_eq!(back.dock.columns[1], 300.0);
+        assert_eq!(back.workspaces.len(), session.workspaces.len());
+    }
+
+    #[test]
+    fn 열_차례_키가_없는_옛_파일도_그대로_읽힌다() {
+        // 2026-09-07에 도크 세션에 여섯 키(탭별 차례·숨김)가 늘었다. 그 키가 **없는** 파일이
+        // 통째로 폴백하면 사용자의 워크스페이스·분할·탭까지 초기화된다 — 스키마 버전을
+        // 올리지 않은 것이 그 방어이고, 이 시험이 그 계약을 못 박는다
+        let mut session = sample();
+        session.dock = DockSession {
+            filter: "done".to_owned(),
+            columns: vec![34.0, 300.0, 300.0, 120.0, 84.0, 118.0, 150.0],
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&session).expect("직렬화");
+        // 새 키 여섯을 통째로 걷어낸다 — 그 키가 생기기 전 버전이 적은 파일과 같은 모양이다
+        let mut 옛_파일 = text.clone();
+        for key in [
+            "column_order",
+            "column_order_done",
+            "column_order_error",
+            "column_hidden",
+            "column_hidden_done",
+            "column_hidden_error",
+        ] {
+            // 마지막 필드에는 뒤따르는 콤마가 없으므로 두 모양을 다 본다
+            let 뒤콤마 = format!(r#""{key}":[],"#);
+            let 앞콤마 = format!(r#","{key}":[]"#);
+            let 지운다 = if 옛_파일.contains(&뒤콤마) {
+                뒤콤마
+            } else {
+                앞콤마
+            };
+            assert!(
+                옛_파일.contains(&지운다),
+                "{key}가 직렬화에 없다 — 이 시험이 아무것도 보지 않는다"
+            );
+            옛_파일 = 옛_파일.replace(&지운다, "");
+        }
+        let back = parse_session(&옛_파일).expect("새 키가 없다고 세션을 통째로 잃었다");
+        assert_eq!(back.dock.filter, "done", "나머지 값은 그대로 읽힌다");
+        assert_eq!(back.dock.columns[1], 300.0, "맞춰 둔 폭이 사라졌다");
+        assert!(back.dock.column_order.is_empty(), "없는 키는 빈 목록이다");
         assert_eq!(back.workspaces.len(), session.workspaces.len());
     }
 
