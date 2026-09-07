@@ -559,22 +559,64 @@ pub fn effective_selection<'a>(
 /// 흔들린다). 넘칠 때는 저장 폭 그대로 그려 오른쪽이 잘린다 — 가로 스크롤은 두지 않는다
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueueColumns {
-    all: Vec<f32>,
-    done: Vec<f32>,
-    error: Vec<f32>,
+    all: TabColumns,
+    done: TabColumns,
+    error: TabColumns,
+}
+
+/// 탭 하나의 열 상태 — 폭·차례·숨김.
+///
+/// **폭을 아홉 칸 전부 드는 이유**(2026-09-07): 자리를 **탭 안의 차례가 아니라 종류**
+/// (`QueueColumnKind::slot`)에 매어야 차례를 바꿔도 각 열이 자기 폭을 그대로 갖는다.
+/// 그 탭에 없는 열의 폭도 함께 들지만 저장할 때는 그 탭 몫만 내므로 파일 형식은 그대로다
+/// (`list_details::Columns`가 같은 규칙을 쓴다)
+#[derive(Debug, Clone, PartialEq)]
+struct TabColumns {
+    widths: [f32; QUEUE_COLUMN_COUNT],
+    /// 열이 서는 차례 — 언제나 `columns_for(filter)`의 순열이다
+    order: Vec<QueueColumnKind>,
+    /// 숨긴 열 — `is_fixed()`인 열은 들어오지 않는다
+    hidden: Vec<QueueColumnKind>,
+}
+
+impl TabColumns {
+    fn new(filter: QueueFilter) -> TabColumns {
+        let mut widths = [0.0; QUEUE_COLUMN_COUNT];
+        for kind in ALL_QUEUE_COLUMNS {
+            widths[kind.slot()] = kind.default_width();
+        }
+        TabColumns {
+            widths,
+            order: columns_for(filter).to_vec(),
+            hidden: Vec::new(),
+        }
+    }
+
+    /// 그릴 열 — 차례대로, 숨긴 것을 뺀다
+    fn visible(&self) -> Vec<QueueColumnKind> {
+        self.order
+            .iter()
+            .filter(|kind| !self.hidden.contains(kind))
+            .copied()
+            .collect()
+    }
 }
 
 impl Default for QueueColumns {
     fn default() -> QueueColumns {
         QueueColumns {
-            all: default_widths(QueueFilter::All),
-            done: default_widths(QueueFilter::Done),
-            error: default_widths(QueueFilter::Error),
+            all: TabColumns::new(QueueFilter::All),
+            done: TabColumns::new(QueueFilter::Done),
+            error: TabColumns::new(QueueFilter::Error),
         }
     }
 }
 
-/// 그 탭의 기본 폭 한 벌
+/// 그 탭의 기본 폭 한 벌 — **시험 전용**이다.
+///
+/// 폭을 종류에 매인 아홉 칸으로 옮기면서(2026-09-07) 프로덕션은 `TabColumns::new`가
+/// 그 일을 맡았고, 여기 남은 것은 「기본 폭이 원본과 같은가」를 재는 시험의 기대값이다
+#[cfg(test)]
 fn default_widths(filter: QueueFilter) -> Vec<f32> {
     columns_for(filter)
         .iter()
@@ -606,13 +648,119 @@ impl QueueColumns {
         }
     }
 
-    /// 세션에 저장할 폭 — 그 탭 몫 한 벌
+    /// 세션에 저장할 폭 — **그 탭 몫 한 벌을 그 탭의 기본 차례로** 낸다.
+    ///
+    /// 차례가 아니라 종류로 들고 있으면서 저장은 기본 차례로 내는 이유는 **파일 형식을
+    /// 그대로 두기 위해서다** — 사용자가 순서를 바꿔도 폭 배열의 뜻은 변하지 않는다
     pub fn to_saved(&self, filter: QueueFilter) -> Vec<f32> {
-        self.widths(filter).to_vec()
+        let tab = self.tab(filter);
+        columns_for(filter)
+            .iter()
+            .map(|kind| tab.widths[kind.slot()])
+            .collect()
     }
 
-    /// 그 탭의 저장 폭
-    fn widths(&self, filter: QueueFilter) -> &[f32] {
+    /// 세션에 저장할 열 차례 — 저장 키로 낸다
+    pub fn order_saved(&self, filter: QueueFilter) -> Vec<String> {
+        self.tab(filter)
+            .order
+            .iter()
+            .map(|kind| kind.as_key().to_owned())
+            .collect()
+    }
+
+    /// 세션에 저장할 숨긴 열
+    pub fn hidden_saved(&self, filter: QueueFilter) -> Vec<String> {
+        self.tab(filter)
+            .hidden
+            .iter()
+            .map(|kind| kind.as_key().to_owned())
+            .collect()
+    }
+
+    /// 저장된 차례를 되살린다 — **모르는 키와 그 탭에 없는 열은 버리고, 빠진 열은 뒤에 채운다**.
+    ///
+    /// 열이 늘거나 준 판으로 갈아타도 목록이 못 그려지지 않게 하려는 것이다
+    pub fn apply_saved_order(&mut self, filter: QueueFilter, saved: &[String]) {
+        let kinds = columns_for(filter);
+        let mut order: Vec<QueueColumnKind> = Vec::with_capacity(kinds.len());
+        for key in saved {
+            if let Some(kind) = QueueColumnKind::from_key(key)
+                && kinds.contains(&kind)
+                && !order.contains(&kind)
+            {
+                order.push(kind);
+            }
+        }
+        for &kind in kinds {
+            if !order.contains(&kind) {
+                order.push(kind);
+            }
+        }
+        self.tab_mut(filter).order = order;
+    }
+
+    /// 저장된 숨김을 되살린다 — 고정 열과 그 탭에 없는 열은 무시한다
+    pub fn apply_saved_hidden(&mut self, filter: QueueFilter, saved: &[String]) {
+        let kinds = columns_for(filter);
+        let mut hidden: Vec<QueueColumnKind> = Vec::new();
+        for key in saved {
+            if let Some(kind) = QueueColumnKind::from_key(key)
+                && kinds.contains(&kind)
+                && !kind.is_fixed()
+                && !hidden.contains(&kind)
+            {
+                hidden.push(kind);
+            }
+        }
+        self.tab_mut(filter).hidden = hidden;
+    }
+
+    /// 그 탭에 그릴 열 — 차례대로, 숨긴 것을 뺀다
+    pub fn visible(&self, filter: QueueFilter) -> Vec<QueueColumnKind> {
+        self.tab(filter).visible()
+    }
+
+    /// 열을 끄고 켠다 — **고정 열에는 아무 일도 하지 않는다**
+    pub fn toggle(&mut self, filter: QueueFilter, kind: QueueColumnKind) {
+        if kind.is_fixed() || !columns_for(filter).contains(&kind) {
+            return;
+        }
+        let hidden = &mut self.tab_mut(filter).hidden;
+        if let Some(at) = hidden.iter().position(|k| *k == kind) {
+            hidden.remove(at);
+        } else {
+            hidden.push(kind);
+        }
+    }
+
+    /// 보이는 열 `from`번째를 `to`번째 자리로 옮긴다 (화면상 자리 기준).
+    ///
+    /// **숨긴 열은 제자리에 남는다** — 차례는 전체 목록이 들고 있고 여기서는 보이는 것끼리만
+    /// 자리를 바꾸므로, 숨긴 열을 다시 켜면 종전 이웃 사이로 돌아온다
+    pub fn reorder(&mut self, filter: QueueFilter, from: usize, to: usize) {
+        let visible = self.visible(filter);
+        let (Some(&moving), Some(&target)) = (visible.get(from), visible.get(to)) else {
+            return;
+        };
+        if moving == target {
+            return;
+        }
+        let order = &mut self.tab_mut(filter).order;
+        let (Some(at), Some(mut dest)) = (
+            order.iter().position(|k| *k == moving),
+            order.iter().position(|k| *k == target),
+        ) else {
+            return;
+        };
+        order.remove(at);
+        if at < dest {
+            dest -= 1;
+        }
+        order.insert(dest, moving);
+    }
+
+    fn tab(&self, filter: QueueFilter) -> &TabColumns {
         match filter {
             QueueFilter::All => &self.all,
             QueueFilter::Done => &self.done,
@@ -620,7 +768,7 @@ impl QueueColumns {
         }
     }
 
-    fn widths_mut(&mut self, filter: QueueFilter) -> &mut Vec<f32> {
+    fn tab_mut(&mut self, filter: QueueFilter) -> &mut TabColumns {
         match filter {
             QueueFilter::All => &mut self.all,
             QueueFilter::Done => &mut self.done,
@@ -632,7 +780,12 @@ impl QueueColumns {
     /// 늘리는 것은 표시뿐이며 저장 폭은 그대로다 — 창 크기를 바꿀 때마다 사용자가 정한
     /// 폭이 덮어써지면 안 된다
     fn effective(&self, filter: QueueFilter, total: f32) -> Vec<f32> {
-        let mut widths = self.widths(filter).to_vec();
+        let tab = self.tab(filter);
+        let mut widths: Vec<f32> = tab
+            .visible()
+            .iter()
+            .map(|kind| tab.widths[kind.slot()])
+            .collect();
         let slack = total - widths.iter().sum::<f32>();
         if slack > 0.0
             && let Some(last) = widths.last_mut()
@@ -644,30 +797,30 @@ impl QueueColumns {
 
     /// 경계 드래그 — 그 **왼쪽 열**의 폭을 바꾼다. 최소 폭 아래로는 줄지 않는다.
     ///
-    /// 마지막 열의 오른쪽에는 핸들이 없어 그 열의 저장 폭은 여기서 바뀌지 않는다
+    /// `slot`은 **화면상 자리**다(숨긴 열을 뺀 차례). 마지막 열의 오른쪽에는 핸들이 없어
+    /// 그 열의 저장 폭은 여기서 바뀌지 않는다
     fn apply_drag(&mut self, filter: QueueFilter, slot: usize, delta: f32) {
-        let Some(kind) = columns_for(filter).get(slot).copied() else {
+        let Some(kind) = self.visible(filter).get(slot).copied() else {
             return;
         };
         let floor = min_column_width(kind);
-        if let Some(width) = self.widths_mut(filter).get_mut(slot) {
-            *width = (*width + delta).max(floor);
-        }
+        let width = &mut self.tab_mut(filter).widths[kind.slot()];
+        *width = (*width + delta).max(floor);
     }
 }
 
-/// 저장된 한 벌을 그 탭의 열 수에 맞춰 되살린다
-fn restore_widths(filter: QueueFilter, saved: &[f32]) -> Vec<f32> {
-    let kinds = columns_for(filter);
-    let mut widths = default_widths(filter);
-    for (slot, (width, &value)) in widths.iter_mut().zip(saved).enumerate() {
-        if value.is_finite()
-            && let Some(kind) = kinds.get(slot).copied()
-        {
-            *width = value.max(min_column_width(kind));
+/// 저장된 한 벌을 되살린다 — **그 탭의 기본 차례로 읽어 각 열의 고정 자리에 넣는다**.
+///
+/// **앞에서부터 있는 만큼만 받는다** — 열 수가 달라진 옛 세션이 와도 나머지는 기본값이다.
+/// 유한하지 않은 값은 그 자리만 되돌린다(설정 파일이 손상돼도 표를 못 그리지 않게)
+fn restore_widths(filter: QueueFilter, saved: &[f32]) -> TabColumns {
+    let mut tab = TabColumns::new(filter);
+    for (kind, &value) in columns_for(filter).iter().zip(saved) {
+        if value.is_finite() {
+            tab.widths[kind.slot()] = value.max(min_column_width(*kind));
         }
     }
-    widths
+    tab
 }
 
 /// 큐 표를 그린다 (인벤토리 #35~#48)
@@ -1286,6 +1439,140 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn 차례를_바꿔도_각_열이_자기_폭을_지킨다() {
+        // D2의 핵심 — 폭이 탭 안의 차례가 아니라 종류에 매여 있어야 한다.
+        // 차례로 들면 `서버`를 넓힌 뒤 순서를 바꿨을 때 그 폭이 남의 열로 간다
+        let mut columns = QueueColumns::default();
+        let 서버자리 = columns
+            .visible(QueueFilter::All)
+            .iter()
+            .position(|k| *k == QueueColumnKind::Server)
+            .expect("서버 열");
+        columns.apply_drag(QueueFilter::All, 서버자리, 60.0);
+        let 넓힌폭 = columns.to_saved(QueueFilter::All)[QueueColumnKind::Server.slot()];
+        assert_eq!(넓힌폭, 120.0 + 60.0);
+
+        // `서버`를 맨 앞으로 옮긴다
+        columns.reorder(QueueFilter::All, 서버자리, 0);
+        assert_eq!(
+            columns.visible(QueueFilter::All)[0],
+            QueueColumnKind::Server
+        );
+        assert_eq!(
+            columns.to_saved(QueueFilter::All)[QueueColumnKind::Server.slot()],
+            넓힌폭,
+            "차례를 바꿨더니 폭이 남의 자리로 갔다"
+        );
+    }
+
+    #[test]
+    fn 고정_열은_꺼지지_않는다() {
+        // G2 — `toggle`이 유일한 끄기 경로이므로 여기서 막으면 어디서도 꺼지지 않는다
+        let mut columns = QueueColumns::default();
+        let 원래 = columns.visible(QueueFilter::All);
+        for kind in [
+            QueueColumnKind::Direction,
+            QueueColumnKind::Local,
+            QueueColumnKind::Remote,
+        ] {
+            columns.toggle(QueueFilter::All, kind);
+        }
+        assert_eq!(columns.visible(QueueFilter::All), 원래, "고정 열이 꺼졌다");
+
+        // 끌 수 있는 열은 꺼지고 다시 켜진다
+        columns.toggle(QueueFilter::All, QueueColumnKind::Server);
+        assert!(
+            !columns
+                .visible(QueueFilter::All)
+                .contains(&QueueColumnKind::Server)
+        );
+        columns.toggle(QueueFilter::All, QueueColumnKind::Server);
+        assert_eq!(columns.visible(QueueFilter::All), 원래);
+    }
+
+    #[test]
+    fn 탭마다_열_배치를_따로_기억한다() {
+        // D1 — 폭과 같은 이유다. 한 탭에서 바꾼 것이 다른 탭을 흔들면 안 된다
+        let mut columns = QueueColumns::default();
+        let 원래_전송큐 = columns.visible(QueueFilter::All);
+        let 원래_실패 = columns.visible(QueueFilter::Error);
+
+        columns.toggle(QueueFilter::Done, QueueColumnKind::Server);
+        columns.reorder(QueueFilter::Done, 0, 2);
+
+        assert_eq!(columns.visible(QueueFilter::All), 원래_전송큐);
+        assert_eq!(columns.visible(QueueFilter::Error), 원래_실패);
+        assert!(
+            !columns
+                .visible(QueueFilter::Done)
+                .contains(&QueueColumnKind::Server)
+        );
+    }
+
+    #[test]
+    fn 숨긴_열은_제자리로_돌아온다() {
+        // 차례는 전체 목록이 들고 보이는 것끼리만 자리를 바꾸므로, 다시 켜면 종전 이웃 사이다
+        let mut columns = QueueColumns::default();
+        let 원래 = columns.visible(QueueFilter::All);
+        columns.toggle(QueueFilter::All, QueueColumnKind::Size);
+        columns.toggle(QueueFilter::All, QueueColumnKind::Size);
+        assert_eq!(columns.visible(QueueFilter::All), 원래);
+    }
+
+    #[test]
+    fn 보이는_열은_그_탭의_것뿐이다() {
+        // `visible`이 탭 밖의 열을 내면 그리는 쪽이 값이 없는 칸을 그린다
+        for filter in [QueueFilter::All, QueueFilter::Done, QueueFilter::Error] {
+            let columns = QueueColumns::default();
+            let mut 보이는 = columns.visible(filter);
+            let mut 기대 = columns_for(filter).to_vec();
+            assert_eq!(보이는.len(), 기대.len());
+            보이는.sort_by_key(|k| k.slot());
+            기대.sort_by_key(|k| k.slot());
+            assert_eq!(보이는, 기대, "{filter:?} 탭의 열 구성이 어긋난다");
+        }
+    }
+
+    #[test]
+    fn 저장된_배치가_모르는_키와_빠진_키를_견딘다() {
+        // 열이 늘거나 준 판으로 갈아타도 목록이 못 그려지지 않아야 한다
+        let mut columns = QueueColumns::default();
+        columns.apply_saved_order(
+            QueueFilter::All,
+            &[
+                "없는열".to_owned(),
+                QueueColumnKind::State.as_key().to_owned(),
+                // 그 탭에 없는 열은 버린다 — `이유`는 실패 탭 전용이다
+                QueueColumnKind::Reason.as_key().to_owned(),
+                QueueColumnKind::State.as_key().to_owned(), // 중복도 버린다
+            ],
+        );
+        let 차례 = columns.visible(QueueFilter::All);
+        assert_eq!(차례[0], QueueColumnKind::State, "적힌 열이 앞에 서야 한다");
+        assert_eq!(
+            차례.len(),
+            columns_for(QueueFilter::All).len(),
+            "빠진 열이 뒤에 채워지지 않았다"
+        );
+        assert!(!차례.contains(&QueueColumnKind::Reason));
+
+        // 고정 열은 숨김 목록에 적혀 있어도 무시된다
+        columns.apply_saved_hidden(
+            QueueFilter::All,
+            &[
+                QueueColumnKind::Local.as_key().to_owned(),
+                QueueColumnKind::Server.as_key().to_owned(),
+            ],
+        );
+        let 보이는 = columns.visible(QueueFilter::All);
+        assert!(
+            보이는.contains(&QueueColumnKind::Local),
+            "고정 열이 숨겨졌다"
+        );
+        assert!(!보이는.contains(&QueueColumnKind::Server));
     }
 
     #[test]
