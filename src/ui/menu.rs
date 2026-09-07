@@ -651,10 +651,7 @@ mod tests {
     use super::*;
 
     /// 큐 열 메뉴를 한 프레임 그리고, 그려진 줄의 글자를 차례대로 모은다
-    fn 큐_열_메뉴_줄들(
-        kinds: &[QueueColumnKind],
-        hidden: &[QueueColumnKind],
-    ) -> (Vec<String>, egui::Context) {
+    fn 큐_열_메뉴_줄들(kinds: &[QueueColumnKind], hidden: &[QueueColumnKind]) -> Vec<String> {
         let ctx = egui::Context::default();
         let output = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
@@ -668,24 +665,24 @@ mod tests {
                 줄.push(text.galley.text().to_owned());
             }
         }
-        (줄, ctx)
+        줄
     }
 
     #[test]
-    fn 끈_열도_메뉴에_남아_다시_켤_수_있다() {
-        // **2026-09-07 완료 리뷰가 잡은 결함** — 메뉴에 `visible`(보이는 열)을 넘기고 있어
-        // 끈 열이 목록에서 사라졌고, 그 상태가 세션에 저장되므로 **재시작해도 되살릴 길이
-        // 없었다**. 메뉴는 언제나 **그 탭의 전체 후보**를 받아야 한다
+    fn 받은_후보는_끈_열까지_모두_줄로_그린다() {
+        // **재는 것은 「받은 목록을 전부 그린다」까지다** — 넘기는 쪽(`queue_column_menu_popup`이
+        // `columns_for`를 쓰는가)은 팝업을 열어야 지나므로 여기서 재지 못한다(대장 등재).
+        // 2026-09-07 완료 리뷰가 잡은 결함은 그 넘기는 쪽이었다
         let _guard =
             crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
         let kinds = crate::ui::queue_panel::columns_for(crate::remote::queue::QueueFilter::All);
-        let (켜진_채, _ctx) = 큐_열_메뉴_줄들(kinds, &[]);
+        let 켜진_채 = 큐_열_메뉴_줄들(kinds, &[]);
         assert!(
             켜진_채.iter().any(|줄| 줄.contains("서버")),
             "끄기 전에는 서버 줄이 있어야 한다 — 이 시험이 아무것도 보지 않는다"
         );
 
-        let (끈_뒤, _ctx) = 큐_열_메뉴_줄들(kinds, &[QueueColumnKind::Server]);
+        let 끈_뒤 = 큐_열_메뉴_줄들(kinds, &[QueueColumnKind::Server]);
         assert!(
             끈_뒤.iter().any(|줄| 줄.contains("서버")),
             "끈 열이 메뉴에서 사라져 다시 켤 수 없다"
@@ -705,7 +702,7 @@ mod tests {
             crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
         let kinds = crate::ui::queue_panel::columns_for(crate::remote::queue::QueueFilter::All);
         let 체크수 = |hidden: &[QueueColumnKind]| {
-            let (줄, _ctx) = 큐_열_메뉴_줄들(kinds, hidden);
+            let 줄 = 큐_열_메뉴_줄들(kinds, hidden);
             줄.iter()
                 .filter(|줄| 줄.contains(egui_phosphor::regular::CHECK))
                 .count()
