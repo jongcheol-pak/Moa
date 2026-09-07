@@ -106,7 +106,79 @@ impl QueueColumnKind {
             QueueColumnKind::Reason => 220.0,
         }
     }
+
+    /// 세션에 담는 키 (FR-11) — `list_details::ColumnKind::as_key`와 같은 방식이다.
+    ///
+    /// **숫자가 아니라 문자열인 이유**: 열이 늘거나 `ALL_QUEUE_COLUMNS`의 차례가 바뀌면
+    /// 숫자는 값이 밀려 옛 파일이 엉뚱한 열을 가리킨다
+    pub fn as_key(self) -> &'static str {
+        match self {
+            QueueColumnKind::Direction => "direction",
+            QueueColumnKind::Local => "local",
+            QueueColumnKind::Remote => "remote",
+            QueueColumnKind::Server => "server",
+            QueueColumnKind::Size => "size",
+            QueueColumnKind::Progress => "progress",
+            QueueColumnKind::State => "state",
+            QueueColumnKind::Time => "time",
+            QueueColumnKind::Reason => "reason",
+        }
+    }
+
+    /// 저장 키를 되읽는다 — 모르는 키는 `None`이라 그 자리를 버린다
+    fn from_key(key: &str) -> Option<QueueColumnKind> {
+        ALL_QUEUE_COLUMNS
+            .into_iter()
+            .find(|kind| kind.as_key() == key)
+    }
+
+    /// 끌 수 없는 열인가 — `방향`·`로컬`·`원격`은 열 메뉴에서 **항상 체크된 채 비활성**이다.
+    ///
+    /// 그 셋이 빠지면 「무엇을 어디서 어디로 옮기는가」가 사라져 행이 읽히지 않는다
+    /// (2026-09-07 사용자 결정 — `list_details::ColumnKind::is_fixed`가 `이름`에 대해 하는
+    /// 판단과 같은 성질이다)
+    pub fn is_fixed(self) -> bool {
+        matches!(
+            self,
+            QueueColumnKind::Direction | QueueColumnKind::Local | QueueColumnKind::Remote
+        )
+    }
+
+    /// 폭 배열에서의 자리 — **탭 안의 차례가 아니라 종류에 매인 고정 자리다**.
+    ///
+    /// 차례를 바꿔도 각 열이 자기 폭을 그대로 갖게 하는 근거다
+    /// (`list_details::ColumnKind::slot`과 같은 규칙)
+    fn slot(self) -> usize {
+        match self {
+            QueueColumnKind::Direction => 0,
+            QueueColumnKind::Local => 1,
+            QueueColumnKind::Remote => 2,
+            QueueColumnKind::Server => 3,
+            QueueColumnKind::Size => 4,
+            QueueColumnKind::Progress => 5,
+            QueueColumnKind::State => 6,
+            QueueColumnKind::Time => 7,
+            QueueColumnKind::Reason => 8,
+        }
+    }
 }
+
+/// 큐 열 전부 — 폭 배열의 자리 수와 저장 키 되읽기의 후보 목록이다.
+/// **차례는 `slot()`과 같아야 한다** (시험이 고정한다)
+pub const ALL_QUEUE_COLUMNS: [QueueColumnKind; QUEUE_COLUMN_COUNT] = [
+    QueueColumnKind::Direction,
+    QueueColumnKind::Local,
+    QueueColumnKind::Remote,
+    QueueColumnKind::Server,
+    QueueColumnKind::Size,
+    QueueColumnKind::Progress,
+    QueueColumnKind::State,
+    QueueColumnKind::Time,
+    QueueColumnKind::Reason,
+];
+
+/// 큐 열의 가짓수 — 폭 배열의 길이다
+pub const QUEUE_COLUMN_COUNT: usize = 9;
 
 // **앞 다섯 열은 세 탭이 함께 쓴다** — 무엇을 어디로 옮기는가는 어느 탭에서 보든 같다.
 // 그 다섯을 상수로 빼 이어붙이지 않는 것은 const 문맥에서 배열을 잇는 길이 마땅치 않아서다.
@@ -1153,6 +1225,68 @@ mod tests {
     use crate::remote::queue::TransferQueue;
     use crate::remote::types::RemotePath;
     use std::path::PathBuf;
+
+    #[test]
+    fn 열_저장_키가_왕복한다() {
+        // 키가 갈리지 않으면 두 열이 같은 자리를 가리켜 순서·숨김이 뒤섞인다
+        let mut keys: Vec<&str> = ALL_QUEUE_COLUMNS.iter().map(|k| k.as_key()).collect();
+        keys.sort_unstable();
+        let 원래수 = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), 원래수, "키가 겹치는 열이 있다");
+
+        for kind in ALL_QUEUE_COLUMNS {
+            assert_eq!(
+                QueueColumnKind::from_key(kind.as_key()),
+                Some(kind),
+                "{}이 왕복하지 않는다",
+                kind.as_key()
+            );
+        }
+        assert_eq!(QueueColumnKind::from_key("없는열"), None);
+        assert_eq!(QueueColumnKind::from_key(""), None);
+    }
+
+    #[test]
+    fn 방향_로컬_원격만_끌_수_없다() {
+        // 그 셋이 빠지면 「무엇을 어디서 어디로」가 사라진다 (2026-09-07 사용자 결정)
+        let 고정: Vec<QueueColumnKind> = ALL_QUEUE_COLUMNS
+            .into_iter()
+            .filter(|k| k.is_fixed())
+            .collect();
+        assert_eq!(
+            고정,
+            vec![
+                QueueColumnKind::Direction,
+                QueueColumnKind::Local,
+                QueueColumnKind::Remote
+            ]
+        );
+    }
+
+    #[test]
+    fn 열_자리가_전체_목록의_차례와_같다() {
+        // `slot()`이 폭 배열의 색인이고 `ALL_QUEUE_COLUMNS`가 그 길이를 정한다 —
+        // 둘이 어긋나면 폭이 남의 열로 간다
+        for (index, kind) in ALL_QUEUE_COLUMNS.into_iter().enumerate() {
+            assert_eq!(kind.slot(), index, "{}의 자리가 어긋난다", kind.as_key());
+        }
+        assert_eq!(ALL_QUEUE_COLUMNS.len(), QUEUE_COLUMN_COUNT);
+    }
+
+    #[test]
+    fn 탭별_열은_전부_전체_목록에_있다() {
+        // 탭 구성에 전체 목록 밖의 열이 들어오면 그 열은 폭도 저장 자리도 갖지 못한다
+        for filter in [QueueFilter::All, QueueFilter::Done, QueueFilter::Error] {
+            for kind in columns_for(filter) {
+                assert!(
+                    ALL_QUEUE_COLUMNS.contains(kind),
+                    "{}이 전체 목록에 없다",
+                    kind.as_key()
+                );
+            }
+        }
+    }
 
     #[test]
     fn 표_치수는_원본과_같다() {
