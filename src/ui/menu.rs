@@ -650,6 +650,75 @@ pub(crate) fn menu_frame_pad(style: &egui::Style) -> egui::Vec2 {
 mod tests {
     use super::*;
 
+    /// 큐 열 메뉴를 한 프레임 그리고, 그려진 줄의 글자를 차례대로 모은다
+    fn 큐_열_메뉴_줄들(
+        kinds: &[QueueColumnKind],
+        hidden: &[QueueColumnKind],
+    ) -> (Vec<String>, egui::Context) {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let mut out = None;
+                queue_column_menu_items(ui, kinds, hidden, &mut out);
+            });
+        });
+        let mut 줄 = Vec::new();
+        for clipped in &output.shapes {
+            if let egui::Shape::Text(text) = &clipped.shape {
+                줄.push(text.galley.text().to_owned());
+            }
+        }
+        (줄, ctx)
+    }
+
+    #[test]
+    fn 끈_열도_메뉴에_남아_다시_켤_수_있다() {
+        // **2026-09-07 완료 리뷰가 잡은 결함** — 메뉴에 `visible`(보이는 열)을 넘기고 있어
+        // 끈 열이 목록에서 사라졌고, 그 상태가 세션에 저장되므로 **재시작해도 되살릴 길이
+        // 없었다**. 메뉴는 언제나 **그 탭의 전체 후보**를 받아야 한다
+        let _guard =
+            crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+        let kinds = crate::ui::queue_panel::columns_for(crate::remote::queue::QueueFilter::All);
+        let (켜진_채, _ctx) = 큐_열_메뉴_줄들(kinds, &[]);
+        assert!(
+            켜진_채.iter().any(|줄| 줄.contains("서버")),
+            "끄기 전에는 서버 줄이 있어야 한다 — 이 시험이 아무것도 보지 않는다"
+        );
+
+        let (끈_뒤, _ctx) = 큐_열_메뉴_줄들(kinds, &[QueueColumnKind::Server]);
+        assert!(
+            끈_뒤.iter().any(|줄| 줄.contains("서버")),
+            "끈 열이 메뉴에서 사라져 다시 켤 수 없다"
+        );
+        assert_eq!(
+            끈_뒤.len(),
+            켜진_채.len(),
+            "끄고 켜도 메뉴 줄 수는 그대로다"
+        );
+    }
+
+    #[test]
+    fn 큐_열_메뉴는_켜진_열에만_체크를_붙인다() {
+        // 체크 글리프가 켜짐/꺼짐을 가르는 유일한 표시다 — 그것이 안 갈리면
+        // 사용자가 지금 무엇이 켜져 있는지 알 수 없다
+        let _guard =
+            crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+        let kinds = crate::ui::queue_panel::columns_for(crate::remote::queue::QueueFilter::All);
+        let 체크수 = |hidden: &[QueueColumnKind]| {
+            let (줄, _ctx) = 큐_열_메뉴_줄들(kinds, hidden);
+            줄.iter()
+                .filter(|줄| 줄.contains(egui_phosphor::regular::CHECK))
+                .count()
+        };
+        let 전부켜짐 = 체크수(&[]);
+        assert_eq!(전부켜짐, kinds.len(), "켜진 열마다 체크가 있어야 한다");
+        assert_eq!(
+            체크수(&[QueueColumnKind::Server]),
+            전부켜짐 - 1,
+            "끈 열의 체크가 빠지지 않았다"
+        );
+    }
+
     #[test]
     fn 여백은_스타일에서_테두리는_앱_상수에서_읽는다() {
         // 안쪽 여백은 `Frame::menu`가 스타일에서 읽어 가는 값이고, 테두리는 세 메뉴가

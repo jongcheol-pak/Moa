@@ -1123,8 +1123,12 @@ fn show_header(
         left += widths.get(index).copied().unwrap_or_default();
     }
 
-    // 이번 프레임에 놓인 열 — 고리를 다 돈 뒤에 반영한다(고리 안에서 `columns`를 바꾸면
-    // 이미 계산해 둔 `widths`·`offsets`와 어긋난 채로 나머지 열을 그리게 된다)
+    // 이번 프레임에 **놓인** 열 — 고리를 다 돈 뒤에 반영한다(고리 안에서 차례를 바꾸면
+    // 이미 계산해 둔 `widths`·`offsets`와 어긋난 채로 나머지 열을 그리게 된다).
+    //
+    // **열 메뉴의 끄고 켜기는 이 규칙 밖이다** — `queue_column_menu_popup`이 고른 즉시
+    // `columns`를 고친다. 그래도 안전한 이유는 이번 프레임이 쓰는 `kinds`·`widths`가 이미
+    // 떠 온 지역 사본이라 화면이 갈리지 않고, 바뀐 결과는 다음 프레임이 받기 때문이다
     let mut dropped: Option<(usize, usize)> = None;
     let mut reorder_guide = None;
     for (slot, kind) in kinds.iter().enumerate() {
@@ -1157,7 +1161,7 @@ fn show_header(
                 dropped = Some((slot, target));
             }
         }
-        queue_column_menu_popup(&resp, kinds, columns, filter);
+        queue_column_menu_popup(&resp, columns, filter);
         ui.painter().text(
             egui::pos2(offsets[slot] + CELL_PAD_X, rect.center().y),
             egui::Align2::LEFT_CENTER,
@@ -1225,6 +1229,19 @@ fn slot_at_x(offsets: &[f32], widths: &[f32], x: f32) -> Option<usize> {
     })
 }
 
+/// 열 메뉴에 세울 후보 — **그 탭의 전체 열이지 「보이는 열」이 아니다**.
+///
+/// **이 구분이 이 기능의 급소다**: 보이는 것만 넘기면 끈 열이 메뉴에서 사라져 **다시 켤 길이
+/// 없어지고**, 그 상태가 세션에 저장되므로 재시작해도 돌아오지 않는다(2026-09-07 완료 리뷰가
+/// 실제로 그 결함을 잡았다). 파일 목록 쪽 열 메뉴도 같은 이유로 `ALL_COLUMNS` 전체를 돈다.
+///
+/// **`columns_for`를 그대로 부르지 않고 이름을 붙인 이유는 배선을 잴 수 있게 하려는 것이다** —
+/// 팝업은 우클릭이 있어야 열려 시험에서 재현할 수 없으므로, 넘길 목록을 고르는 판단만
+/// 떼어 두고 그 자리를 시험이 잡는다
+fn menu_candidates(filter: QueueFilter) -> &'static [QueueColumnKind] {
+    columns_for(filter)
+}
+
 /// 머리글 우클릭 — 열을 끄고 켠다 (FR-36).
 ///
 /// 고른 열은 그 자리에서 반영한다 — `list_details`가 결과를 `DetailsOutcome`으로 올려
@@ -1232,11 +1249,11 @@ fn slot_at_x(offsets: &[f32], widths: &[f32], x: f32) -> Option<usize> {
 /// 이유가 없다
 fn queue_column_menu_popup(
     response: &egui::Response,
-    kinds: &[QueueColumnKind],
     columns: &mut QueueColumns,
     filter: QueueFilter,
 ) {
     let mut toggled = None;
+    let kinds = menu_candidates(filter);
     let hidden = columns.hidden_kinds(filter);
     egui::Popup::context_menu(response).show(|ui| {
         theme::menu_style(ui);
@@ -1701,6 +1718,34 @@ mod tests {
     }
 
     #[test]
+    fn 열_메뉴에는_끈_열도_후보로_선다() {
+        // **2026-09-07 완료 리뷰가 잡은 결함** — 메뉴에 `visible`(보이는 열)을 넘기고 있어
+        // 끈 열이 목록에서 사라졌고, 그 상태가 세션에 저장되므로 **재시작해도 되살릴 길이
+        // 없었다**. 팝업은 우클릭이 있어야 열려 시험에서 재현할 수 없으므로,
+        // **넘길 목록을 고르는 판단(`menu_candidates`)만 떼어 여기서 잡는다**
+        let mut columns = QueueColumns::default();
+        columns.toggle(QueueFilter::All, QueueColumnKind::Server);
+        assert!(
+            !columns
+                .visible(QueueFilter::All)
+                .contains(&QueueColumnKind::Server),
+            "끄기가 먹지 않았다 — 이 시험이 아무것도 보지 않는다"
+        );
+        assert!(
+            menu_candidates(QueueFilter::All).contains(&QueueColumnKind::Server),
+            "끈 열이 메뉴 후보에서 빠졌다 — 다시 켤 길이 없어진다"
+        );
+        // 세 탭 모두 그 탭의 전체 열을 후보로 낸다
+        for filter in [QueueFilter::All, QueueFilter::Done, QueueFilter::Error] {
+            assert_eq!(
+                menu_candidates(filter),
+                columns_for(filter),
+                "{filter:?} 탭의 메뉴 후보가 전체 열과 다르다"
+            );
+        }
+    }
+
+    #[test]
     fn 끈_열의_머리글은_그려지지_않는다() {
         let _guard =
             crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
@@ -1712,7 +1757,7 @@ mod tests {
         columns.toggle(QueueFilter::All, QueueColumnKind::Server);
         assert!(
             !머리글_문구들(&mut columns, QueueFilter::All).contains(&"서버".to_owned()),
-            "끈 열의 머리글이 그대로 그려진다 — `show_queue`가 `visible`을 쓰지 않는다"
+            "끈 열의 머리글이 그대로 그려진다 — `show_header`가 받은 목록을 그리지 않는다"
         );
     }
 
