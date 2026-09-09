@@ -93,40 +93,6 @@ impl DriveList {
     }
 }
 
-/// 드라이브 구성이 바뀌었는지 좇는다 — 논리 드라이브 비트마스크만 들고 있다
-/// (2026-09-09 사용자 요청: USB를 꽂으면 트리에 곧바로 서야 한다).
-///
-/// **마스크만 보는 이유는 그것이 값싸기 때문이다** — 목록을 만들려면 드라이브마다 셸
-/// 표시 이름·아이콘을 물어야 하는데, 그것을 매초 하면 감시가 감시 대상보다 비싸진다.
-/// 비트 하나가 드라이브 문자 하나이므로 꽂힘·빠짐은 이 값의 변화로 그대로 드러난다.
-///
-/// **드라이브 문자가 그대로인 변화는 잡지 못한다** — 볼륨 레이블 변경, 문자가 이미 있는
-/// 광학 드라이브의 디스크 삽입, 네트워크 드라이브 재연결. 그것들은 주기 확인(FR-67)이
-/// 종전대로 덮는다
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DriveWatch {
-    last: u32,
-}
-
-impl DriveWatch {
-    /// **지금 구성을 기준선으로 삼아** 시작한다.
-    ///
-    /// 0으로 시작하지 않는 이유는 그러면 첫 확인이 언제나 「바뀌었다」가 되기 때문이다 —
-    /// 앱이 뜰 때 이미 목록을 만든 직후라, 그 조회가 한 번 헛되이 더 돈다
-    pub fn new(mask: u32) -> Self {
-        Self { last: mask }
-    }
-
-    /// 이번에 읽은 마스크를 넣는다 — 직전과 다르면 참이고, 기준선이 그 값으로 옮겨간다.
-    ///
-    /// 참을 돌려준 뒤 같은 값이 다시 오면 거짓이다(변화는 한 번만 알린다)
-    pub fn observe(&mut self, mask: u32) -> bool {
-        let changed = mask != self.last;
-        self.last = mask;
-        changed
-    }
-}
-
 /// 이 경로가 속한 드라이브 뿌리 (`Z:\Docs\a.txt` → `Z:\`).
 ///
 /// 드라이브 문자가 없는 경로(UNC·상대 경로)는 `None`이다 — UNC 공유는 드라이브 줄로
@@ -272,42 +238,16 @@ mod tests {
     }
 
     #[test]
-    fn 시작_직후_같은_구성은_변화가_아니다() {
-        // D5 — 기준선을 지금 구성으로 잡는다. 0으로 시작하면 첫 확인이 늘 참이 되고,
-        // 앱이 뜰 때 이미 만든 목록을 한 번 더 만들게 된다
-        let mut watch = DriveWatch::new(0b1101);
-        assert!(!watch.observe(0b1101), "구성이 그대로인데 변화로 봤다");
-    }
-
-    #[test]
-    fn 드라이브가_늘면_변화다() {
-        // USB를 꽂는 경우 — 비트 하나가 선다
-        let mut watch = DriveWatch::new(0b0101);
-        assert!(watch.observe(0b1101), "드라이브가 늘었는데 알리지 않았다");
-    }
-
-    #[test]
-    fn 드라이브가_빠지면_변화다() {
-        // USB를 뽑는 경우 — 트리에서 줄이 사라져야 한다
-        let mut watch = DriveWatch::new(0b1101);
-        assert!(watch.observe(0b0101), "드라이브가 빠졌는데 알리지 않았다");
-    }
-
-    #[test]
-    fn 변화는_한_번만_알린다() {
-        // 알린 뒤 기준선이 새 값으로 옮겨간다 — 그러지 않으면 꽂은 뒤로 매초 목록을 만든다
-        let mut watch = DriveWatch::new(0b0101);
-        assert!(watch.observe(0b1101));
-        assert!(!watch.observe(0b1101), "같은 구성을 두 번 알렸다");
-    }
-
-    #[test]
     fn 목록만_새로_와도_끊김_배지가_이어진다() {
         // T1 Acceptance — 감시 워커는 접근 판정을 하지 않는다. `replace`를 쓰면 이 자리에서
         // 배지가 사라졌다가 다음 주기 확인(30초)에야 돌아온다
         let mut drives = list();
         drives.apply_reachable(&[(PathBuf::from(r"Z:\"), false)]);
-        drives.refresh(vec![row(r"C:\", false), row(r"D:\", false), row(r"Z:\", true)]);
+        drives.refresh(vec![
+            row(r"C:\", false),
+            row(r"D:\", false),
+            row(r"Z:\", true),
+        ]);
         let z = drives
             .rows()
             .iter()
@@ -321,7 +261,11 @@ mod tests {
     fn 새로_나타난_드라이브에는_배지가_없다() {
         // 판정한 적이 없는 뿌리다 — 판정 전에는 배지를 두지 않는다(`list_drives`와 같은 규칙)
         let mut drives = list();
-        drives.refresh(vec![row(r"C:\", false), row(r"Z:\", true), row(r"E:\", true)]);
+        drives.refresh(vec![
+            row(r"C:\", false),
+            row(r"Z:\", true),
+            row(r"E:\", true),
+        ]);
         let e = drives
             .rows()
             .iter()

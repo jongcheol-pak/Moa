@@ -142,6 +142,101 @@ fn missing_favorites(paths: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
+/// 드라이브 구성이 바뀌었는지 좇는다 — 논리 드라이브 비트마스크만 들고 있다
+/// (2026-09-09 사용자 요청: USB를 꽂으면 트리에 곧바로 서야 한다).
+///
+/// **마스크만 보는 이유는 그것이 값싸기 때문이다** — 목록을 만들려면 드라이브마다 셸
+/// 표시 이름·아이콘을 물어야 하는데, 그것을 매초 하면 감시가 감시 대상보다 비싸진다.
+/// 비트 하나가 드라이브 문자 하나이므로 꽂힘·빠짐은 이 값의 변화로 그대로 드러난다.
+///
+/// **드라이브 문자가 그대로인 변화는 잡지 못한다** — 볼륨 레이블 변경, 문자가 이미 있는
+/// 광학 드라이브의 디스크 삽입, 네트워크 드라이브 재연결. 그것들은 주기 확인(FR-67)이
+/// 종전대로 덮는다
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DriveWatch {
+    last: u32,
+}
+
+impl DriveWatch {
+    /// **지금 구성을 기준선으로 삼아** 시작한다.
+    ///
+    /// 0으로 시작하지 않는 이유는 그러면 첫 확인이 언제나 「바뀌었다」가 되기 때문이다 —
+    /// 앱이 뜰 때 이미 목록을 만든 직후라, 그 조회가 한 번 헛되이 더 돈다
+    pub fn new(mask: u32) -> Self {
+        Self { last: mask }
+    }
+
+    /// 이번에 읽은 마스크를 넣는다 — 직전과 다르면 참이고, 기준선이 그 값으로 옮겨간다.
+    ///
+    /// 참을 돌려준 뒤 같은 값이 다시 오면 거짓이다(변화는 한 번만 알린다)
+    pub fn observe(&mut self, mask: u32) -> bool {
+        let changed = mask != self.last;
+        self.last = mask;
+        changed
+    }
+}
+
+/// 드라이브 구성을 얼마나 자주 살피는가 (2026-09-09 사용자 요청).
+///
+/// **1초인 이유는 이 확인이 값싸기 때문이다** — 한 바퀴에 하는 일이 `GetLogicalDrives()`
+/// 하나뿐이고, 값이 그대로면 목록도 만들지 않고 화면도 깨우지 않는다. 사용자가 USB를
+/// 꽂고 "바로"라고 느끼는 하한이기도 하다
+const WATCH_PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// 지금 이 PC의 논리 드라이브 비트마스크 — 비트 하나가 드라이브 문자 하나다
+fn drive_mask() -> u32 {
+    // 안전성: 인자 없는 조회 — 현재 드라이브 비트마스크만 반환한다
+    unsafe { GetLogicalDrives() }
+}
+
+/// 드라이브가 꽂히거나 빠지는 것을 지켜보다가 **목록만** 다시 만들어 보낸다 (FR-9).
+///
+/// **`spawn_scan`과 하는 일이 다르다** — 저쪽은 시작·30초 주기에 목록 + 접근 판정 +
+/// 즐겨찾기 실재를 한 벌로 확인하고 끝난다. 이쪽은 끝나지 않고 상주하며, 구성이 바뀐
+/// 순간에만 목록을 보낸다. **접근 판정을 함께 하지 않는 것이 요점이다** — 끊긴 네트워크
+/// 드라이브 하나가 2.8초를 물어(`is_reachable`), 함께 묶으면 USB가 그만큼 늦게 뜬다.
+///
+/// 그래서 `DriveScan`을 재사용하지 않고 목록만 보낸다 — 그 열거에는 *목록 → 판정 →
+/// 즐겨찾기* 순서와 "마지막 소식이 오면 통로를 놓는다"는 종료 규약이 걸려 있어,
+/// 끝나지 않는 이 워커가 쓰면 받는 쪽이 통로를 놓아 버린다.
+///
+/// **화면은 보낼 때만 깨운다** — 변화가 없는 바퀴에서 `request_repaint`를 부르면 이 앱이
+/// 유휴에 프레임을 돌리지 않는다는 전제가 무너져, 매초 깨는 것과 같아진다
+pub fn spawn_watch(ctx: &egui::Context) -> Receiver<Vec<DriveRow>> {
+    let (tx, rx) = channel();
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        // 셸 조회(`SHGetFileInfoW`)는 COM을 쓴다 — `spawn_scan`과 같은 이유로 초기화한다.
+        // 안전성: 이 스레드에서 열고 루프를 벗어난 뒤 반드시 닫는다
+        let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+        watch_into(&tx, &ctx);
+        if com {
+            // 안전성: 위에서 성공한 초기화와 짝을 맞춘다
+            unsafe { CoUninitialize() };
+        }
+    });
+    rx
+}
+
+/// 감시 워커 본체 — 받는 쪽이 사라지면(앱 종료) 조용히 멎는다.
+///
+/// **아이콘 캐시를 바깥에 두고 재사용한다** — 바퀴마다 새로 만들면 드라이브가 바뀔 때마다
+/// 셸 아이콘을 처음부터 다시 묻는다
+fn watch_into(tx: &Sender<Vec<DriveRow>>, ctx: &egui::Context) {
+    let mut icons = IconCache::new();
+    let mut watch = DriveWatch::new(drive_mask());
+    loop {
+        std::thread::sleep(WATCH_PERIOD);
+        if !watch.observe(drive_mask()) {
+            continue;
+        }
+        if tx.send(list_drives(&mut icons)).is_err() {
+            return;
+        }
+        ctx.request_repaint();
+    }
+}
+
 /// 이 PC의 논리 드라이브 목록 (`C:\`, `D:\` …).
 ///
 /// 비트마스크의 비트 순서가 곧 알파벳 순이라 따로 정렬하지 않는다.
@@ -195,6 +290,55 @@ pub fn is_reachable(root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 시작_직후_같은_구성은_변화가_아니다() {
+        // D5 — 기준선을 지금 구성으로 잡는다. 0으로 시작하면 첫 확인이 늘 참이 되고,
+        // 앱이 뜰 때 이미 만든 목록을 한 번 더 만들게 된다
+        let mut watch = DriveWatch::new(0b1101);
+        assert!(!watch.observe(0b1101), "구성이 그대로인데 변화로 봤다");
+    }
+
+    #[test]
+    fn 드라이브가_늘면_변화다() {
+        // USB를 꽂는 경우 — 비트 하나가 선다
+        let mut watch = DriveWatch::new(0b0101);
+        assert!(watch.observe(0b1101), "드라이브가 늘었는데 알리지 않았다");
+    }
+
+    #[test]
+    fn 드라이브가_빠지면_변화다() {
+        // USB를 뽑는 경우 — 트리에서 줄이 사라져야 한다
+        let mut watch = DriveWatch::new(0b1101);
+        assert!(watch.observe(0b0101), "드라이브가 빠졌는데 알리지 않았다");
+    }
+
+    #[test]
+    fn 변화는_한_번만_알린다() {
+        // 알린 뒤 기준선이 새 값으로 옮겨간다 — 그러지 않으면 꽂은 뒤로 매초 목록을 만든다
+        let mut watch = DriveWatch::new(0b0101);
+        assert!(watch.observe(0b1101));
+        assert!(!watch.observe(0b1101), "같은 구성을 두 번 알렸다");
+    }
+
+    #[test]
+    fn 구성이_그대로면_감시_워커는_아무것도_보내지_않는다() {
+        // T2 Acceptance — 매 바퀴 목록을 보내면 트리가 1초마다 갈아 끼워지고,
+        // `request_repaint`가 함께 돌아 유휴에도 프레임이 계속 돈다.
+        //
+        // **주기의 두 배를 기다린다** — 첫 sleep 시작 시점의 오차와 스레드 스케줄링
+        // 지연 때문에 1.5초에서는 워커가 아직 첫 순회를 마치지 않은 채 통과할 수 있다.
+        // 시험 도중 드라이브를 꽂지 않는 한 구성은 그대로다
+        let rx = spawn_watch(&egui::Context::default());
+        std::thread::sleep(WATCH_PERIOD * 2);
+        match rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                panic!("워커가 첫 바퀴에 죽었다")
+            }
+            Ok(rows) => panic!("구성이 그대로인데 목록 {}줄을 보냈다", rows.len()),
+        }
+    }
 
     #[test]
     fn 없는_즐겨찾기_경로만_골라낸다() {
