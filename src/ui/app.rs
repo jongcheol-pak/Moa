@@ -607,6 +607,12 @@ pub struct ExplorerApp {
     drives: DriveList,
     /// 그 워커의 결과를 받는 통로 — 목록과 접근 판정이 따로 도착한다
     drive_scan: Option<std::sync::mpsc::Receiver<crate::fs::drives::DriveScan>>,
+    /// 드라이브가 꽂히거나 빠진 것을 알려 오는 통로 (2026-09-09 사용자 요청).
+    ///
+    /// **`Option`이 아니다** — 위 `drive_scan`은 한 벌의 확인이 끝나면 통로를 놓지만,
+    /// 이쪽 워커는 앱이 사는 동안 계속 지켜보므로 놓을 시점이 없다.
+    /// 오는 것은 목록뿐이라 접근 판정은 종전대로 주기 확인(FR-67)이 채운다
+    drive_watch: std::sync::mpsc::Receiver<Vec<crate::fs::drives::DriveRow>>,
     /// 패널마다 마지막으로 **자동** 재조회한 시각 (FR-67) — 손으로 누른 새로 고침은 세지 않는다.
     /// 세션에 담지 않는다: 앱을 다시 켜면 첫 주기부터 새로 세는 것이 자연스럽다
     auto_refresh_at: HashMap<PanelId, f64>,
@@ -808,6 +814,9 @@ impl ExplorerApp {
             // 첫 시도에 2.8초까지 걸려(실측) UI 스레드에서는 할 수 없다 (T4)
             drives: DriveList::default(),
             drive_scan: Some(crate::fs::drives::spawn_scan(&cc.egui_ctx, first_watched)),
+            // 꽂히고 빠지는 것은 따로 지켜본다 — 30초 주기 확인만으로는 USB를 꽂고
+            // 그만큼 기다려야 트리에 선다(그 확인이 도는 중이면 더 밀린다)
+            drive_watch: crate::fs::drives::spawn_watch(&cc.egui_ctx),
             // 시작 확인이 곧 첫 확인이다 — 여기서 0으로 두면 그 확인이 끝나자마자
             // 주기가 지난 것으로 보여 한 번을 헛되이 더 띄운다
             last_rescan_at: 0.0,
@@ -1608,8 +1617,17 @@ impl ExplorerApp {
     /// 즐겨찾기 실재가 **언제나 마지막**이다. 마지막 소식을 받으면 통로를 놓는다.
     ///
     /// **한 번뿐인 조회가 아니다** — `pump_rescan`이 기본 틱마다 워커를 다시 띄운다(FR-67).
-    /// 그 사이의 상태 갱신은 사용자가 그 드라이브를 열어 볼 때 `DriveList::observe`가 한다
+    /// 그 사이의 상태 갱신은 사용자가 그 드라이브를 열어 볼 때 `DriveList::observe`가 한다.
+    ///
+    /// **통로가 둘이다** — 위의 것과 별개로 `drive_watch`가 드라이브의 꽂힘·빠짐을 알려 온다
+    /// (2026-09-09). 그쪽은 목록만 보내고 끝나지 않으므로 반영도 갈래도 다르다
     fn poll_drives(&mut self) {
+        // 꽂히고 빠지는 것을 지켜보는 워커가 보낸 목록 — **`refresh`로 반영한다**.
+        // `replace`를 쓰면 그 순간 끊긴 네트워크 드라이브의 X 배지가 사라졌다가
+        // 다음 주기 확인(30초)에야 돌아온다(`DriveList::refresh` doc)
+        while let Ok(rows) = self.drive_watch.try_recv() {
+            self.drives.refresh(rows);
+        }
         let Some(rx) = &self.drive_scan else {
             return;
         };
@@ -3130,6 +3148,31 @@ mod tests {
     /// README·PRD가 「손으로 누른 `다시 시도`는 그 횟수를 0으로 되돌린다」고 적은 것과
     /// 어긋나 있었다. 소스를 훑어 재는 이유는 `apply_queue_action`이 앱 상태 전체를 들고
     /// 있어 시험이 그것을 세울 수 없기 때문이다(이 레포의 규약 강제 시험과 같은 방식)
+    /// 드라이브 감시 워커가 보낸 목록이 **`refresh`로** 반영되는가 (2026-09-09).
+    ///
+    /// `replace`를 쓰면 그 순간 끊긴 네트워크 드라이브의 X 배지가 사라졌다가 다음 주기
+    /// 확인(30초)에야 돌아온다 — 사용자에게는 USB를 꽂을 때마다 배지가 깜빡이는 것으로 보인다.
+    /// 소스를 훑어 재는 이유는 `poll_drives`가 앱 상태 전체를 들고 있어 시험이 그것을 세울 수
+    /// 없기 때문이다(위 `행_메뉴_다시_시도는_전체와_같은_길을_쓴다`와 같은 방식)
+    #[test]
+    fn 드라이브_감시_결과는_배지를_지키는_길로_간다() {
+        let source = include_str!("app.rs");
+        let start = source
+            .find("self.drive_watch.try_recv()")
+            .expect("감시 채널을 읽는 자리를 찾지 못했다");
+        // **고정 길이로 자르지 않는다** — 그 갈래가 몇 바이트만 늘어도 경계가 한글 문자
+        // 안으로 들어가 무관한 수정이 이 시험을 깨뜨린다. 다음 갈래 머리까지로 자른다
+        let rest = &source[start..];
+        let end = rest
+            .find("let Some(rx) = &self.drive_scan")
+            .expect("다음 갈래를 찾지 못했다");
+        let arm = &rest[..end];
+        assert!(
+            arm.contains("self.drives.refresh("),
+            "감시 결과가 `refresh`를 거치지 않는다 — 꽂을 때마다 끊김 배지가 깜빡인다"
+        );
+    }
+
     #[test]
     fn 행_메뉴_다시_시도는_전체와_같은_길을_쓴다() {
         let source = include_str!("app.rs");
