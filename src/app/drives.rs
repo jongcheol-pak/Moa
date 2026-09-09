@@ -47,6 +47,31 @@ impl DriveList {
         }
     }
 
+    /// 목록만 새로 온 것을 반영한다 — **접근 판정이 뒤따르지 않는다**.
+    ///
+    /// `replace`와 가르는 것은 그 한 가지다. 저쪽은 시작·주기 확인의 첫 소식이라 곧
+    /// `apply_reachable`이 배지를 채우지만, 이쪽은 드라이브가 꽂히거나 빠졌을 때 감시
+    /// 워커가 목록만 보내는 길이라 판정이 오지 않는다. 그대로 `replace`를 쓰면 그 순간
+    /// **끊긴 네트워크 드라이브의 X 배지가 사라졌다가 다음 주기 확인(30초)에야 돌아온다**.
+    ///
+    /// 그래서 **같은 뿌리의 `offline`을 이어받는다** — 새로 나타난 뿌리는 판정한 적이
+    /// 없으므로 `false`이고(판정 전에는 배지를 두지 않는다), 목록에서 빠진 뿌리는
+    /// 그 줄과 함께 사라진다
+    pub fn refresh(&mut self, rows: Vec<DriveRow>) {
+        // 옛 목록을 먼저 꺼낸다 — 그러지 않으면 아래 대입이 `self.rows`를 빌린 채 덮는다
+        let old = std::mem::take(&mut self.rows);
+        self.rows = rows
+            .into_iter()
+            .map(|mut row| {
+                row.offline = old
+                    .iter()
+                    .find(|prev| same_root(&prev.path, &row.path))
+                    .is_some_and(|prev| prev.offline);
+                row
+            })
+            .collect();
+    }
+
     /// 사용자가 열어 본 결과 하나를 반영한다.
     ///
     /// **네트워크 드라이브만** 바꾼다 — 로컬 드라이브의 실패는 연결 문제가 아니라서
@@ -65,6 +90,40 @@ impl DriveList {
         {
             row.offline = !reachable;
         }
+    }
+}
+
+/// 드라이브 구성이 바뀌었는지 좇는다 — 논리 드라이브 비트마스크만 들고 있다
+/// (2026-09-09 사용자 요청: USB를 꽂으면 트리에 곧바로 서야 한다).
+///
+/// **마스크만 보는 이유는 그것이 값싸기 때문이다** — 목록을 만들려면 드라이브마다 셸
+/// 표시 이름·아이콘을 물어야 하는데, 그것을 매초 하면 감시가 감시 대상보다 비싸진다.
+/// 비트 하나가 드라이브 문자 하나이므로 꽂힘·빠짐은 이 값의 변화로 그대로 드러난다.
+///
+/// **드라이브 문자가 그대로인 변화는 잡지 못한다** — 볼륨 레이블 변경, 문자가 이미 있는
+/// 광학 드라이브의 디스크 삽입, 네트워크 드라이브 재연결. 그것들은 주기 확인(FR-67)이
+/// 종전대로 덮는다
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DriveWatch {
+    last: u32,
+}
+
+impl DriveWatch {
+    /// **지금 구성을 기준선으로 삼아** 시작한다.
+    ///
+    /// 0으로 시작하지 않는 이유는 그러면 첫 확인이 언제나 「바뀌었다」가 되기 때문이다 —
+    /// 앱이 뜰 때 이미 목록을 만든 직후라, 그 조회가 한 번 헛되이 더 돈다
+    pub fn new(mask: u32) -> Self {
+        Self { last: mask }
+    }
+
+    /// 이번에 읽은 마스크를 넣는다 — 직전과 다르면 참이고, 기준선이 그 값으로 옮겨간다.
+    ///
+    /// 참을 돌려준 뒤 같은 값이 다시 오면 거짓이다(변화는 한 번만 알린다)
+    pub fn observe(&mut self, mask: u32) -> bool {
+        let changed = mask != self.last;
+        self.last = mask;
+        changed
     }
 }
 
@@ -210,6 +269,78 @@ mod tests {
         // UNC 공유는 드라이브 줄로 서지 않는다
         assert_eq!(drive_root_of(Path::new(r"\\host\share\x")), None);
         assert_eq!(drive_root_of(Path::new("relative/path")), None);
+    }
+
+    #[test]
+    fn 시작_직후_같은_구성은_변화가_아니다() {
+        // D5 — 기준선을 지금 구성으로 잡는다. 0으로 시작하면 첫 확인이 늘 참이 되고,
+        // 앱이 뜰 때 이미 만든 목록을 한 번 더 만들게 된다
+        let mut watch = DriveWatch::new(0b1101);
+        assert!(!watch.observe(0b1101), "구성이 그대로인데 변화로 봤다");
+    }
+
+    #[test]
+    fn 드라이브가_늘면_변화다() {
+        // USB를 꽂는 경우 — 비트 하나가 선다
+        let mut watch = DriveWatch::new(0b0101);
+        assert!(watch.observe(0b1101), "드라이브가 늘었는데 알리지 않았다");
+    }
+
+    #[test]
+    fn 드라이브가_빠지면_변화다() {
+        // USB를 뽑는 경우 — 트리에서 줄이 사라져야 한다
+        let mut watch = DriveWatch::new(0b1101);
+        assert!(watch.observe(0b0101), "드라이브가 빠졌는데 알리지 않았다");
+    }
+
+    #[test]
+    fn 변화는_한_번만_알린다() {
+        // 알린 뒤 기준선이 새 값으로 옮겨간다 — 그러지 않으면 꽂은 뒤로 매초 목록을 만든다
+        let mut watch = DriveWatch::new(0b0101);
+        assert!(watch.observe(0b1101));
+        assert!(!watch.observe(0b1101), "같은 구성을 두 번 알렸다");
+    }
+
+    #[test]
+    fn 목록만_새로_와도_끊김_배지가_이어진다() {
+        // T1 Acceptance — 감시 워커는 접근 판정을 하지 않는다. `replace`를 쓰면 이 자리에서
+        // 배지가 사라졌다가 다음 주기 확인(30초)에야 돌아온다
+        let mut drives = list();
+        drives.apply_reachable(&[(PathBuf::from(r"Z:\"), false)]);
+        drives.refresh(vec![row(r"C:\", false), row(r"D:\", false), row(r"Z:\", true)]);
+        let z = drives
+            .rows()
+            .iter()
+            .find(|r| r.network)
+            .expect("Z 드라이브");
+        assert!(z.offline, "목록을 새로 받으며 배지가 날아갔다");
+        assert_eq!(drives.rows().len(), 3, "꽂힌 드라이브가 서지 않았다");
+    }
+
+    #[test]
+    fn 새로_나타난_드라이브에는_배지가_없다() {
+        // 판정한 적이 없는 뿌리다 — 판정 전에는 배지를 두지 않는다(`list_drives`와 같은 규칙)
+        let mut drives = list();
+        drives.refresh(vec![row(r"C:\", false), row(r"Z:\", true), row(r"E:\", true)]);
+        let e = drives
+            .rows()
+            .iter()
+            .find(|r| r.path == Path::new(r"E:\"))
+            .expect("E 드라이브");
+        assert!(!e.offline, "판정도 하지 않고 끊긴 것으로 표시했다");
+    }
+
+    #[test]
+    fn 빠진_드라이브는_배지째_사라진다() {
+        // 뽑힌 드라이브의 상태를 붙들고 있으면 다시 꽂았을 때 옛 판정이 되살아난다
+        let mut drives = list();
+        drives.apply_reachable(&[(PathBuf::from(r"Z:\"), false)]);
+        drives.refresh(vec![row(r"C:\", false)]);
+        assert_eq!(drives.rows().len(), 1);
+        assert!(
+            drives.rows().iter().all(|r| r.path == Path::new(r"C:\")),
+            "빠진 드라이브가 목록에 남았다"
+        );
     }
 
     #[test]
