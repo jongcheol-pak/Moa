@@ -40,7 +40,7 @@ pub struct TabState {
     /// 이 탭의 신원 — 생성자가 스스로 매긴다(호출부는 넘기지 않는다)
     pub id: TabId,
     pub source: TabSource,
-    pub history: History,
+    pub history: History<PathBuf>,
 }
 
 impl TabState {

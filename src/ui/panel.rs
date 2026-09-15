@@ -111,7 +111,7 @@ struct OptimisticNav {
     /// 옮기기 전에 보고 있던 폴더
     prev_dir: PathBuf,
     /// 옮기기 전 히스토리 전체
-    history: History,
+    history: History<PathBuf>,
     /// 적중 중에 도착한 배치 — **그리지 않고 모아 둔다**.
     ///
     /// 이미 캐시로 전부 그린 화면에 중간 배치를 반영하면 목록이 줄었다가 다시 늘어난다.

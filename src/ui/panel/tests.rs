@@ -683,7 +683,7 @@ fn 캐시로_옮긴_뒤_실제_결과가_와도_히스토리는_한_번만_늘�
 
     let history = &mut panel.tabs.active_mut().history;
     assert_eq!(
-        history.back().map(std::path::Path::to_path_buf),
+        history.back().cloned(),
         Some(start),
         "뒤로 한 번에 처음 자리로 돌아가지 않았다"
     );

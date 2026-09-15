@@ -75,7 +75,7 @@ impl AddressBar {
         &mut self,
         ui: &mut egui::Ui,
         current: &Path,
-        history: &History,
+        history: &History<PathBuf>,
         filter: &str,
     ) -> AddressBarOutcome {
         let mut action = None;
