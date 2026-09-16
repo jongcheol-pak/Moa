@@ -1345,6 +1345,9 @@ mod tests {
         let server = FakeServer::new();
         let mut connection = ready_connection(&server);
 
+        // **인사까지 실패하는 상태로 접는다** — 죽은 연결을 닫는 것이 실제 상황이고,
+        // 그 실패를 끊김으로 보면 `Closed`가 `Failed`로 덮인다
+        server.set_link_down(true);
         connection.send(ConnCommand::Disconnect);
         let events = wait_for(&mut connection, Duration::from_secs(2), |events| {
             events.iter().any(|event| {

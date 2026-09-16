@@ -349,6 +349,13 @@ impl RemoteSession for FakeSession {
     fn quit(&mut self) -> RemoteResult<()> {
         self.server.record("quit");
         self.connected = false;
+        // 죽은 연결에는 인사도 닿지 않는다 — 실제 FTP에서 흔한 자리다.
+        // 접는 길이 이 실패를 「끊김」으로 오해하지 않는지를 시험이 여기서 잰다
+        if self.server.link_down.load(Ordering::SeqCst) {
+            return Err(RemoteError::Protocol {
+                detail: "연결이 끊어졌습니다".to_owned(),
+            });
+        }
         Ok(())
     }
 }
