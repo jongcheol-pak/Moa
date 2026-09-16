@@ -464,8 +464,45 @@ fn run_list(worker: &mut Worker, source: ListSource, path: RemotePath, loud: boo
             let detail = err.to_string();
             worker.log(LogKind::Error, detail.clone())
                 && worker.emit(ConnEvent::ListFailed { source, detail })
+                && note_if_lost(worker, &err)
         }
     }
+}
+
+/// 실패한 명령의 오류가 **연결이 죽었다는 뜻일 수 있는가** (사용자 보고 2026-09-16).
+///
+/// 서버가 판정해 답한 실패(없는 경로·권한·미지원·인증·취소)는 그 답이 왔다는 것 자체가
+/// 제어 채널이 살아 있다는 증거라 확인할 것이 없다. 남는 둘만 확인 대상이다:
+/// FTP는 소켓 오류·421이 `Connect`로 오고, SFTP는 갈래를 가리지 않고 `Protocol`로 온다.
+///
+/// `Transfer`는 여기 넣지 않는다 — 전송 본문에서만 만들어지고 그 경로는 `TransferDone`을
+/// 직접 올려 아래 두 호출부에 닿지 않는다. `HostKey`도 마찬가지로 핸드셰이크에서만 난다
+fn probe_worthy(err: &RemoteError) -> bool {
+    matches!(
+        err,
+        RemoteError::Connect { .. } | RemoteError::Protocol { .. }
+    )
+}
+
+/// 명령이 실패했을 때 **제어 채널을 직접 찔러 보고**, 죽었으면 단계를 올린다.
+///
+/// 오류 갈래만으로 가르지 않는 이유: FTP는 수동형 **데이터** 연결이 막힌 것도 같은 갈래로
+/// 오는데(`ftp::is_data_connection_failure`), 그때 제어 채널은 멀쩡하다. 갈래로만 판정하면
+/// 잘 붙어 있는 연결을 끊긴 것으로 보이게 만든다. `NOOP`은 제어 채널만 쓴다.
+///
+/// **사유는 오류를 그대로 싣는다** — 「연결이 끊어졌습니다」라는 문장 틀은 화면이 그릴 때
+/// 만든다(`ui::remote_states::failure_reason`). 여기서 조합하면 그 문자열이 탭 상태에 굳어
+/// 언어 전환을 따라오지 못한다.
+///
+/// 돌아오는 값은 다른 곳과 같은 **「워커를 계속 돌릴지」**다 — 끊겼는지 여부가 아니다
+fn note_if_lost(worker: &mut Worker, err: &RemoteError) -> bool {
+    if !probe_worthy(err) || worker.session.noop().is_ok() {
+        return true;
+    }
+    worker.emit(ConnEvent::Phase(ConnPhase::Failed {
+        detail: err.to_string(),
+        kind: FailureKind::LinkLost,
+    }))
 }
 
 struct Worker {
@@ -520,37 +557,37 @@ fn worker(mut worker: Worker) {
             }
             ConnCommand::Cwd(path) => {
                 let result = worker.session.cwd(&path);
-                if !finish_op(&worker, OpKind::Cwd, result) {
+                if !finish_op(&mut worker, OpKind::Cwd, result) {
                     break;
                 }
             }
             ConnCommand::Mkdir(path) => {
                 let result = worker.session.mkdir(&path);
-                if !finish_op(&worker, OpKind::Mkdir, result) {
+                if !finish_op(&mut worker, OpKind::Mkdir, result) {
                     break;
                 }
             }
             ConnCommand::Remove(path) => {
                 let result = worker.session.remove(&path);
-                if !finish_op(&worker, OpKind::Remove, result) {
+                if !finish_op(&mut worker, OpKind::Remove, result) {
                     break;
                 }
             }
             ConnCommand::Rmdir(path) => {
                 let result = worker.session.rmdir(&path);
-                if !finish_op(&worker, OpKind::Rmdir, result) {
+                if !finish_op(&mut worker, OpKind::Rmdir, result) {
                     break;
                 }
             }
             ConnCommand::Rename { from, to } => {
                 let result = worker.session.rename(&from, &to);
-                if !finish_op(&worker, OpKind::Rename, result) {
+                if !finish_op(&mut worker, OpKind::Rename, result) {
                     break;
                 }
             }
             ConnCommand::Chmod { path, mode } => {
                 let result = worker.session.chmod(&path, mode);
-                if !finish_op(&worker, OpKind::Chmod, result) {
+                if !finish_op(&mut worker, OpKind::Chmod, result) {
                     break;
                 }
             }
@@ -577,7 +614,7 @@ fn worker(mut worker: Worker) {
             ConnCommand::Disconnect => {
                 let result = worker.session.quit();
                 let alive = worker.emit(ConnEvent::Phase(ConnPhase::Closed))
-                    && finish_op(&worker, OpKind::Disconnect, result);
+                    && finish_op(&mut worker, OpKind::Disconnect, result);
                 if !alive {
                     break;
                 }
@@ -710,8 +747,23 @@ fn is_retryable(err: &RemoteError) -> bool {
     matches!(err, RemoteError::Connect { .. })
 }
 
-fn finish_op(worker: &Worker, op: OpKind, result: RemoteResult<()>) -> bool {
-    worker.emit(ConnEvent::OpDone { op, result })
+/// 파일 작업의 결과를 올리고, 실패했으면 연결이 아직 살아 있는지 확인한다.
+///
+/// **`Disconnect`는 확인하지 않는다** — 그 직전에 `Closed`를 올린 자리라, 스스로 접은 연결을
+/// 다시 `Failed`로 덮으면 사용자가 닫은 탭이 실패한 것처럼 보인다
+fn finish_op(worker: &mut Worker, op: OpKind, result: RemoteResult<()>) -> bool {
+    // 결과는 이벤트로 넘어가므로 확인할 오류를 먼저 떠 둔다
+    let failure = match &result {
+        Err(err) if op != OpKind::Disconnect => Some(err.clone()),
+        _ => None,
+    };
+    if !worker.emit(ConnEvent::OpDone { op, result }) {
+        return false;
+    }
+    match failure {
+        Some(err) => note_if_lost(worker, &err),
+        None => true,
+    }
 }
 
 /// 폴더 아래의 파일을 모두 찾는다 — 깊이 상한 `TREE_MAX_DEPTH`.
@@ -1122,6 +1174,242 @@ mod tests {
     }
 
     /// 테스트가 쓰는 임시 파일 — 프로세스 번호를 넣어 동시에 도는 다른 실행과 겹치지 않게 한다
+    /// 연결을 세워 `Ready`까지 받아 둔다 — 끊김 시험 넷이 그 뒤부터 잰다
+    fn ready_connection(server: &Arc<FakeServer>) -> Connection {
+        let mut connection = spawn(server, fast_retry());
+        connection.send(ConnCommand::Connect);
+        wait_for(&mut connection, Duration::from_secs(2), |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, ConnEvent::Phase(ConnPhase::Ready)))
+        });
+        connection
+    }
+
+    fn noop_count(server: &Arc<FakeServer>) -> usize {
+        server.calls().iter().filter(|name| *name == "noop").count()
+    }
+
+    /// 같은 워커에 **다음 명령을 보내 그 답을 기다린다** — 워커가 명령을 하나씩 처리하므로
+    /// 그 답이 왔다는 것은 앞 명령이 올릴 것을 전부 올렸다는 뜻이다.
+    /// 「아무것도 오지 않았다」를 시간으로 재지 않기 위한 장치다(2026-09-07 회차와 같은 수법)
+    fn barrier(connection: &mut Connection) -> Vec<ConnEvent> {
+        connection.send(ConnCommand::List {
+            source: ListSource::Tree { seq: 99 },
+            path: RemotePath::root(),
+            quiet: true,
+        });
+        wait_for(connection, Duration::from_secs(2), |events| {
+            events.iter().any(|event| {
+                matches!(event, ConnEvent::Listed { source, .. } if *source == ListSource::Tree { seq: 99 })
+            })
+        })
+    }
+
+    fn has_lost_phase(events: &[ConnEvent]) -> bool {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                ConnEvent::Phase(ConnPhase::Failed {
+                    kind: FailureKind::LinkLost,
+                    ..
+                })
+            )
+        })
+    }
+
+    #[test]
+    fn 끊긴_뒤_목록_실패는_단계를_끊김으로_올린다() {
+        // T2 Acceptance ⓐ — 이것이 없으면 탭이 연결된 채로 남아 낡은 목록을 계속 보인다
+        let server = FakeServer::new();
+        server.set_entries("/", vec![fake_entry("있다.txt", false)]);
+        let mut connection = ready_connection(&server);
+
+        server.set_link_down(true);
+        connection.send(ConnCommand::List {
+            source: ListSource::Panel {
+                workspace: 1,
+                panel: 1,
+                seq: 1,
+            },
+            path: RemotePath::root(),
+            quiet: false,
+        });
+        let events = wait_for(&mut connection, Duration::from_secs(2), |events| {
+            has_lost_phase(events)
+        });
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ConnEvent::ListFailed { .. })),
+            "목록 실패가 먼저 올라와야 한다: {events:?}"
+        );
+        assert!(has_lost_phase(&events), "끊김 단계가 없다: {events:?}");
+    }
+
+    #[test]
+    fn 서버가_답한_실패는_연결을_확인하지_않는다() {
+        // T2 Acceptance ⓑ — 없는 폴더는 서버가 답한 것이라 연결이 살아 있다는 증거다.
+        // 이 자리에서 프로브를 돌리면 흔한 실패마다 왕복이 하나씩 는다
+        let server = FakeServer::new();
+        server.set_entries("/", vec![fake_entry("있다.txt", false)]);
+        let mut connection = ready_connection(&server);
+
+        connection.send(ConnCommand::List {
+            source: ListSource::Tree { seq: 1 },
+            path: RemotePath::new("/없는곳"),
+            quiet: false,
+        });
+        let events = barrier(&mut connection);
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ConnEvent::ListFailed { .. })),
+            "목록 실패가 없다: {events:?}"
+        );
+        assert_eq!(noop_count(&server), 0, "연결 확인이 돌았다");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ConnEvent::Phase(_))),
+            "단계가 바뀌었다: {events:?}"
+        );
+    }
+
+    #[test]
+    fn 데이터_연결만_막히면_단계를_건드리지_않는다() {
+        // T2 Acceptance ⓒ — FTP에서 수동형 데이터 연결이 막힌 것도 같은 오류 갈래로 온다.
+        // 갈래만 보고 갈랐다면 여기서 멀쩡한 연결이 끊긴 것으로 보인다
+        let server = FakeServer::new();
+        server.set_entries("/", vec![fake_entry("있다.txt", false)]);
+        let mut connection = ready_connection(&server);
+
+        server.set_data_failure(true);
+        connection.send(ConnCommand::List {
+            source: ListSource::Tree { seq: 1 },
+            path: RemotePath::root(),
+            quiet: false,
+        });
+        wait_for(&mut connection, Duration::from_secs(2), |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, ConnEvent::ListFailed { .. }))
+        });
+        assert!(
+            wait_until(Duration::from_secs(2), || noop_count(&server) == 1),
+            "연결 확인이 돌지 않았다"
+        );
+
+        server.set_data_failure(false);
+        let events = barrier(&mut connection);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ConnEvent::Phase(_))),
+            "제어 채널이 살아 있는데 단계가 바뀌었다: {events:?}"
+        );
+    }
+
+    #[test]
+    fn 끊긴_뒤_파일_작업_실패도_단계를_올린다() {
+        // T2 Acceptance ⓓ — 목록만이 아니라 파일 작업으로도 끊김을 알아차려야 한다.
+        // 사용자가 새 폴더를 만들려다 끊긴 것을 아는 길이 이쪽이다
+        let server = FakeServer::new();
+        let mut connection = ready_connection(&server);
+
+        server.set_link_down(true);
+        connection.send(ConnCommand::Mkdir(RemotePath::new("/새폴더")));
+        let events = wait_for(&mut connection, Duration::from_secs(2), |events| {
+            has_lost_phase(events)
+        });
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ConnEvent::OpDone {
+                    op: OpKind::Mkdir,
+                    result: Err(_)
+                }
+            )),
+            "작업 실패가 먼저 올라와야 한다: {events:?}"
+        );
+        assert!(has_lost_phase(&events), "끊김 단계가 없다: {events:?}");
+    }
+
+    #[test]
+    fn 스스로_접은_연결은_실패로_덮이지_않는다() {
+        // T2 Acceptance ⓔ — `Disconnect`는 `Closed`를 먼저 올린다.
+        // 그 뒤 인사(`quit`) 실패를 끊김으로 보면 사용자가 닫은 탭이 실패한 것처럼 보인다
+        let server = FakeServer::new();
+        let mut connection = ready_connection(&server);
+
+        connection.send(ConnCommand::Disconnect);
+        let events = wait_for(&mut connection, Duration::from_secs(2), |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    ConnEvent::OpDone {
+                        op: OpKind::Disconnect,
+                        ..
+                    }
+                )
+            })
+        });
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ConnEvent::Phase(ConnPhase::Closed))),
+            "닫힘이 없다: {events:?}"
+        );
+        assert!(!has_lost_phase(&events), "닫힘이 실패로 덮였다: {events:?}");
+        assert_eq!(noop_count(&server), 0, "접는 길에서 연결 확인이 돌았다");
+    }
+
+    #[test]
+    fn 끊긴_연결도_다시_붙으면_준비로_돌아온다() {
+        // T2 Acceptance — 화면의 `재시도`가 타는 길이다(살아 있는 워커에 `Connect` 재발행).
+        // 여기가 끊기면 버튼이 보여도 눌러서 되살아나지 않는다
+        let server = FakeServer::new();
+        server.set_entries("/", vec![fake_entry("있다.txt", false)]);
+        let mut connection = ready_connection(&server);
+
+        server.set_link_down(true);
+        connection.send(ConnCommand::List {
+            source: ListSource::Tree { seq: 1 },
+            path: RemotePath::root(),
+            quiet: false,
+        });
+        wait_for(&mut connection, Duration::from_secs(2), |events| {
+            has_lost_phase(events)
+        });
+
+        server.set_link_down(false);
+        connection.send(ConnCommand::Connect);
+        let events = wait_for(&mut connection, Duration::from_secs(2), |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, ConnEvent::Phase(ConnPhase::Ready)))
+        });
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ConnEvent::Phase(ConnPhase::Ready))),
+            "다시 붙지 못했다: {events:?}"
+        );
+
+        let after = barrier(&mut connection);
+        assert!(
+            after.iter().any(|event| matches!(
+                event,
+                ConnEvent::Listed { source, .. } if *source == ListSource::Tree { seq: 99 }
+            )),
+            "되살린 연결로 목록을 읽지 못했다: {after:?}"
+        );
+    }
+
     fn temp_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("fe_t4_{label}_{}.bin", std::process::id()))
     }

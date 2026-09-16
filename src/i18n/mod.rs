@@ -544,6 +544,11 @@ strings! {
     remote_fail_hint_hostkey
         => "서버 지문이 바뀌었는지 확인해 주세요."
         / "Check whether the server fingerprint has changed.";
+    /// 서 있던 연결이 끊겼을 때 사유 **앞**에 서는 말 (사용자 보고 2026-09-16).
+    ///
+    /// **문장 틀을 워커가 아니라 화면이 만든다** — 워커가 조합하면 그 문자열이 탭 상태에
+    /// 굳어, 언어를 바꿔도 그때 언어로 남는다(대장의 2026-08-14 항목이 그 결함이다)
+    remote_fail_lost => "연결이 끊어졌습니다" / "The connection was lost";
     remote_connecting => "연결 중…" / "Connecting…";
     remote_not_connected => "연결 없음" / "Not connected";
     remote_hostkey_first => "이 서버를 처음 연결합니다" / "Connecting to this server for the first time";
@@ -1434,7 +1439,7 @@ mod tests {
         ///
         /// 위젯 상태를 잇는 열쇠(`Id::new`·`id_salt`)는 바꾸면 대화 상태가 초기화되고,
         /// 나머지는 화면에 나오지 않는 내부 값이다
-        const EXEMPT_LITERALS: [&str; 51] = [
+        const EXEMPT_LITERALS: [&str; 53] = [
             // 위젯 ID
             "정보 대화",
             "라이선스 대화",
@@ -1472,6 +1477,8 @@ mod tests {
             "연결되어 있지 않습니다",
             "가짜 서버 상태가 오염됐습니다",
             "없는 폴더",
+            "연결이 끊어졌습니다",
+            "데이터 연결을 세우지 못했습니다",
             // 여러 줄에 걸친 단언·`expect`의 메시지 — 개발자에게만 보인다
             "직렬화",
             "성공한 블롭은 널일 수 없다",

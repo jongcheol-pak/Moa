@@ -293,6 +293,9 @@ pub fn failure_reason(detail: &str, kind: FailureKind) -> String {
         detail
     };
     match kind {
+        // 끊김만 사유 **앞**에 선다 — 나머지는 사유를 읽은 뒤 무엇을 고칠지 덧붙이는 자리인데,
+        // 이것은 고칠 것을 지목하는 말이 아니라 무슨 일이 일어났는지를 먼저 알리는 말이다
+        FailureKind::LinkLost => format!("{} — {body}", crate::i18n::remote_fail_lost()),
         FailureKind::Connect => format!("{body} {}", crate::i18n::remote_fail_reason_hint()),
         FailureKind::Auth => format!("{body} {}", crate::i18n::remote_fail_hint_auth()),
         FailureKind::HostKey => format!("{body} {}", crate::i18n::remote_fail_hint_hostkey()),
@@ -714,6 +717,19 @@ mod tests {
             failure_reason("550 Denied", FailureKind::Other),
             "550 Denied"
         );
+    }
+
+    #[test]
+    fn 끊긴_연결은_사유_앞에_그_사실을_적는다() {
+        let _guard =
+            crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+        // 사용자 보고 2026-09-16 — 서 있던 연결이 끊긴 것은 「무엇을 고쳐라」가 아니라
+        // 「무슨 일이 났다」라, 사유 뒤가 아니라 앞에 선다
+        let lost = failure_reason("연결이 끊어졌습니다", FailureKind::LinkLost);
+        assert!(lost.starts_with("연결이 끊어졌습니다 —"), "{lost}");
+        // 최초 연결 실패의 안내는 붙지 않는다 — 방금까지 쓰던 설정을 의심하게 만든다
+        assert!(!lost.contains("암호화 설정"), "{lost}");
+        assert!(!lost.contains("사용자 이름"), "{lost}");
     }
 
     #[test]
