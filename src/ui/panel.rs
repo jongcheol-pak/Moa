@@ -98,6 +98,34 @@ enum PendingNav {
     Forward,
 }
 
+/// 원격 위치를 옮길 때 히스토리에 할 일.
+///
+/// 로컬의 `PendingNav`와 이름이 닮았지만 **적용 시점이 다르다** — 로컬은 열거가 성공한
+/// 뒤에 적용하고(pending-커밋), 원격은 옮기는 그 자리에서 적용한다(낙관적 커밋).
+/// 실패하면 `revert_at`에 실어 둔 스냅샷이 경로와 함께 히스토리를 되돌린다
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RemoteNav {
+    /// 새 이동 — 커서 뒤를 자르고 추가 (폴더 진입·상위 이동·트리 선택·주소 입력)
+    Push,
+    Back,
+    Forward,
+}
+
+/// 원격 조회가 실패했을 때 돌아갈 자리 — 그 요청의 일련번호에 묶여 있다.
+///
+/// 튜플이 아니라 구조체인 이유는 항목이 넷이기 때문이다 — `(u64, RemotePath, RemotePath,
+/// History<RemotePath>)`는 어느 경로가 어느 쪽인지 읽히지 않는다
+struct RemoteRevert {
+    /// 이 자리를 만든 조회의 일련번호 — 다른 요청의 실패는 건드리지 않는다
+    seq: u64,
+    /// 옮기기 전에 보고 있던 곳
+    previous: RemotePath,
+    /// 옮겨 간 곳 — 지금 보고 있는 곳이 이것 그대로일 때만 되돌린다
+    moved_to: RemotePath,
+    /// 옮기기 전 히스토리 전체 — 앞으로 가기 목록까지 살린다
+    history: History<RemotePath>,
+}
+
 /// 캐시로 **먼저 옮겨 둔** 상태 — 실제 열거가 그 폴더를 열지 못하면 이것으로 되돌린다 (FR-68).
 ///
 /// 되돌리기를 「히스토리 조작의 역연산」으로 할 수 없어 스냅샷을 든다 — `History::push`가
@@ -296,16 +324,19 @@ pub struct PanelState {
     close_requested: bool,
     /// 원격 목록 우클릭 메뉴가 뜰 자리 — `None`이면 닫혀 있다 (FR-39)
     remote_menu_at: Option<egui::Pos2>,
-    /// 아직 조회를 청하지 않은 "직전에 보고 있던 곳" — `set_remote_path`가 세우고
-    /// 곧이어 `request_remote_list`가 일련번호와 함께 `revert_at`으로 옮긴다
-    pending_revert: Option<RemotePath>,
-    /// 되돌릴 자리 — `(그 조회의 일련번호, 돌아갈 곳, 옮겨 간 곳)`.
+    /// 아직 조회를 청하지 않은 "직전에 보고 있던 곳"과 그때의 히스토리 — `move_remote`가
+    /// **옮기기 직전에** 세우고 곧이어 `request_remote_list`가 일련번호와 함께 `revert_at`으로 옮긴다.
+    ///
+    /// 히스토리를 함께 드는 이유는 로컬 낙관적 커밋과 같다 — `History::push`가 앞으로 가기
+    /// 목록을 잘라내므로 역연산으로는 복원되지 않는다
+    pending_revert: Option<(RemotePath, History<RemotePath>)>,
+    /// 되돌릴 자리 — 그 조회의 일련번호와 함께 든다.
     ///
     /// **요청 하나에 묶는다**(F-7 2라운드 B1·B2): 번호만 보고 되돌리면 ⓐ 이미 성공한 이동의
     /// 자리가 남아 나중의 새로 고침 실패가 옛 폴더로 되돌리고 ⓑ 같은 연결의 다른 패널·탭까지
     /// 함께 되돌아간다. 그래서 **성공하면 지우고**, 되돌릴 때는 지금 보고 있는 곳이
-    /// `옮겨 간 곳` 그대로일 때만 손댄다
-    revert_at: Option<(u64, RemotePath, RemotePath)>,
+    /// `moved_to` 그대로일 때만 손댄다
+    revert_at: Option<RemoteRevert>,
     /// 원격 위치가 바뀌어 목록을 다시 읽어야 한다 — 앱이 다음 프레임에 거둬 간다.
     ///
     /// **위치를 옮기는 것과 서버에 묻는 것은 다른 일이다** — 옮기는 쪽(트리 선택·상위 이동)은
@@ -1251,16 +1282,40 @@ impl PanelState {
     /// 목록 다시 읽기는 **깃발을 세워** 앱에 맡긴다(`take_remote_dirty`) — 여기서 직접 보내지
     /// 않는 이유는 패널이 `ConnectionManager`를 쥐고 있지 않기 때문이다
     pub fn set_remote_path(&mut self, target: RemotePath) {
-        let mut moved = false;
-        if let TabSource::Remote { path, .. } = &mut self.tabs.active_mut().source {
-            // 실패했을 때 돌아갈 자리를 남긴다 — 일련번호는 조회를 청할 때 붙는다 (F-7 리뷰 B2)
-            self.pending_revert = Some(path.clone());
-            moved = *path != target;
-            *path = target;
-            self.remote_dirty = true;
+        self.move_remote(target, RemoteNav::Push);
+    }
+
+    /// 원격 위치를 옮기면서 히스토리에 `nav`를 적용한다.
+    ///
+    /// **히스토리는 옮기는 그 자리에서 커밋한다**(낙관적) — 로컬의 pending-커밋과 달리
+    /// 원격은 경로부터 바꾸고 조회를 청하므로, 실패하면 `revert_at`의 스냅샷이 되돌린다.
+    /// 스냅샷을 **옮기기 전에** 뜨는 것이 이 함수의 핵심이다
+    fn move_remote(&mut self, target: RemotePath, nav: RemoteNav) {
+        let tab = self.tabs.active_mut();
+        let TabSource::Remote { path, .. } = &mut tab.source else {
+            return;
+        };
+        let moved = *path != target;
+        // 실패했을 때 돌아갈 자리를 남긴다 — 일련번호는 조회를 청할 때 붙는다 (F-7 리뷰 B2).
+        // 히스토리도 **push 전에** 떠야 되돌릴 때 옮기기 전 상태가 나온다
+        self.pending_revert = Some((path.clone(), tab.remote_history.clone()));
+        *path = target.clone();
+        // 같은 자리를 다시 읽는 길(원격 메뉴의 새로 고침·F5)에서는 히스토리를 늘리지 않는다 —
+        // `History::push`도 같은 값이면 무시하지만, back/forward는 그 가드가 없어 여기서 가른다
+        if moved {
+            match nav {
+                RemoteNav::Push => tab.remote_history.push(target),
+                RemoteNav::Back => {
+                    tab.remote_history.back();
+                }
+                RemoteNav::Forward => {
+                    tab.remote_history.forward();
+                }
+            }
         }
+        self.remote_dirty = true;
         // 로컬과 같은 규칙 — 자리를 옮길 때만 필터를 비운다 (D2·D11). 같은 자리를 다시
-        // 읽는 길(원격 메뉴의 새로 고침·F5)에서는 치던 글자를 그대로 둔다
+        // 읽는 길에서는 치던 글자를 그대로 둔다
         if moved {
             self.list.set_filter("");
         }
@@ -1350,20 +1405,27 @@ impl PanelState {
     /// 되돌린 뒤에는 **다시 읽지 않는다**(`remote_dirty`를 세우지 않는다) — 그 폴더의 목록은
     /// 이미 화면에 있고, 다시 청하면 실패한 조회와 성공한 조회가 번갈아 도는 고리가 된다
     pub fn revert_remote_path(&mut self, seq: u64) -> bool {
-        let Some((waiting, previous, moved_to)) = self.revert_at.clone() else {
+        // 자리를 **먼저 소진하지 않는다** — 조건이 어긋나면 그대로 두는 것이 종전 동작이다
+        let Some(revert) = &self.revert_at else {
             return false;
         };
-        if waiting != seq {
+        if revert.seq != seq {
             return false;
         }
-        let TabSource::Remote { path, .. } = &mut self.tabs.active_mut().source else {
+        let (previous, moved_to) = (revert.previous.clone(), revert.moved_to.clone());
+        let tab = self.tabs.active_mut();
+        let TabSource::Remote { path, .. } = &mut tab.source else {
             return false;
         };
         if *path != moved_to {
             return false;
         }
         *path = previous;
-        self.revert_at = None;
+        // 히스토리도 **스냅샷 통째로** 돌린다 — `push`가 잘라낸 앞으로 가기 목록은
+        // 역연산으로 살아나지 않는다 (로컬 `revert_optimistic`과 같은 방식)
+        if let Some(revert) = self.revert_at.take() {
+            self.tabs.active_mut().remote_history = revert.history;
+        }
         true
     }
 
@@ -1434,7 +1496,12 @@ impl PanelState {
         self.revert_at = self
             .pending_revert
             .take()
-            .map(|previous| (seq, previous, path.clone()));
+            .map(|(previous, history)| RemoteRevert {
+                seq,
+                previous,
+                moved_to: path.clone(),
+                history,
+            });
         // 마지막 요청이 어느 갈래였는지 기억한다 — 그 실패를 알릴지 가리는 데 쓴다.
         // 손으로 부른 조회가 그 자리를 덮으므로 옛 값이 남아 알림을 삼키지 않는다
         self.quiet_request = quiet.then_some(seq);
@@ -1485,7 +1552,7 @@ impl PanelState {
         }
         // 이 이동은 섰다 — 돌아갈 자리를 지운다. 남겨 두면 **나중의 무관한 조회 실패**가
         // 그 낡은 값으로 경로만 되돌린다(F-7 2라운드 B1)
-        if matches!(&self.revert_at, Some((waiting, _, _)) if *waiting == seq) {
+        if matches!(&self.revert_at, Some(revert) if revert.seq == seq) {
             self.revert_at = None;
         }
         self.list
@@ -1583,13 +1650,23 @@ impl PanelState {
     /// 주소창에서 올라온 탐색 요청 처리
     fn handle_nav(&mut self, action: NavAction, ctx: &egui::Context) {
         match action {
+            // 뒤로·앞으로는 소스로 갈린다 — 로컬은 열거가 성공한 뒤에 커서를 옮기고(pending-커밋),
+            // 원격은 옮기고 나서 조회를 청한다(낙관적). 대상을 고르는 `peek`은 양쪽이 같다
             NavAction::Back => {
-                if let Some(path) = self.tabs.active().history.peek_back().map(PathBuf::from) {
+                if self.is_remote() {
+                    if let Some(path) = self.tabs.active().remote_history.peek_back().cloned() {
+                        self.move_remote(path, RemoteNav::Back);
+                    }
+                } else if let Some(path) = self.tabs.active().history.peek_back().cloned() {
                     self.start_load(path, PendingNav::Back, ctx);
                 }
             }
             NavAction::Forward => {
-                if let Some(path) = self.tabs.active().history.peek_forward().map(PathBuf::from) {
+                if self.is_remote() {
+                    if let Some(path) = self.tabs.active().remote_history.peek_forward().cloned() {
+                        self.move_remote(path, RemoteNav::Forward);
+                    }
+                } else if let Some(path) = self.tabs.active().history.peek_forward().cloned() {
                     self.start_load(path, PendingNav::Forward, ctx);
                 }
             }
@@ -1807,8 +1884,11 @@ impl PanelState {
                 tab.history.can_back(),
                 tab.history.can_forward(),
             ),
-            // 원격의 뒤로·앞으로는 T4가 잇는다 — 그때까지는 갈 곳이 없어 둘 다 거짓이다
-            TabSource::Remote { path, .. } => (AddressTarget::Remote(path), false, false),
+            TabSource::Remote { path, .. } => (
+                AddressTarget::Remote(path),
+                tab.remote_history.can_back(),
+                tab.remote_history.can_forward(),
+            ),
         };
         let address = self
             .address

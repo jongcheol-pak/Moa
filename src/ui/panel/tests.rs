@@ -3266,6 +3266,127 @@ fn 조회가_실패하면_옮기기를_무른다() {
     assert!(!panel.revert_remote_path(generation));
 }
 
+/// 활성 탭의 원격 경로 — 원격 시험이 되풀이해 쓰는 조회다
+fn 원격_경로(panel: &PanelState) -> String {
+    panel
+        .tabs
+        .active()
+        .source
+        .remote_path()
+        .expect("원격 탭이어야 한다")
+        .as_str()
+        .to_owned()
+}
+
+#[test]
+fn 원격_탭에서_드나들면_히스토리가_쌓인다() {
+    // 사용자 보고 — 원격 탭의 뒤로·앞으로 버튼이 흐린 채 눌리지 않았다.
+    // 원인은 그 탭의 히스토리에 아무것도 쌓이지 않았다는 것이다
+    let mut panel = panel_with_remote_tab("/");
+    assert!(
+        !panel.tabs.active().remote_history.can_back(),
+        "시작 자리에서 뒤로 갈 곳이 있다고 했다"
+    );
+
+    panel.set_remote_path(RemotePath::new("/DB"));
+    panel.set_remote_path(RemotePath::new("/DB/sub"));
+    assert!(panel.tabs.active().remote_history.can_back());
+    assert!(!panel.tabs.active().remote_history.can_forward());
+
+    // 같은 자리를 다시 읽는 길(새로 고침)은 히스토리를 늘리지 않는다
+    let 이전 = panel.tabs.active().remote_history.peek_back().cloned();
+    panel.set_remote_path(RemotePath::new("/DB/sub"));
+    assert_eq!(
+        panel.tabs.active().remote_history.peek_back().cloned(),
+        이전,
+        "같은 자리를 다시 읽었는데 히스토리가 늘었다"
+    );
+}
+
+#[test]
+fn 원격_탭의_뒤로와_앞으로가_히스토리를_오간다() {
+    let ctx = egui::Context::default();
+    let mut panel = panel_with_remote_tab("/");
+    panel.set_remote_path(RemotePath::new("/DB"));
+    panel.set_remote_path(RemotePath::new("/DB/sub"));
+
+    panel.handle_nav(NavAction::Back, &ctx);
+    assert_eq!(원격_경로(&panel), "/DB");
+    panel.handle_nav(NavAction::Back, &ctx);
+    assert_eq!(원격_경로(&panel), "/");
+    // 뿌리에서 한 번 더 눌러도 그대로다
+    panel.handle_nav(NavAction::Back, &ctx);
+    assert_eq!(원격_경로(&panel), "/");
+
+    panel.handle_nav(NavAction::Forward, &ctx);
+    assert_eq!(원격_경로(&panel), "/DB");
+    panel.handle_nav(NavAction::Forward, &ctx);
+    assert_eq!(원격_경로(&panel), "/DB/sub");
+    panel.handle_nav(NavAction::Forward, &ctx);
+    assert_eq!(원격_경로(&panel), "/DB/sub");
+
+    // 로컬 열거 워커는 뜨지 않았다 — 원격 탭에서 로컬 경로를 열려 하면 안 된다
+    assert!(!panel.load.is_loading());
+}
+
+#[test]
+fn 원격_탭의_새_이동은_앞으로_가기_목록을_자른다() {
+    let ctx = egui::Context::default();
+    let mut panel = panel_with_remote_tab("/");
+    panel.set_remote_path(RemotePath::new("/DB"));
+    panel.handle_nav(NavAction::Back, &ctx);
+    assert!(
+        panel.tabs.active().remote_history.can_forward(),
+        "되돌아왔는데 앞으로 갈 곳이 없다"
+    );
+
+    // 여기서 다른 곳으로 가면 `/DB`는 잘린다 (브라우저와 같은 규칙)
+    panel.set_remote_path(RemotePath::new("/etc"));
+    assert!(!panel.tabs.active().remote_history.can_forward());
+    assert_eq!(원격_경로(&panel), "/etc");
+}
+
+#[test]
+fn 원격_조회가_실패하면_앞으로_가기_목록까지_돌아온다() {
+    // 되돌리기를 「히스토리 조작의 역연산」으로 할 수 없다 — `push`가 앞으로 가기 목록을
+    // 잘라내므로, 스냅샷을 통째로 돌려야 잘린 항목이 살아난다
+    let ctx = egui::Context::default();
+    let manager = ConnectionManager::new(std::sync::Arc::new(|| {}));
+    let (mut panel, _) = remote_panel_in(TabPhase::Ok);
+    panel.set_remote_path(RemotePath::new("/var/log"));
+    panel.handle_nav(NavAction::Back, &ctx);
+    assert_eq!(원격_경로(&panel), "/var/www");
+    assert!(
+        panel.tabs.active().remote_history.can_forward(),
+        "되돌아왔는데 앞으로 갈 곳이 없다"
+    );
+
+    // 없는 폴더로 낙관적으로 옮긴다 — 여기서 `/var/log`가 잘린다
+    panel.set_remote_path(RemotePath::new("/사라진곳"));
+    assert!(!panel.tabs.active().remote_history.can_forward());
+    panel.request_remote_list(WorkspaceId(0), PanelId(0), &manager);
+    let generation = panel.remote_seq;
+
+    assert!(
+        panel.revert_remote_path(generation),
+        "되돌릴 자리가 없다고 했다"
+    );
+    assert_eq!(원격_경로(&panel), "/var/www", "이전 폴더로 돌아오지 않았다");
+    assert!(
+        panel.tabs.active().remote_history.can_forward(),
+        "앞으로 가기 목록이 되살아나지 않았다"
+    );
+    assert_eq!(
+        panel
+            .tabs
+            .active()
+            .remote_history
+            .peek_forward()
+            .map(|p| p.as_str()),
+        Some("/var/log")
+    );
+}
+
 #[test]
 fn 원격_탭에서_연_새_탭은_로컬_시작_폴더다() {
     // 사용자 보고 — 원격 탭에서 `+`를 누르면 연결이 없는 원격 탭이 복제돼 목록이 빈 채로 섰다.

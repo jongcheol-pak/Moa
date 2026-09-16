@@ -35,12 +35,20 @@ impl TabId {
 /// 탭 하나의 탐색 상태 — 탭별 독립 소스·히스토리 (FR-3).
 ///
 /// 커밋된 위치를 `PathBuf`가 아니라 `TabSource`로 드는 이유는 아래 `TabSource` 설명 참조.
-/// 히스토리는 **로컬 탐색 전용**이다 — 원격 탭의 뒤로/앞으로는 이번 범위 밖이라 비워 둔다
+///
+/// **히스토리를 둘로 나눠 든다** — 로컬 탭은 `history`를, 원격 탭은 `remote_history`를 쓴다.
+/// 하나로 합치지 않는 이유는 담는 타입이 다르기 때문이고(`RemotePath`를 `PathBuf`에 실으면
+/// Windows의 경로 의미가 섞인다), 열거형으로 가르지 않는 이유는 **탭의 종류가 생성 후
+/// 바뀌지 않아**(`set_committed`의 단언) 쓰이지 않는 쪽이 빈 `Vec` 하나로 남을 뿐이기 때문이다.
+/// 가르면 기존 `tab.history.push/back/forward` 호출부가 전부 분기를 타야 한다
 pub struct TabState {
     /// 이 탭의 신원 — 생성자가 스스로 매긴다(호출부는 넘기지 않는다)
     pub id: TabId,
     pub source: TabSource,
+    /// 로컬 탭의 탐색 히스토리 — 원격 탭에서는 쓰이지 않는다
     pub history: History<PathBuf>,
+    /// 원격 탭의 탐색 히스토리 — 로컬 탭에서는 쓰이지 않는다
+    pub remote_history: History<RemotePath>,
 }
 
 impl TabState {
@@ -48,6 +56,8 @@ impl TabState {
         TabState {
             id: TabId::next(),
             history: History::new(path.clone()),
+            // 로컬 탭에서는 쓰이지 않는다 — 루트 한 칸으로 세워 둔다
+            remote_history: History::new(RemotePath::root()),
             source: TabSource::Local(path),
         }
     }
@@ -56,8 +66,9 @@ impl TabState {
     pub fn remote(site: SiteId, path: RemotePath) -> TabState {
         TabState {
             id: TabId::next(),
-            // 히스토리는 로컬 경로만 담는다 — 원격 탭에서는 쓰이지 않는다
+            // 로컬 히스토리는 원격 탭에서 쓰이지 않는다
             history: History::new(PathBuf::new()),
+            remote_history: History::new(path.clone()),
             source: TabSource::Remote {
                 site,
                 conn: None,
