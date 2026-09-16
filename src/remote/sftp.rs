@@ -330,11 +330,19 @@ impl RemoteSession for SftpSession {
     /// 서버 지원을 새로 전제하지 않고, 죽은 소켓에서는 오류가 난다
     fn noop(&mut self) -> RemoteResult<()> {
         let sftp = self.sftp()?;
-        guard_path_panic(crate::i18n::remote_subject_home(), || {
+        let answered = std::panic::catch_unwind(AssertUnwindSafe(|| {
             sftp.realpath(Path::new("."))
-                .map_err(|e| classify(e, RemoteOp::KeepAlive, None))?;
-            Ok(())
-        })
+                .map_err(|e| classify(e, RemoteOp::KeepAlive, None))
+        }));
+        // **이름을 옮기다 패닉한 것은 「서버가 답했다」는 뜻이다** — 답이 와야 옮길 것이
+        // 생긴다. 여기서 재는 것은 생사 하나이고 돌아온 경로는 버리므로 성공으로 본다.
+        // `guard_path_panic`을 쓰지 않는 이유가 이것이다 — 그쪽은 패닉을 `Protocol`로
+        // 바꾸는데, `classify`도 죽은 소켓을 같은 갈래로 주어 **둘이 구분되지 않는다**
+        // (완료 리뷰 2026-09-16)
+        match answered {
+            Err(_) => Ok(()),
+            Ok(result) => result.map(|_| ()),
+        }
     }
 
     fn is_secure(&self) -> bool {
