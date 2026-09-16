@@ -49,6 +49,12 @@ pub struct FakeServer {
     chmod_unsupported: AtomicBool,
     /// 켜져 있으면 TLS 승격을 거부한다 — 연결은 서지만 **평문이다** (F-7 리뷰 B1)
     refuse_tls: AtomicBool,
+    /// 켜져 있으면 **이미 선 연결이 죽은 것처럼** 군다 — 유휴 타임아웃·네트워크 끊김.
+    /// `noop`을 포함한 모든 명령이 실패하므로 끊김 판정의 프로브도 함께 실패한다
+    link_down: AtomicBool,
+    /// 켜져 있으면 **목록만** 실패하고 `noop`은 성공한다 — FTP의 수동형 데이터 연결이
+    /// 방화벽에 막힌 상태다. 제어 채널은 멀쩡하므로 끊김으로 보면 안 된다
+    data_failure: AtomicBool,
 }
 
 impl FakeServer {
@@ -88,6 +94,19 @@ impl FakeServer {
     /// `chmod`를 지원하지 않는 서버로 만들거나 되돌린다 (D22)
     pub fn set_chmod_unsupported(&self, unsupported: bool) {
         self.chmod_unsupported.store(unsupported, Ordering::SeqCst);
+    }
+
+    /// 선 연결을 죽이거나 되살린다 — **되살리는 것은 시험이 명시한다**.
+    /// `connect`가 이 값을 지우지 않는 이유: 서버가 살아난 것을 앱이 짐작하면 안 된다.
+    /// 죽은 동안에도 `connect` 자체는 성공한다 — 여기서 재는 것은 **선 연결이 도중에
+    /// 죽는 길**이고, 연결이 서지 않는 길은 `fail_connects`가 따로 맡는다
+    pub fn set_link_down(&self, down: bool) {
+        self.link_down.store(down, Ordering::SeqCst);
+    }
+
+    /// 데이터 연결만 막는다 — 목록은 실패하고 제어 채널(`noop`)은 그대로 답한다
+    pub fn set_data_failure(&self, failing: bool) {
+        self.data_failure.store(failing, Ordering::SeqCst);
     }
 
     /// 다음 `count`번의 연결을 실패시킨다
@@ -156,6 +175,12 @@ impl FakeSession {
     }
 
     fn ensure_connected(&self) -> RemoteResult<()> {
+        // 선 연결이 도중에 죽은 경우 — 실제 서버에서는 소켓 오류로 나타난다
+        if self.server.link_down.load(Ordering::SeqCst) {
+            return Err(RemoteError::Protocol {
+                detail: "연결이 끊어졌습니다".to_owned(),
+            });
+        }
         if self.connected {
             Ok(())
         } else {
@@ -215,6 +240,12 @@ impl RemoteSession for FakeSession {
         self.server.record("list");
         self.server.tick();
         self.ensure_connected()?;
+        // 데이터 연결만 막힌 서버 — 실제 FTP에서도 이 실패는 `Connect` 갈래로 온다
+        if self.server.data_failure.load(Ordering::SeqCst) {
+            return Err(RemoteError::Connect {
+                detail: "데이터 연결을 세우지 못했습니다".to_owned(),
+            });
+        }
         let map = self
             .server
             .entries
@@ -427,6 +458,37 @@ mod tests {
         session.connect(&site()).expect("연결");
         server.set_entries("/", vec![fake_entry("a.txt", false)]);
         assert_eq!(session.list(&RemotePath::root()).expect("목록").len(), 1);
+    }
+
+    #[test]
+    fn 연결이_죽으면_목록도_연결_확인도_실패한다() {
+        // T1 Acceptance — 끊김 판정의 프로브(`noop`)까지 함께 실패해야
+        // 워커가 「제어 채널이 죽었다」로 가를 수 있다
+        let server = FakeServer::new();
+        let mut session = FakeSession::new(Arc::clone(&server));
+        session.connect(&site()).expect("연결");
+        server.set_entries("/", vec![fake_entry("a.txt", false)]);
+
+        server.set_link_down(true);
+        assert!(session.list(&RemotePath::root()).is_err(), "목록이 살았다");
+        assert!(session.noop().is_err(), "연결 확인이 살았다");
+
+        server.set_link_down(false);
+        assert!(session.noop().is_ok(), "되살린 뒤에도 죽어 있다");
+    }
+
+    #[test]
+    fn 데이터_연결만_막히면_목록만_실패한다() {
+        // T1 Acceptance — FTP 수동형 데이터 연결이 방화벽에 막힌 상태다.
+        // 제어 채널은 멀쩡하므로 끊김으로 보면 안 된다
+        let server = FakeServer::new();
+        let mut session = FakeSession::new(Arc::clone(&server));
+        session.connect(&site()).expect("연결");
+        server.set_entries("/", vec![fake_entry("a.txt", false)]);
+
+        server.set_data_failure(true);
+        assert!(session.list(&RemotePath::root()).is_err(), "목록이 살았다");
+        assert!(session.noop().is_ok(), "제어 채널까지 죽었다");
     }
 
     #[test]
