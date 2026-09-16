@@ -318,11 +318,23 @@ impl RemoteSession for SftpSession {
         Ok(total)
     }
 
+    /// **`keepalive_send`를 쓰지 않는다** (완료 리뷰 2026-09-16).
+    ///
+    /// libssh2는 `keepalive_interval`이 0이면 **소켓을 건드리지 않고 0을 돌려준다**
+    /// (`libssh2/src/keepalive.c`의 첫 가지). 이 앱은 `set_keepalive`를 부르지 않으므로
+    /// 그 간격이 0이고, 그래서 그 호출은 **연결이 죽어도 언제나 성공한다** — 연결 생사를
+    /// 확인하는 쪽(`remote::connection::note_if_lost`)이 그것을 믿으면 SFTP에서는 끊김이
+    /// 영영 잡히지 않는다.
+    ///
+    /// 대신 `realpath(".")`로 **실제 왕복을 만든다** — `pwd`가 쓰는 것과 같은 요청이라
+    /// 서버 지원을 새로 전제하지 않고, 죽은 소켓에서는 오류가 난다
     fn noop(&mut self) -> RemoteResult<()> {
-        self.session()?
-            .keepalive_send()
-            .map(|_| ())
-            .map_err(|e| classify(e, RemoteOp::KeepAlive, None))
+        let sftp = self.sftp()?;
+        guard_path_panic(crate::i18n::remote_subject_home(), || {
+            sftp.realpath(Path::new("."))
+                .map_err(|e| classify(e, RemoteOp::KeepAlive, None))?;
+            Ok(())
+        })
     }
 
     fn is_secure(&self) -> bool {
@@ -548,6 +560,31 @@ mod tests {
 
     const FINGERPRINT_A: &str = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
     const FINGERPRINT_B: &str = "SHA256:LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ";
+
+    /// 연결 확인이 **실제 왕복을 만드는가** (완료 리뷰 2026-09-16).
+    ///
+    /// 소스를 훑어 재는 이유는 살아 있는 SSH 서버가 있어야 그 왕복을 태울 수 있기
+    /// 때문이다 — `ftp.rs`의 같은 방식 시험과 짝이다. **`keepalive_send`로 돌아가면
+    /// 이 시험이 잡는다**: libssh2는 `keepalive_interval`이 0일 때 소켓을 건드리지 않고
+    /// 성공을 돌려주므로(`libssh2/src/keepalive.c`), 죽은 연결에서도 참이 된다
+    #[test]
+    fn 연결_확인은_서버에_실제로_묻는다() {
+        let source = include_str!("sftp.rs");
+        let 머리 = "fn noop(&mut self)";
+        let start = source.find(머리).expect("noop을 찾지 못했다");
+        let rest = &source[start + 머리.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        let body = &rest[..end];
+
+        assert!(
+            body.contains("realpath"),
+            "연결 확인이 서버에 묻지 않는다: {body}"
+        );
+        assert!(
+            !body.contains("keepalive_send"),
+            "keepalive_send는 간격이 0이면 소켓을 건드리지 않는다: {body}"
+        );
+    }
 
     /// 인증 갈림만 재는 시험용 사이트 — 가짜 서버가 인증을 흉내 내지 않아
     /// 실제 `userauth_*` 호출은 기계로 잴 수 없다(그쪽은 HUMAN-VERIFY다)

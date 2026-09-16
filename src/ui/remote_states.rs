@@ -730,6 +730,14 @@ mod tests {
         // 최초 연결 실패의 안내는 붙지 않는다 — 방금까지 쓰던 설정을 의심하게 만든다
         assert!(!lost.contains("암호화 설정"), "{lost}");
         assert!(!lost.contains("사용자 이름"), "{lost}");
+        drop(_guard);
+
+        // **문장 틀이 그릴 때 만들어지는지**를 여기서 잰다 — 워커가 조합했다면 그 문자열이
+        // 탭 상태에 굳어 언어를 바꿔도 한국어로 남는다(대장 2026-08-14 항목이 그 결함이다)
+        let _guard =
+            crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::English);
+        let lost = failure_reason("connection reset by peer", FailureKind::LinkLost);
+        assert!(lost.starts_with("The connection was lost —"), "{lost}");
     }
 
     #[test]

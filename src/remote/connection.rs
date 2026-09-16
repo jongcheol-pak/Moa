@@ -1173,7 +1173,6 @@ mod tests {
         }
     }
 
-    /// 테스트가 쓰는 임시 파일 — 프로세스 번호를 넣어 동시에 도는 다른 실행과 겹치지 않게 한다
     /// 연결을 세워 `Ready`까지 받아 둔다 — 끊김 시험 넷이 그 뒤부터 잰다
     fn ready_connection(server: &Arc<FakeServer>) -> Connection {
         let mut connection = spawn(server, fast_retry());
@@ -1413,6 +1412,7 @@ mod tests {
         );
     }
 
+    /// 테스트가 쓰는 임시 파일 — 프로세스 번호를 넣어 동시에 도는 다른 실행과 겹치지 않게 한다
     fn temp_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("fe_t4_{label}_{}.bin", std::process::id()))
     }
@@ -1660,7 +1660,11 @@ mod tests {
             fast_retry(),
         );
         live.send(ConnCommand::Connect);
-        wait_events(&mut live, 2, Duration::from_secs(2));
+        wait_for(&mut live, Duration::from_secs(2), |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, ConnEvent::Phase(ConnPhase::Ready)))
+        });
 
         // 한쪽 서버를 응답 없는 상태로 만들고 명령을 밀어 넣는다
         blocked_server.set_hang(true);
@@ -1700,12 +1704,19 @@ mod tests {
             path: RemotePath::root(),
             quiet: false,
         });
-        let events = wait_events(&mut live, 1, Duration::from_secs(2));
+        // **개수가 아니라 찾는 이벤트로 기다린다** — `wait_events(.., 1, ..)`는 첫 이벤트
+        // 하나만 모으는데 목록 조회는 로그(시작)를 먼저 올려, 부하가 걸리면 그 한 줄만
+        // 쥐고 단언에 들어가 「목록이 없다」가 우연히 참이 된다(2026-09-16 실측)
+        let events = wait_for(&mut live, Duration::from_secs(2), |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, ConnEvent::Listed { .. }))
+        });
         assert!(
             events
                 .iter()
                 .any(|event| matches!(event, ConnEvent::Listed { .. })),
-            "막히지 않은 연결은 계속 답해야 한다"
+            "막히지 않은 연결은 계속 답해야 한다: {events:?}"
         );
 
         // 테스트가 끝나도록 풀어 준다

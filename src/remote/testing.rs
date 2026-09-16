@@ -178,7 +178,7 @@ impl FakeSession {
         // 선 연결이 도중에 죽은 경우 — 실제 서버에서는 소켓 오류로 나타난다
         if self.server.link_down.load(Ordering::SeqCst) {
             return Err(RemoteError::Protocol {
-                detail: "연결이 끊어졌습니다".to_owned(),
+                detail: "link down".to_owned(),
             });
         }
         if self.connected {
@@ -243,7 +243,7 @@ impl RemoteSession for FakeSession {
         // 데이터 연결만 막힌 서버 — 실제 FTP에서도 이 실패는 `Connect` 갈래로 온다
         if self.server.data_failure.load(Ordering::SeqCst) {
             return Err(RemoteError::Connect {
-                detail: "데이터 연결을 세우지 못했습니다".to_owned(),
+                detail: "data connection refused".to_owned(),
             });
         }
         let map = self
@@ -353,7 +353,7 @@ impl RemoteSession for FakeSession {
         // 접는 길이 이 실패를 「끊김」으로 오해하지 않는지를 시험이 여기서 잰다
         if self.server.link_down.load(Ordering::SeqCst) {
             return Err(RemoteError::Protocol {
-                detail: "연결이 끊어졌습니다".to_owned(),
+                detail: "link down".to_owned(),
             });
         }
         Ok(())
