@@ -2470,6 +2470,7 @@ impl ExplorerApp {
                 should_auto_refresh(AutoRefresh {
                     enabled,
                     remote: panel.is_remote(),
+                    connected: panel.is_remote_connected(),
                     transferring,
                     period,
                     now,
@@ -2542,6 +2543,8 @@ struct AutoRefresh {
     enabled: bool,
     /// 이 패널이 원격 탭을 보이고 있는가
     remote: bool,
+    /// 그 원격 탭의 연결이 서 있는가 — 끊긴 탭은 다시 붙기 전까지 조회 대상이 아니다
+    connected: bool,
     /// 전송이 도는 중인가 — 앱 전체에 하나의 값이다
     transferring: bool,
     /// 재조회 주기(초)
@@ -2556,11 +2559,16 @@ struct AutoRefresh {
 
 /// 이 패널을 지금 다시 조회해야 하는가 (FR-67).
 ///
-/// 다섯을 차례로 본다 — 설정 · 원격 탭 여부 · 전송 중 · 주기 · 사용자 조작 직후.
+/// 여섯을 차례로 본다 — 설정 · 원격 탭 여부 · **연결 생사** · 전송 중 · 주기 · 사용자 조작 직후.
 /// **조작 직후의 기준을 주기의 절반으로 둔 이유**(D10): 고정 값으로 두면 주기를 10초로
 /// 낮춘 사람에게는 그 유예가 주기만큼 길어 갱신이 거의 일어나지 않는다
 fn should_auto_refresh(check: AutoRefresh) -> bool {
     if !check.enabled || !check.remote || check.transferring {
+        return false;
+    }
+    // **끊긴 탭은 보내지 않는다** — 워커는 살아 있어 명령이 접수되므로, 막지 않으면
+    // 주기마다 죽은 소켓에 조회가 나가고 그때마다 연결 확인까지 함께 돈다
+    if !check.connected {
         return false;
     }
     if check.now - check.last_refresh < check.period {
@@ -3323,6 +3331,7 @@ mod tests {
         AutoRefresh {
             enabled: true,
             remote: true,
+            connected: true,
             transferring: false,
             period: 30.0,
             now: 100.0,
@@ -3350,6 +3359,16 @@ mod tests {
         // FR-67 acceptance ⓖ — 로컬 목록은 변경 감시(FR-10)가 따로 본다
         assert!(!should_auto_refresh(AutoRefresh {
             remote: false,
+            ..재조회()
+        }));
+    }
+
+    #[test]
+    fn 연결이_끊긴_원격_탭은_재조회하지_않는다() {
+        // 사용자 보고 2026-09-16 — 워커는 살아 있어 명령이 접수되므로, 막지 않으면
+        // 끊긴 뒤에도 주기마다 죽은 소켓을 두드린다
+        assert!(!should_auto_refresh(AutoRefresh {
+            connected: false,
             ..재조회()
         }));
     }

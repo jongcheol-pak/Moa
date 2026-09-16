@@ -1072,6 +1072,20 @@ impl PanelState {
         self.tabs.active().source.is_remote()
     }
 
+    /// 활성 탭이 원격이고 **그 연결이 서 있는가** (사용자 보고 2026-09-16).
+    ///
+    /// `is_remote`와 갈라 두는 이유: 자동 재조회(FR-67)는 연결이 살아 있을 때만 보내야 한다.
+    /// 끊긴 탭에도 보내면 워커는 살아 있어 명령이 접수되고, 주기마다 죽은 소켓을 두드린다
+    pub fn is_remote_connected(&self) -> bool {
+        matches!(
+            &self.tabs.active().source,
+            TabSource::Remote {
+                phase: TabPhase::Ok,
+                ..
+            }
+        )
+    }
+
     /// 지금 보고 있는 탭의 신원 (FR-54) — 전송 대상을 정하는 쪽이 쓴다
     pub fn active_tab_id(&self) -> TabId {
         self.tabs.active_id()

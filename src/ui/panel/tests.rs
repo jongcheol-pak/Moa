@@ -1690,6 +1690,33 @@ fn 원격_목록의_우클릭은_셸_메뉴를_띄우지_않는다() {
 }
 
 #[test]
+fn 연결이_선_원격_탭만_연결됨으로_본다() {
+    // 사용자 보고 2026-09-16 — 자동 재조회가 이 판정으로 갈린다.
+    // 끊긴 탭(`New`·`Error`)과 아직 붙는 중(`Connecting`)은 조회 대상이 아니다
+    let (연결됨, _) = remote_panel_in(TabPhase::Ok);
+    assert!(연결됨.is_remote_connected(), "연결된 탭을 끊긴 것으로 봤다");
+
+    for 끊김 in [
+        TabPhase::New,
+        TabPhase::Connecting,
+        TabPhase::Error {
+            message: "연결이 끊어졌습니다".to_owned(),
+            kind: crate::remote::types::FailureKind::LinkLost,
+        },
+    ] {
+        let (panel, _) = remote_panel_in(끊김.clone());
+        assert!(
+            !panel.is_remote_connected(),
+            "{끊김:?} 단계를 연결된 것으로 봤다"
+        );
+    }
+
+    // 로컬 탭은 애초에 대상이 아니다
+    let 로컬 = PanelState::new(PathBuf::from(r"C:\"));
+    assert!(!로컬.is_remote_connected(), "로컬 탭이 연결됨으로 보인다");
+}
+
+#[test]
 fn 갓_나뉜_패널은_원격_탭_하나만_갖는다() {
     // 사용자 보고 — 연결을 열면 시작 폴더 탭이 함께 남아 탭이 둘이었다
     let mut panel = PanelState::new(PathBuf::from(r"C:\"));
