@@ -24,7 +24,7 @@ use crate::remote::connection::{ConnCommand, ConnectionId, ListSource};
 use crate::remote::manager::ConnectionManager;
 use crate::remote::types::{RemoteEntry, RemotePath, SiteId};
 use crate::remote::url::RemoteUrl;
-use crate::ui::address_bar::{AddressBar, NavAction};
+use crate::ui::address_bar::{AddressBar, AddressTarget, NavAction};
 use crate::ui::drag_preview;
 use crate::ui::file_list::{FileListAction, FileListView};
 use crate::ui::icon_tex::{IconTextures, ThumbnailTextures};
@@ -1610,6 +1610,9 @@ impl PanelState {
             NavAction::Goto(path) => self.navigate(path, ctx),
             // 주소로 여는 일은 앱이 한다 — 여기서는 값만 받아 둔다
             NavAction::GotoRemote(url) => self.pending_remote_url = Some(url),
+            // 같은 서버 안 이동은 폴더를 더블클릭한 것과 같은 길로 간다 —
+            // 옮기고 깃발을 세우면 앱이 그 자리의 목록을 청한다
+            NavAction::GotoRemotePath(path) => self.set_remote_path(path),
         }
     }
 
@@ -1796,9 +1799,20 @@ impl PanelState {
         self.note_input(ui);
         let strip = crate::ui::tabs::show_tab_strip(ui, &self.tabs, remote, menu_state, targets);
         let tab = self.tabs.active();
+        // 주소 스트립은 로컬·원격이 같은 부품이다 (FR-31) — 갈리는 것은 가리키는 곳과
+        // 그 탭의 히스토리뿐이라, 그 둘만 소스에 맞춰 골라 넘긴다
+        let (target, can_back, can_forward) = match &tab.source {
+            TabSource::Local(path) => (
+                AddressTarget::Local(path.as_path()),
+                tab.history.can_back(),
+                tab.history.can_forward(),
+            ),
+            // 원격의 뒤로·앞으로는 T4가 잇는다 — 그때까지는 갈 곳이 없어 둘 다 거짓이다
+            TabSource::Remote { path, .. } => (AddressTarget::Remote(path), false, false),
+        };
         let address = self
             .address
-            .show(ui, tab.committed(), &tab.history, self.list.filter());
+            .show(ui, target, can_back, can_forward, self.list.filter());
         let nav = address.nav;
         if let Some(text) = address.filter {
             // 폴더를 다시 읽지 않는다 — 목록이 원본에서 그 자리에서 다시 만든다 (D1)

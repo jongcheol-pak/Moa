@@ -1,12 +1,15 @@
 //! 주소 스트립 — [←][→][↑] 탐색 버튼 + 경로 입력 (FR-6).
 //!
-//! 입력 정규화는 `panel::address_bar::normalize_input`을 그대로 쓴다(따옴표·상대 경로 처리).
-use crate::panel::address_bar::normalize_input;
-use crate::panel::history::History;
+//! 입력 정규화는 `panel::address_bar`의 두 함수를 그대로 쓴다(따옴표·상대 경로 처리).
+//! **로컬 탭과 원격 탭이 같은 부품을 쓴다**(FR-31) — 갈리는 것은 무엇을 보이고 무엇을
+//! 기준으로 입력을 푸느냐뿐이며, 그 갈림은 `AddressTarget` 하나가 든다.
+use crate::panel::address_bar::{normalize_input, normalize_remote_input};
+use crate::remote::types::RemotePath;
 use crate::remote::url::{RemoteUrl, parse_remote_url};
 use crate::ui::theme;
 use crate::ui::widgets;
 use eframe::egui;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 // ── 시각 토큰 (plan `## 시각 요소 분해` 1:1, 96DPI 기준 고정 px) ──
@@ -21,6 +24,16 @@ const FILTER_WIDTH: f32 = 160.0;
 /// 긴 경로가 이미 잘려 보이는 자리라 주소창까지 함께 줄이면 어느 폴더인지 읽을 수 없다
 const ADDRESS_MIN_WIDTH: f32 = 120.0;
 
+/// 주소 스트립이 지금 가리키는 곳 — 탭의 소스를 그리기에 필요한 만큼만 빌려 온다.
+///
+/// `TabSource`를 그대로 받지 않는 이유: 주소 스트립에 필요한 것은 경로 하나뿐인데
+/// 그쪽은 연결·단계·사이트까지 들고 있어, 시험에서 그 전부를 세워야 한다
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum AddressTarget<'a> {
+    Local(&'a Path),
+    Remote(&'a RemotePath),
+}
+
 /// 주소창이 상위(패널)에 돌려주는 탐색 요청
 #[derive(Clone, PartialEq, Debug)]
 pub enum NavAction {
@@ -33,6 +46,55 @@ pub enum NavAction {
     /// 로컬 경로와 **같은 입력칸**에서 갈린다: `://`가 있고 아는 스킴이면 여기로,
     /// 아니면 위 `Goto`로 간다(`C:\ftp` 같은 폴더 이름이 원격으로 오해받지 않게 한다)
     GotoRemote(RemoteUrl),
+    /// **보고 있는 그 서버 안에서** 다른 경로로 옮긴다 — 원격 탭에서만 나온다.
+    ///
+    /// 위 `GotoRemote`와 갈리는 지점: 그쪽은 주소에 호스트가 있어 **새 탭**을 열고,
+    /// 이쪽은 호스트가 없어 지금 연결을 그대로 쓴다(`/var/www`·`sub/dir`)
+    GotoRemotePath(RemotePath),
+}
+
+impl<'a> AddressTarget<'a> {
+    /// 주소칸에 보일 글자 — 원격은 **서버 안 경로만** 싣고 호스트·프로토콜은 싣지 않는다.
+    ///
+    /// 어느 서버인지는 탭 제목·배지가 이미 말하고, 여기에 호스트를 실으면 내부 서버 주소가
+    /// 화면에 상시로 뜬다(FR-39의 `경로로 복사`가 호스트를 빼는 것과 같은 이유다).
+    ///
+    /// `Cow`인 이유는 로컬 쪽이다 — 비UTF-8 경로는 빌려 줄 `&str`이 없어 손실 변환한 사본을
+    /// 내야 한다. `&str`로 좁히면 그런 경로에서 주소칸이 빈 채로 남는다
+    pub fn display_text(self) -> Cow<'a, str> {
+        match self {
+            AddressTarget::Local(path) => path.to_string_lossy(),
+            AddressTarget::Remote(path) => Cow::Borrowed(path.as_str()),
+        }
+    }
+
+    /// 위로 갈 자리가 있는가 — `↑` 버튼의 활성 판정이다.
+    ///
+    /// 원격은 루트(`/`)에서만 죽는다. 로컬의 빈 경로도 `parent()`가 `None`이라 함께 죽는데,
+    /// **원격 탭이 그 빈 경로를 받던 것이 이 버튼이 눌리지 않던 원인이었다**
+    pub fn can_go_up(self) -> bool {
+        match self {
+            AddressTarget::Local(path) => path.parent().is_some(),
+            AddressTarget::Remote(path) => path.parent().is_some(),
+        }
+    }
+
+    /// 주소칸에 친 글자를 탐색 요청으로 푼다 — 확정할 것이 없으면 `None`.
+    ///
+    /// **원격 주소를 먼저 본다**: 로컬 정규화는 `sftp://`를 상대 경로로 오해하고,
+    /// 원격 정규화는 그것을 서버 안 폴더 이름으로 오해한다. 그래서 `://`가 붙은 것은
+    /// 어느 탭에서 쳤든 **새 원격 탭**으로 가고(FR-34), 그 밖은 지금 탭의 종류로 갈린다
+    pub fn resolve_input(self, input: &str) -> Option<NavAction> {
+        if let Some(url) = parse_remote_url(input) {
+            return Some(NavAction::GotoRemote(url));
+        }
+        match self {
+            AddressTarget::Local(current) => normalize_input(current, input).map(NavAction::Goto),
+            AddressTarget::Remote(current) => {
+                normalize_remote_input(current, input).map(NavAction::GotoRemotePath)
+            }
+        }
+    }
 }
 
 /// 주소 스트립이 한 프레임에 돌려주는 것 — 탐색 요청과 바뀐 이름 필터.
@@ -74,14 +136,15 @@ impl AddressBar {
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
-        current: &Path,
-        history: &History<PathBuf>,
+        target: AddressTarget<'_>,
+        can_back: bool,
+        can_forward: bool,
         filter: &str,
     ) -> AddressBarOutcome {
         let mut action = None;
         let mut filter_changed = None;
         if !self.editing {
-            let shown = current.to_string_lossy();
+            let shown = target.display_text();
             if self.buffer != shown {
                 self.buffer = shown.into_owned();
             }
@@ -95,7 +158,7 @@ impl AddressBar {
                 if nav_button(
                     ui,
                     egui_phosphor::regular::ARROW_LEFT,
-                    history.can_back(),
+                    can_back,
                     crate::i18n::address_back(),
                 ) {
                     action = Some(NavAction::Back);
@@ -103,7 +166,7 @@ impl AddressBar {
                 if nav_button(
                     ui,
                     egui_phosphor::regular::ARROW_RIGHT,
-                    history.can_forward(),
+                    can_forward,
                     crate::i18n::address_forward(),
                 ) {
                     action = Some(NavAction::Forward);
@@ -111,7 +174,7 @@ impl AddressBar {
                 if nav_button(
                     ui,
                     egui_phosphor::regular::ARROW_UP,
-                    current.parent().is_some(),
+                    target.can_go_up(),
                     crate::i18n::address_up(),
                 ) {
                     action = Some(NavAction::Up);
@@ -132,12 +195,7 @@ impl AddressBar {
                 if resp.lost_focus() {
                     // 포커스를 잃으면 편집을 접고 현재 경로로 되돌린다(엔터로 확정하지 않은 입력은 버린다)
                     if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        // 원격 주소를 먼저 본다 — 로컬 정규화는 `sftp://`를 상대 경로로 오해한다
-                        if let Some(url) = parse_remote_url(&self.buffer) {
-                            action = Some(NavAction::GotoRemote(url));
-                        } else if let Some(path) = normalize_input(current, &self.buffer) {
-                            action = Some(NavAction::Goto(path));
-                        }
+                        action = target.resolve_input(&self.buffer);
                     }
                     self.editing = false;
                 }
@@ -254,5 +312,89 @@ mod tests {
                 "두 칸의 합이 남은 폭을 넘었다 (rest {rest}, 주소창 {address}, 필터 {filter})"
             );
         }
+    }
+
+    fn r(s: &str) -> RemotePath {
+        RemotePath::new(s)
+    }
+
+    #[test]
+    fn 원격_탭의_주소칸은_서버_안_경로만_보인다() {
+        // 사용자 보고의 증상 — 원격 탭에서 이 칸이 빈 채로 있었다.
+        // 종전에는 `TabState::committed()`가 준 빈 경로를 그렸다
+        let path = r("/backup/2026-09-16");
+        let 보이는_것 = AddressTarget::Remote(&path).display_text();
+        assert_eq!(보이는_것, "/backup/2026-09-16");
+        // 호스트·프로토콜은 싣지 않는다 — 내부 서버 주소가 화면에 상시로 뜨지 않게 한다
+        assert!(!보이는_것.contains("://"));
+
+        // 로컬은 종전 그대로다
+        assert_eq!(
+            AddressTarget::Local(Path::new(r"C:\Users\me")).display_text(),
+            r"C:\Users\me"
+        );
+    }
+
+    #[test]
+    fn 상위_버튼은_원격_루트에서만_죽는다() {
+        // `↑`가 눌리지 않던 원인 — 원격 탭이 빈 경로를 받아 `parent()`가 언제나 `None`이었다
+        let 루트 = r("/");
+        assert!(
+            !AddressTarget::Remote(&루트).can_go_up(),
+            "루트에서는 위가 없다"
+        );
+
+        for 아래 in ["/DB", "/var/www"] {
+            let path = r(아래);
+            assert!(
+                AddressTarget::Remote(&path).can_go_up(),
+                "{아래}에서 위로 갈 수 있어야 한다"
+            );
+        }
+
+        // 로컬 판정은 그대로 — 드라이브 뿌리는 죽고 그 아래는 산다
+        assert!(!AddressTarget::Local(Path::new(r"C:\")).can_go_up());
+        assert!(AddressTarget::Local(Path::new(r"C:\Users")).can_go_up());
+    }
+
+    #[test]
+    fn 주소칸_입력은_세_갈래로_갈린다() {
+        let 원격_현재 = r("/var");
+        let 원격 = AddressTarget::Remote(&원격_현재);
+        let 로컬 = AddressTarget::Local(Path::new(r"C:\base"));
+
+        // ⓐ 호스트가 붙은 주소는 어느 탭에서 쳤든 새 원격 탭이다 (FR-34)
+        assert!(matches!(
+            원격.resolve_input("ftp://example.test/pub"),
+            Some(NavAction::GotoRemote(_))
+        ));
+        assert!(matches!(
+            로컬.resolve_input("sftp://example.test/pub"),
+            Some(NavAction::GotoRemote(_))
+        ));
+
+        // ⓑ 원격 탭의 경로 입력은 같은 서버 안 이동이다
+        assert_eq!(
+            원격.resolve_input("/etc"),
+            Some(NavAction::GotoRemotePath(r("/etc")))
+        );
+        assert_eq!(
+            원격.resolve_input("www"),
+            Some(NavAction::GotoRemotePath(r("/var/www")))
+        );
+
+        // ⓒ 로컬 탭의 같은 입력은 로컬 이동이다 — `/etc`가 원격 경로로 새지 않는다
+        assert!(matches!(
+            로컬.resolve_input("D:\\data"),
+            Some(NavAction::Goto(_))
+        ));
+        assert!(matches!(
+            로컬.resolve_input("sub"),
+            Some(NavAction::Goto(_))
+        ));
+
+        // 빈 입력은 양쪽 다 아무것도 확정하지 않는다
+        assert_eq!(원격.resolve_input("   "), None);
+        assert_eq!(로컬.resolve_input("   "), None);
     }
 }
