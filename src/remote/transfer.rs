@@ -15,7 +15,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::remote::connection::{
-    ConnCommand, ConnectionId, TransferDirection, TransferId, TransferRequest,
+    ConnCommand, ConnPhase, ConnectionId, TransferDirection, TransferId, TransferRequest,
 };
 use crate::remote::manager::ConnectionManager;
 use crate::remote::queue::{TransferQueue, TransferState};
@@ -24,6 +24,20 @@ use crate::remote::types::SiteId;
 
 /// 받는 중인 파일에 붙는 꼬리 (Acceptance ⑤)
 const PART_SUFFIX: &str = ".part";
+
+/// 이 단계의 연결에 전송을 맡겨도 되는가 (사용자 보고 2026-09-17).
+///
+/// **막는 것은 둘뿐이다** — 끊기거나 실패한 연결(`Failed`)과 접힌 연결(`Closed`). 그 둘은
+/// 소켓이 없거나 죽어 있어, 맡기면 워커가 그 자리에서 실패를 돌려준다. 그러면 사용자가
+/// 누르는 재시도마다 즉시 실패가 하나씩 쌓이고 자동 재시도 횟수까지 헛되이 소진된다.
+///
+/// **`Idle`·`Connecting`은 막지 않는다.** 그 둘은 곧 `Ready`가 될 연결이고, 명령은 채널에
+/// 쌓여 순서대로 처리되므로 연결이 선 뒤에 나간다. 막으면 얻는 것 없이 첫 전송만 늦어진다
+/// (`phase`는 `Connection::poll`이 이벤트를 소비해야 갱신되므로, 막 열린 연결은 화면이
+/// 한 번 폴링하기 전까지 `Idle`로 보인다 — 거기에 게이트를 걸면 그 프레임을 통째로 버린다)
+fn usable_for_transfer(phase: &ConnPhase) -> bool {
+    !matches!(phase, ConnPhase::Failed { .. } | ConnPhase::Closed)
+}
 
 /// 이어받기 시작점을 정한다.
 ///
@@ -231,6 +245,9 @@ impl TransferRunner {
                 continue;
             }
             if let Some(connection) = manager.get(*id) {
+                if !usable_for_transfer(connection.phase()) {
+                    continue;
+                }
                 idle.entry(connection.site).or_default().push(*id);
             }
         }
@@ -1480,6 +1497,64 @@ mod tests {
         assert_eq!(runner.in_flight(), 0);
         assert_eq!(runner.pending_cleanup(), 0);
         let _ = std::fs::remove_file(&running_part);
+    }
+
+    /// 끊긴 연결에는 전송을 맡기지 않는다 (사용자 보고 2026-09-17).
+    ///
+    /// 맡기면 워커가 그 자리에서 실패를 돌려주므로, 사용자가 누르는 `다시 시도`마다 즉시
+    /// 실패가 하나씩 쌓이고 자동 재시도 횟수까지 헛되이 소진된다. 큐에 대기로 남겨 두면
+    /// 다시 붙었을 때 저절로 나간다 — 연결이 **아예 없는** 사이트에 쓰는 규칙과 같다
+    #[test]
+    fn 끊긴_연결에는_전송을_맡기지_않는다() {
+        let server = FakeServer::new();
+        server.set_entries("/", vec![]);
+        let (mut manager, sites, site) = manager_with_site(&server);
+        let mut queue = TransferQueue::new();
+        let mut runner = TransferRunner::new();
+        let _ = drain_until(&mut manager, Duration::from_secs(3), |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, ConnEvent::Phase(ConnPhase::Ready)))
+        });
+
+        // 선 연결을 죽인다 — 목록 조회가 실패하면서 워커가 끊김 단계를 올린다
+        server.set_link_down(true);
+        let conn = *manager.ids().first().expect("연결");
+        manager.send(
+            conn,
+            ConnCommand::List {
+                source: crate::remote::connection::ListSource::Tree { seq: 1 },
+                path: RemotePath::root(),
+                quiet: true,
+            },
+        );
+        let _ = drain_until(&mut manager, Duration::from_secs(3), |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, ConnEvent::Phase(ConnPhase::Failed { .. })))
+        });
+        assert!(
+            matches!(
+                manager.get(conn).expect("연결").phase(),
+                ConnPhase::Failed { .. }
+            ),
+            "연결이 끊김으로 표시되지 않았다 — 이 시험이 재려는 상태가 아니다"
+        );
+
+        let id = queue.enqueue(
+            site,
+            TransferDirection::Download,
+            PathBuf::from(r"C:\x.bin"),
+            RemotePath::new("/x.bin"),
+            10,
+        );
+        runner.start_ready(&mut queue, &manager, &sites, 0.0);
+        assert_eq!(runner.in_flight(), 0, "끊긴 연결에 전송을 맡겼다");
+        assert_eq!(
+            queue.get(id).expect("항목").state,
+            TransferState::Wait,
+            "대기로 남아야 다시 붙었을 때 저절로 나간다"
+        );
     }
 
     #[test]
