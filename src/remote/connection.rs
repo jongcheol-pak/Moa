@@ -475,12 +475,16 @@ fn run_list(worker: &mut Worker, source: ListSource, path: RemotePath, loud: boo
 /// 제어 채널이 살아 있다는 증거라 확인할 것이 없다. 남는 둘만 확인 대상이다:
 /// FTP는 소켓 오류·421이 `Connect`로 오고, SFTP는 갈래를 가리지 않고 `Protocol`로 온다.
 ///
-/// `Transfer`는 여기 넣지 않는다 — 전송 본문에서만 만들어지고 그 경로는 `TransferDone`을
-/// 직접 올려 아래 두 호출부에 닿지 않는다. `HostKey`도 마찬가지로 핸드셰이크에서만 난다
+/// **`Transfer`도 대상이다** (사용자 보고 2026-09-17) — 종전에는 「전송 경로는 `TransferDone`을
+/// 직접 올려 이 호출부에 닿지 않는다」는 이유로 빼 두었는데, 그래서 전송이 끊김으로 실패해도
+/// 탭이 계속 `연결됨`으로 보였다. `run_transfer`가 세 번째 호출부가 되면서 그 전제가 사라졌다.
+/// 데이터 연결만 막힌 실패는 `NOOP`이 제어 채널을 확인해 걸러 낸다.
+///
+/// `HostKey`는 그대로 뺀다 — 핸드셰이크에서만 나므로 확인할 연결이 아직 없다
 fn probe_worthy(err: &RemoteError) -> bool {
     matches!(
         err,
-        RemoteError::Connect { .. } | RemoteError::Protocol { .. }
+        RemoteError::Connect { .. } | RemoteError::Protocol { .. } | RemoteError::Transfer { .. }
     )
 }
 
@@ -602,12 +606,25 @@ fn worker(mut worker: Worker) {
                 }
             }
             ConnCommand::Transfer(request) => {
-                if !run_transfer(&mut worker, request) {
+                let (alive, failure) = run_transfer(&mut worker, request);
+                if !alive {
                     break;
                 }
                 // 전송이 중간에 끊긴 뒤에는 이 연결을 그대로 쓸 수 없을 수 있다 —
                 // 세션이 그렇다고 하면 버리고 다시 세운다
-                if worker.session.needs_reset() && !reset_session(&mut worker) {
+                if worker.session.needs_reset() {
+                    if !reset_session(&mut worker) {
+                        break;
+                    }
+                // **재수립을 하지 않는 세션에서만 끊김을 확인한다** (사용자 보고 2026-09-17).
+                //
+                // 어긋났을 수 있는 세션에 `NOOP`을 보내면 밀린 응답을 읽어 답이 뜻을 잃는다
+                // (FTP — `RemoteSession::needs_reset`의 doc). 그쪽은 위에서 이미 다시 섰고,
+                // 여기 오는 것은 SFTP처럼 전송이 채널 단위인 세션이다. 확인하지 않으면
+                // 죽은 세션이 `연결됨`인 채 남아 그 뒤의 전송이 전부 같은 자리에서 실패한다
+                } else if let Some(err) = failure
+                    && !note_if_lost(&mut worker, &err)
+                {
                     break;
                 }
             }
@@ -815,18 +832,26 @@ fn list_tree(worker: &mut Worker, root: &RemotePath) -> Vec<(RemotePath, u64)> {
 /// 전송 한 건 — 로컬 파일을 열고 세션에 스트림을 넘긴다 (NFR-12).
 ///
 /// 진행률은 `PROGRESS_INTERVAL`마다 묶어 보내고, 취소 신호는 64KB 경계마다 본다
-fn run_transfer(worker: &mut Worker, request: TransferRequest) -> bool {
+/// 전송 하나를 옮기고 결과를 올린다.
+///
+/// 돌려주는 것은 **`(워커를 계속 돌릴지, 실패했다면 그 오류)`**다 — 끊김 확인을 여기서
+/// 하지 않고 호출부에 맡기기 때문이다. 그 순서가 정확성이다: FTP는 전송이 끝나지 못하면
+/// 제어 채널에 읽지 않은 응답이 남을 수 있어(`RemoteSession::needs_reset`) **그 세션에
+/// `NOOP`을 보내면 밀린 응답을 읽는다.** 그쪽은 확인 없이 연결을 다시 세우는 것이 맞고,
+/// 확인이 필요한 것은 재수립을 하지 않는 세션(SFTP)이다
+fn run_transfer(worker: &mut Worker, request: TransferRequest) -> (bool, Option<RemoteError>) {
     let id = request.id;
     // **들어오면서 신호를 지우지 않는다** — 이 전송을 멈추라는 말이 시작보다 먼저 닿아 있을
     // 수 있고, 지우면 그 취소가 사라진다
     let result = transfer(worker, &request);
+    let failure = result.as_ref().err().cloned();
     let alive = worker.emit(ConnEvent::TransferDone { id, result });
     // 이 전송을 겨냥한 신호만 거둔다. 연결을 접는 중(`CANCEL_ALL`)이거나 벌써 다음 전송을
     // 겨냥한 신호가 들어와 있으면 그대로 둔다
     let _ = worker
         .cancel
         .compare_exchange(id.0, CANCEL_NONE, Ordering::SeqCst, Ordering::SeqCst);
-    alive
+    (alive, failure)
 }
 
 fn transfer(worker: &mut Worker, request: &TransferRequest) -> RemoteResult<u64> {
@@ -1171,6 +1196,238 @@ mod tests {
         fn quit(&mut self) -> RemoteResult<()> {
             self.inner.quit()
         }
+    }
+
+    /// **전송만 실패하는** 세션 — 제어 채널의 생사는 따로 정한다.
+    ///
+    /// 가짜 서버로는 이 상태를 만들 수 없다: `set_link_down`은 전송과 `noop`을 함께 죽이고
+    /// `set_data_failure`는 목록만 막는다. 여기서 재려는 것은 **전송 실패가 끊김 확인을
+    /// 거치는가**이고, 그 확인이 두 갈래로 갈리는지를 보려면 둘을 따로 쥐어야 한다.
+    ///
+    /// 재수립은 하지 않는다(`needs_reset` 기본값) — 그것을 하는 세션(FTP)은 확인 없이
+    /// 다시 서는 쪽이고, 이 시험이 겨냥하는 것은 그러지 않는 쪽(SFTP)이다.
+    ///
+    /// **문구를 ASCII로 적는다** — `src/remote` 아래의 한글 리터럴은 `i18n` 소스 훑기
+    /// 시험이 화면 문구로 본다(가짜 서버가 같은 이유로 `"link down"`을 쓴다)
+    struct TransferFailingSession {
+        inner: FakeSession,
+        /// 제어 채널이 살아 있는가 — `noop`이 답하는지를 이 값이 정한다
+        control_alive: bool,
+    }
+
+    impl TransferFailingSession {
+        fn new(server: &Arc<FakeServer>, control_alive: bool) -> TransferFailingSession {
+            TransferFailingSession {
+                inner: FakeSession::new(Arc::clone(server)),
+                control_alive,
+            }
+        }
+
+        /// 전송이 도중에 끊긴 모양 — 실제 구현이 내는 것과 같은 갈래다
+        fn aborted() -> RemoteError {
+            RemoteError::Transfer {
+                detail: "transfer aborted".to_owned(),
+                transferred: 0,
+            }
+        }
+    }
+
+    impl RemoteSession for TransferFailingSession {
+        fn connect(&mut self, site: &SiteRecord) -> RemoteResult<()> {
+            self.inner.connect(site)
+        }
+
+        fn is_secure(&self) -> bool {
+            self.inner.is_secure()
+        }
+
+        fn login(&mut self, site: &SiteRecord, password: &str) -> RemoteResult<()> {
+            self.inner.login(site, password)
+        }
+
+        fn pwd(&mut self) -> RemoteResult<RemotePath> {
+            self.inner.pwd()
+        }
+
+        fn list(&mut self, path: &RemotePath) -> RemoteResult<Vec<RemoteEntry>> {
+            self.inner.list(path)
+        }
+
+        fn cwd(&mut self, path: &RemotePath) -> RemoteResult<()> {
+            self.inner.cwd(path)
+        }
+
+        fn mkdir(&mut self, path: &RemotePath) -> RemoteResult<()> {
+            self.inner.mkdir(path)
+        }
+
+        fn remove(&mut self, path: &RemotePath) -> RemoteResult<()> {
+            self.inner.remove(path)
+        }
+
+        fn rmdir(&mut self, path: &RemotePath) -> RemoteResult<()> {
+            self.inner.rmdir(path)
+        }
+
+        fn rename(&mut self, from: &RemotePath, to: &RemotePath) -> RemoteResult<()> {
+            self.inner.rename(from, to)
+        }
+
+        fn chmod(&mut self, path: &RemotePath, mode: u32) -> RemoteResult<()> {
+            self.inner.chmod(path, mode)
+        }
+
+        fn download(
+            &mut self,
+            _path: &RemotePath,
+            _dest: &mut dyn std::io::Write,
+            _offset: u64,
+            _progress: &mut dyn Progress,
+        ) -> RemoteResult<u64> {
+            Err(TransferFailingSession::aborted())
+        }
+
+        fn upload(
+            &mut self,
+            _path: &RemotePath,
+            _src: &mut dyn std::io::Read,
+            _offset: u64,
+            _progress: &mut dyn Progress,
+        ) -> RemoteResult<u64> {
+            Err(TransferFailingSession::aborted())
+        }
+
+        fn noop(&mut self) -> RemoteResult<()> {
+            if !self.control_alive {
+                return Err(RemoteError::Connect {
+                    detail: "link down".to_owned(),
+                });
+            }
+            self.inner.noop()
+        }
+
+        fn quit(&mut self) -> RemoteResult<()> {
+            self.inner.quit()
+        }
+    }
+
+    /// 전송 오류도 끊김 확인 대상이다 — 그러지 않으면 `TransferDone`만 올라간다
+    #[test]
+    fn 전송_오류도_끊김_확인_대상이다() {
+        assert!(
+            probe_worthy(&TransferFailingSession::aborted()),
+            "전송 실패가 확인 대상에서 빠지면 끊김이 영영 잡히지 않는다"
+        );
+    }
+
+    /// 전송이 끊김으로 실패하면 그 연결이 `끊김`으로 표시된다 (사용자 보고 2026-09-17).
+    ///
+    /// 표시되지 않으면 탭이 `연결됨`인 채 남아, 사용자가 무엇을 해야 하는지 알 길이 없다 —
+    /// 그리고 큐는 그 죽은 연결에 전송을 계속 배정한다
+    #[test]
+    fn 전송_실패가_끊김이면_단계가_실패로_간다() {
+        let server = FakeServer::new();
+        let mut connection = Connection::spawn(
+            ConnectionId(1),
+            site(),
+            "비밀".to_owned(),
+            Box::new(TransferFailingSession::new(&server, false)),
+            silent_wake(),
+            fast_retry(),
+        );
+        connection.send(ConnCommand::Connect);
+        wait_for(&mut connection, Duration::from_secs(2), |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, ConnEvent::Phase(ConnPhase::Ready)))
+        });
+
+        let local = temp_path("transfer_link_lost");
+        connection.send(ConnCommand::Transfer(TransferRequest {
+            id: TransferId(1),
+            direction: TransferDirection::Download,
+            remote: RemotePath::new("/x.bin"),
+            local: local.clone(),
+            offset: 0,
+            remote_size: 0,
+        }));
+        let events = wait_for(&mut connection, Duration::from_secs(3), |events| {
+            has_lost_phase(events)
+        });
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ConnEvent::TransferDone {
+                    result: Err(RemoteError::Transfer { .. }),
+                    ..
+                }
+            )),
+            "전송이 실패로 끝나야 한다: {events:?}"
+        );
+        assert!(has_lost_phase(&events), "끊김 단계가 없다: {events:?}");
+
+        drop(connection);
+        let _ = std::fs::remove_file(local);
+    }
+
+    /// 제어 채널이 살아 있으면 전송만 실패한 것을 끊김으로 보지 않는다.
+    ///
+    /// 방화벽에 데이터 연결만 막힌 FTP가 이 자리다 — 끊김으로 단정하면 멀쩡한 연결의 탭이
+    /// 실패 화면으로 바뀌고, 사용자는 잘 쓰던 설정을 의심하게 된다
+    #[test]
+    fn 제어_채널이_답하면_전송_실패를_끊김으로_보지_않는다() {
+        let server = FakeServer::new();
+        server.set_entries("/", vec![fake_entry("a.txt", false)]);
+        let mut connection = Connection::spawn(
+            ConnectionId(1),
+            site(),
+            "비밀".to_owned(),
+            Box::new(TransferFailingSession::new(&server, true)),
+            silent_wake(),
+            fast_retry(),
+        );
+        connection.send(ConnCommand::Connect);
+        wait_for(&mut connection, Duration::from_secs(2), |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, ConnEvent::Phase(ConnPhase::Ready)))
+        });
+
+        let local = temp_path("transfer_data_only");
+        connection.send(ConnCommand::Transfer(TransferRequest {
+            id: TransferId(1),
+            direction: TransferDirection::Download,
+            remote: RemotePath::new("/x.bin"),
+            local: local.clone(),
+            offset: 0,
+            remote_size: 0,
+        }));
+        // **「오지 않았다」를 시간으로 재지 않는다** — 다음 명령의 답이 오면 앞 명령이
+        // 올릴 것은 전부 올라간 뒤다
+        let events = barrier(&mut connection);
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ConnEvent::TransferDone {
+                    result: Err(RemoteError::Transfer { .. }),
+                    ..
+                }
+            )),
+            "전송은 실패해야 한다: {events:?}"
+        );
+        assert!(
+            !has_lost_phase(&events),
+            "제어 채널이 답했는데 끊김으로 봤다: {events:?}"
+        );
+        assert!(
+            noop_count(&server) >= 1,
+            "확인을 보내지 않았다 — 갈래를 가리지 않고 통과한 것이다"
+        );
+
+        drop(connection);
+        let _ = std::fs::remove_file(local);
     }
 
     /// 연결을 세워 `Ready`까지 받아 둔다 — 끊김 시험 넷이 그 뒤부터 잰다
