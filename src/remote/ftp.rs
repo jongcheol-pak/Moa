@@ -83,6 +83,98 @@ impl FtpSession {
         }
     }
 
+    /// 받기의 본체 — **실패를 `?`로 그대로 올린다.**
+    ///
+    /// 표시(`mark_dirty_if_interrupted`)를 여기서 하지 않고 부르는 쪽에 두는 이유가 이
+    /// 분리의 전부다: 한 함수 안에 두면 `RETR`·`REST`·`stream()` 실패가 `?`로 빠져나가
+    /// **그 표시를 건너뛴다**. 실제로 그랬고, 그래서 끊긴 연결이 다시 서지 못한 채
+    /// 남아 그 뒤의 모든 전송이 같은 자리에서 실패했다 (사용자 보고 2026-09-17)
+    fn download_inner(
+        &mut self,
+        path: &RemotePath,
+        dest: &mut dyn Write,
+        offset: u64,
+        progress: &mut dyn Progress,
+    ) -> RemoteResult<u64> {
+        let name = path.as_str();
+        let stream = self.stream()?;
+        if offset > 0 {
+            stream
+                .resume_transfer(offset as usize)
+                .map_err(|e| classify(e, RemoteOp::Raw("REST"), Some(name)))?;
+        }
+        let mut data = stream
+            .retr_as_stream(name)
+            .map_err(|e| classify(e, RemoteOp::Raw("RETR"), Some(name)))?;
+
+        match pump(&mut data, dest, progress) {
+            Pumped::Done(total) => stream
+                .finalize_retr_stream(data)
+                .map(|()| total)
+                .map_err(|e| classify(e, RemoteOp::Raw("RETR"), Some(name))),
+            Pumped::Cancelled => {
+                // `ABOR`는 그대로 보낸다 — 서버에게 중단을 알리는 뜻이 있고, 실패해도
+                // 부르는 쪽에서 연결을 버리므로 그 성패가 결과를 바꾸지 않는다
+                let _ = stream.abort(data);
+                Err(RemoteError::Cancelled)
+            }
+            Pumped::Failed {
+                transferred,
+                detail,
+            } => {
+                let _ = stream.abort(data);
+                Err(RemoteError::Transfer {
+                    detail,
+                    transferred,
+                })
+            }
+        }
+    }
+
+    /// 올리기의 본체 — `download_inner`와 같은 이유로 갈라 두었다
+    fn upload_inner(
+        &mut self,
+        path: &RemotePath,
+        src: &mut dyn Read,
+        offset: u64,
+        progress: &mut dyn Progress,
+    ) -> RemoteResult<u64> {
+        let name = path.as_str();
+        let stream = self.stream()?;
+        // 이어 올리기는 REST+STOR이 아니라 APPE로 한다 — REST를 업로드에 받아 주는 서버가
+        // 들쭉날쭉하고, 이어받기 지점은 호출부가 원격 파일 크기로 이미 정해 두기 때문이다
+        let mut data = if offset > 0 {
+            stream
+                .append_with_stream(name)
+                .map_err(|e| classify(e, RemoteOp::Raw("APPE"), Some(name)))?
+        } else {
+            stream
+                .put_with_stream(name)
+                .map_err(|e| classify(e, RemoteOp::Raw("STOR"), Some(name)))?
+        };
+
+        match pump(src, &mut data, progress) {
+            Pumped::Done(total) => stream
+                .finalize_put_stream(data)
+                .map(|()| total)
+                .map_err(|e| classify(e, RemoteOp::Raw("STOR"), Some(name))),
+            Pumped::Cancelled => {
+                let _ = stream.abort(data);
+                Err(RemoteError::Cancelled)
+            }
+            Pumped::Failed {
+                transferred,
+                detail,
+            } => {
+                let _ = stream.abort(data);
+                Err(RemoteError::Transfer {
+                    detail,
+                    transferred,
+                })
+            }
+        }
+    }
+
     /// 사이트 설정의 전송 모드를 데이터 연결 방식으로 옮긴다 (FR-45)
     fn apply_transfer_mode(&mut self, mode: TransferMode) {
         let (data_mode, fallback) = match mode {
@@ -294,6 +386,11 @@ impl RemoteSession for FtpSession {
             .map_err(|e| classify(e, RemoteOp::Raw("SITE CHMOD"), Some(path.as_str())))
     }
 
+    /// **이 함수에 `?`를 두지 않는다** — 어느 실패든 아래 한 줄을 지나야 한다.
+    ///
+    /// 본체를 `download_inner`로 갈라 둔 것이 그 보장이다. 종전에는 `RETR`·`REST`·
+    /// `stream()` 실패가 `?`로 빠져나가 표시를 건너뛰었고, 그래서 죽은 제어 채널이
+    /// 그대로 남아 재시도가 같은 자리에서 계속 실패했다 (사용자 보고 2026-09-17)
     fn download(
         &mut self,
         path: &RemotePath,
@@ -301,43 +398,12 @@ impl RemoteSession for FtpSession {
         offset: u64,
         progress: &mut dyn Progress,
     ) -> RemoteResult<u64> {
-        let name = path.as_str();
-        let stream = self.stream()?;
-        if offset > 0 {
-            stream
-                .resume_transfer(offset as usize)
-                .map_err(|e| classify(e, RemoteOp::Raw("REST"), Some(name)))?;
-        }
-        let mut data = stream
-            .retr_as_stream(name)
-            .map_err(|e| classify(e, RemoteOp::Raw("RETR"), Some(name)))?;
-
-        let outcome = match pump(&mut data, dest, progress) {
-            Pumped::Done(total) => stream
-                .finalize_retr_stream(data)
-                .map(|()| total)
-                .map_err(|e| classify(e, RemoteOp::Raw("RETR"), Some(name))),
-            Pumped::Cancelled => {
-                // `ABOR`는 그대로 보낸다 — 서버에게 중단을 알리는 뜻이 있고, 실패해도
-                // 아래에서 연결을 버리므로 그 성패가 결과를 바꾸지 않는다
-                let _ = stream.abort(data);
-                Err(RemoteError::Cancelled)
-            }
-            Pumped::Failed {
-                transferred,
-                detail,
-            } => {
-                let _ = stream.abort(data);
-                Err(RemoteError::Transfer {
-                    detail,
-                    transferred,
-                })
-            }
-        };
+        let outcome = self.download_inner(path, dest, offset, progress);
         self.mark_dirty_if_interrupted(&outcome);
         outcome
     }
 
+    /// `download`와 같은 규칙 — **`?`를 두지 않는다**
     fn upload(
         &mut self,
         path: &RemotePath,
@@ -345,40 +411,7 @@ impl RemoteSession for FtpSession {
         offset: u64,
         progress: &mut dyn Progress,
     ) -> RemoteResult<u64> {
-        let name = path.as_str();
-        let stream = self.stream()?;
-        // 이어 올리기는 REST+STOR이 아니라 APPE로 한다 — REST를 업로드에 받아 주는 서버가
-        // 들쭉날쭉하고, 이어받기 지점은 호출부가 원격 파일 크기로 이미 정해 두기 때문이다
-        let mut data = if offset > 0 {
-            stream
-                .append_with_stream(name)
-                .map_err(|e| classify(e, RemoteOp::Raw("APPE"), Some(name)))?
-        } else {
-            stream
-                .put_with_stream(name)
-                .map_err(|e| classify(e, RemoteOp::Raw("STOR"), Some(name)))?
-        };
-
-        let outcome = match pump(src, &mut data, progress) {
-            Pumped::Done(total) => stream
-                .finalize_put_stream(data)
-                .map(|()| total)
-                .map_err(|e| classify(e, RemoteOp::Raw("STOR"), Some(name))),
-            Pumped::Cancelled => {
-                let _ = stream.abort(data);
-                Err(RemoteError::Cancelled)
-            }
-            Pumped::Failed {
-                transferred,
-                detail,
-            } => {
-                let _ = stream.abort(data);
-                Err(RemoteError::Transfer {
-                    detail,
-                    transferred,
-                })
-            }
-        };
+        let outcome = self.upload_inner(path, src, offset, progress);
         self.mark_dirty_if_interrupted(&outcome);
         outcome
     }
@@ -719,16 +752,25 @@ mod tests {
         );
     }
 
-    /// `download`가 끊긴 전송을 표시하는 자리를 지나는가 (받기 취소·받기 실패 두 갈래).
+    /// `download`가 끊긴 전송을 표시하는 자리를 **건너뛸 수 없는가**.
     ///
-    /// 소스를 훑어 재는 이유는 그 두 갈래를 실제로 태우려면 살아 있는 FTP 서버가 필요하기
-    /// 때문이다 — 이 레포의 규약 강제 시험과 같은 방식이다
+    /// 소스를 훑어 재는 이유는 네 갈래(받기·올리기 × 취소·실패)를 실제로 태우려면 살아
+    /// 있는 FTP 서버가 필요하기 때문이다 — 이 레포의 규약 강제 시험과 같은 방식이다.
+    ///
+    /// **`?`가 0개인지도 함께 잰다** — 표시 호출이 있는지만 보면 그 앞의 `?`가 그것을
+    /// 건너뛰는 것을 놓친다. 실제로 놓쳤고(`RETR`·`REST`·`stream()` 셋), 그래서 죽은
+    /// 연결이 다시 서지 못한 채 재시도가 계속 실패했다 (사용자 보고 2026-09-17)
     #[test]
     fn 받기는_끊긴_전송을_표시하는_자리를_지난다() {
         let body = 함수_본문("fn download(");
         assert!(
             body.contains("mark_dirty_if_interrupted"),
             "받기의 취소·실패가 연결을 버릴 것으로 표시하지 않는다"
+        );
+        let code = 주석을_뺀_줄(&body);
+        assert!(
+            !code.contains('?'),
+            "받기에 조기 반환이 있다 — 그 갈래는 표시를 건너뛴다: {code}"
         );
     }
 
@@ -739,6 +781,23 @@ mod tests {
             body.contains("mark_dirty_if_interrupted"),
             "올리기의 취소·실패가 연결을 버릴 것으로 표시하지 않는다"
         );
+        let code = 주석을_뺀_줄(&body);
+        assert!(
+            !code.contains('?'),
+            "올리기에 조기 반환이 있다 — 그 갈래는 표시를 건너뛴다: {code}"
+        );
+    }
+
+    /// 주석 줄을 걷어낸다 — **재는 대상은 코드이지 서술이 아니다**.
+    ///
+    /// `함수_본문`은 다음 함수 머리 앞까지 자르므로 **그 함수의 doc 주석이 딸려 온다**.
+    /// 그 주석이 `?`를 서술하면(이 자리에서는 그럴 이유가 충분하다) 걸러 내지 않는 판정이
+    /// 거짓 실패를 낸다
+    fn 주석을_뺀_줄(body: &str) -> String {
+        body.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// 이 파일에서 그 함수의 본문만 잘라 낸다 — 다음 `    fn ` 앞까지
