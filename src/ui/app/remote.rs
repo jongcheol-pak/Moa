@@ -576,7 +576,11 @@ impl ExplorerApp {
                         }
                     }
                     // 연결되면 곧바로 첫 목록을 청한다 — 그러지 않으면 연결만 되고 화면이 빈 채 남는다
+                    // 트리도 새로 읽게 한다 — `다시 시도`는 같은 연결 번호로 다시 서므로,
+                    // 끊긴 동안 실패로 담긴 노드가 남으면 트리는 그 오류만 계속 보인다
+                    // (실패도 "읽은 것"이라 `TreeCache::begin`이 다시 묻지 않는다)
                     if matches!(phase, ConnPhase::Ready) {
+                        self.tree_cache.forget(conn);
                         self.request_remote_list(conn);
                     }
                     // 연결이 끊기면 물어 둔 확인의 답이 영영 오지 않는다 — 그 전송을 붙잡아
