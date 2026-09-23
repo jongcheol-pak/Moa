@@ -896,9 +896,15 @@ fn transfer(worker: &mut Worker, request: &TransferRequest) -> RemoteResult<u64>
     }
 }
 
-/// 받을 파일을 연다. 이어받기면 있던 파일을 자르지 않고 그 지점부터 이어 쓴다
+/// 받을 파일을 연다. 이어받기면 있던 파일을 자르지 않고 그 지점부터 이어 쓴다.
+///
+/// 처음 받을 때는 **담을 폴더부터 만든다** — 폴더 받기(FR-38)는 서버 쪽 구조를 그대로
+/// 옮기므로 하위 폴더가 로컬에 아직 없다. 만들지 않으면 그 안의 파일이 전부 실패한다
 fn open_for_download(local: &PathBuf, offset: u64) -> RemoteResult<File> {
     if offset == 0 {
+        if let Some(parent) = local.parent() {
+            std::fs::create_dir_all(parent).map_err(local_error)?;
+        }
         return File::create(local).map_err(local_error);
     }
     let mut file = OpenOptions::new()
@@ -2475,5 +2481,21 @@ mod tests {
             "{lines:?}"
         );
         assert!(!lines.contains(&"TLS로 암호화된 연결입니다."), "{lines:?}");
+    }
+
+    #[test]
+    fn 폴더_받기는_없는_로컬_하위_폴더를_만들어_받는다() {
+        // 사용자 보고 2026-09-23 — 폴더 받기는 파일마다 `<받는 곳>\<폴더>\<하위>\이름`으로
+        // 큐에 들어가는데, 그 폴더들이 아직 없어 모든 파일이 os error 3으로 실패했다
+        let base = std::env::temp_dir().join(format!("fe_folder_dl_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let local = base.join("폴더").join("하위").join("a.txt.part");
+
+        let file = open_for_download(&local, 0);
+
+        assert!(file.is_ok(), "{:?}", file.err());
+        assert!(local.exists());
+        drop(file);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
