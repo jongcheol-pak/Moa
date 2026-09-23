@@ -10,7 +10,7 @@
 //!
 //! 이 모듈은 `#[cfg(test)]`가 아니다 — `tests/`의 통합 테스트가 라이브러리를 일반 빌드로
 //! 링크하기 때문이다(T26의 동시성 회귀 테스트가 이것을 쓴다).
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -55,6 +55,10 @@ pub struct FakeServer {
     /// 켜져 있으면 **목록만** 실패하고 `noop`은 성공한다 — FTP의 수동형 데이터 연결이
     /// 방화벽에 막힌 상태다. 제어 채널은 멀쩡하므로 끊김으로 보면 안 된다
     data_failure: AtomicBool,
+    /// 지운 것을 순서대로 — `"remove:/경로"`·`"rmdir:/경로"`. 재귀 삭제의 차례를 재는 데 쓴다
+    deleted: Mutex<Vec<String>>,
+    /// 삭제를 거절할 경로들 — 권한 없는 항목을 흉내 낸다
+    refused: Mutex<HashSet<String>>,
 }
 
 impl FakeServer {
@@ -125,6 +129,54 @@ impl FakeServer {
 
     pub fn live_sessions(&self) -> usize {
         self.live_sessions.load(Ordering::SeqCst)
+    }
+
+    /// 이 경로의 삭제(`remove`·`rmdir`)를 거절한다 — 권한 없는 항목
+    pub fn refuse_delete(&self, path: &str) {
+        if let Ok(mut refused) = self.refused.lock() {
+            refused.insert(path.to_owned());
+        }
+    }
+
+    /// 지운 것들 (순서 보존) — `"remove:/경로"`·`"rmdir:/경로"`
+    pub fn deleted(&self) -> Vec<String> {
+        self.deleted.lock().map(|d| d.clone()).unwrap_or_default()
+    }
+
+    /// 삭제 한 건을 처리한다 — 거절 경로면 권한 없음, 폴더 안에 아직 항목이 남았으면
+    /// 실제 서버처럼 거절한다(`550 Directory not empty`). 지우면 부모 목록에서도 뺀다
+    fn delete(&self, kind: &str, path: &RemotePath) -> RemoteResult<()> {
+        let key = path.as_str();
+        let denied = |detail: &str| RemoteError::PermissionDenied {
+            path: key.to_owned(),
+            detail: detail.to_owned(),
+        };
+        if self
+            .refused
+            .lock()
+            .map(|r| r.contains(key))
+            .unwrap_or(false)
+        {
+            return Err(denied("permission denied"));
+        }
+        let mut map = self
+            .entries
+            .lock()
+            .map_err(|_| denied("가짜 서버 상태가 오염됐습니다"))?;
+        if kind == "rmdir" && map.get(key).is_some_and(|children| !children.is_empty()) {
+            return Err(denied("Directory not empty"));
+        }
+        map.remove(key);
+        if let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+            && let Some(siblings) = map.get_mut(parent.as_str())
+        {
+            siblings.retain(|entry| entry.name != name);
+        }
+        drop(map);
+        if let Ok(mut deleted) = self.deleted.lock() {
+            deleted.push(format!("{kind}:{key}"));
+        }
+        Ok(())
     }
 
     /// 처리한 명령 이름들 (순서 보존)
@@ -273,16 +325,18 @@ impl RemoteSession for FakeSession {
         self.ensure_connected()
     }
 
-    fn remove(&mut self, _path: &RemotePath) -> RemoteResult<()> {
+    fn remove(&mut self, path: &RemotePath) -> RemoteResult<()> {
         self.server.record("remove");
         self.server.tick();
-        self.ensure_connected()
+        self.ensure_connected()?;
+        self.server.delete("remove", path)
     }
 
-    fn rmdir(&mut self, _path: &RemotePath) -> RemoteResult<()> {
+    fn rmdir(&mut self, path: &RemotePath) -> RemoteResult<()> {
         self.server.record("rmdir");
         self.server.tick();
-        self.ensure_connected()
+        self.ensure_connected()?;
+        self.server.delete("rmdir", path)
     }
 
     fn rename(&mut self, _from: &RemotePath, _to: &RemotePath) -> RemoteResult<()> {
@@ -555,5 +609,35 @@ mod tests {
             assert_eq!(server.live_sessions(), 1);
         }
         assert_eq!(server.live_sessions(), 0);
+    }
+
+    #[test]
+    fn 삭제는_빈_폴더만_받고_차례를_남긴다() {
+        let server = FakeServer::new();
+        let mut session = FakeSession::new(Arc::clone(&server));
+        session.connect(&site()).expect("연결");
+        server.set_entries("/t", vec![fake_entry("a.txt", false)]);
+        server.set_entries("/", vec![fake_entry("t", true)]);
+
+        // 안에 파일이 남은 폴더는 실제 서버처럼 거절한다
+        assert!(session.rmdir(&RemotePath::new("/t")).is_err());
+        session
+            .remove(&RemotePath::new("/t/a.txt"))
+            .expect("파일 삭제");
+        session.rmdir(&RemotePath::new("/t")).expect("빈 폴더 삭제");
+
+        assert_eq!(server.deleted(), vec!["remove:/t/a.txt", "rmdir:/t"]);
+        assert!(session.list(&RemotePath::root()).expect("목록").is_empty());
+    }
+
+    #[test]
+    fn 거절_경로의_삭제는_실패하고_기록되지_않는다() {
+        let server = FakeServer::new();
+        let mut session = FakeSession::new(Arc::clone(&server));
+        session.connect(&site()).expect("연결");
+        server.refuse_delete("/잠김.txt");
+
+        assert!(session.remove(&RemotePath::new("/잠김.txt")).is_err());
+        assert!(server.deleted().is_empty());
     }
 }
