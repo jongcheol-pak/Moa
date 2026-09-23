@@ -605,7 +605,7 @@ pub trait RemoteSession: Send {
     /// 파일 삭제
     fn remove(&mut self, path: &RemotePath) -> RemoteResult<()>;
 
-    /// 빈 디렉터리 삭제 (재귀 삭제는 호출부가 항목을 훑어 조립한다 — T23)
+    /// 빈 디렉터리 삭제 (재귀 삭제는 워커의 `remove_tree`가 항목을 훑어 조립한다)
     fn rmdir(&mut self, path: &RemotePath) -> RemoteResult<()>;
 
     fn rename(&mut self, from: &RemotePath, to: &RemotePath) -> RemoteResult<()>;
