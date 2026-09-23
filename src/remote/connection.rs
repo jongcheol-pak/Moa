@@ -168,7 +168,9 @@ pub enum ConnCommand {
     Cwd(RemotePath),
     Mkdir(RemotePath),
     Remove(RemotePath),
-    Rmdir(RemotePath),
+    /// 폴더를 **안에 든 것까지** 지운다 — 워커가 훑어 파일·링크 → 깊은 폴더부터 → 자기 순으로
+    /// 지운다(`remove_tree`). 세션의 `rmdir`는 빈 폴더 하나뿐이라 재귀는 여기서 조립한다
+    RemoveTree(RemotePath),
     Rename {
         from: RemotePath,
         to: RemotePath,
@@ -577,8 +579,8 @@ fn worker(mut worker: Worker) {
                     break;
                 }
             }
-            ConnCommand::Rmdir(path) => {
-                let result = worker.session.rmdir(&path);
+            ConnCommand::RemoveTree(path) => {
+                let result = remove_tree(&mut worker, &path);
                 if !finish_op(&mut worker, OpKind::Rmdir, result) {
                     break;
                 }
@@ -819,7 +821,7 @@ fn list_tree(worker: &mut Worker, root: &RemotePath) -> Vec<(RemotePath, u64)> {
                 continue;
             }
             let path = dir.join(&entry.name);
-            if entry.is_dir {
+            if entry.is_dir && !entry.is_symlink {
                 pending.push((path, depth + 1));
             } else {
                 found.push((path, entry.size));
@@ -827,6 +829,112 @@ fn list_tree(worker: &mut Worker, root: &RemotePath) -> Vec<(RemotePath, u64)> {
         }
     }
     found
+}
+
+/// 폴더를 안에 든 것까지 지운다 — 파일·링크를 먼저, 폴더는 깊은 것부터, 뿌리는 마지막에.
+///
+/// **한 항목이 실패해도 나머지는 계속 지운다** — 권한 없는 파일 하나 때문에 멈추면 다시 눌러도
+/// 같은 자리에서 멈춘다. 못 지운 항목은 서버 로그에 한 줄씩 남기고 수를 세어
+/// `RemoteError::Incomplete`로 돌려준다. 그 항목의 조상 폴더는 비지 않아 함께 남으며 각각 센다.
+///
+/// **링크는 따라 들어가지 않는다** — 들어가면 링크가 가리키는 다른 폴더의 내용을 지운다.
+/// 못 읽은 폴더와 깊이 상한(`TREE_MAX_DEPTH`)을 넘은 폴더는 지우지 않고 실패로 센다.
+///
+/// **연결이 죽었으면 그 자리에서 멈춘다** — 죽은 연결로 남은 항목을 전부 실패시켜 봐야
+/// 로그만 쌓인다. 그 오류를 그대로 돌려주면 `finish_op`의 끊김 확인이 단계를 올린다
+fn remove_tree(worker: &mut Worker, root: &RemotePath) -> RemoteResult<()> {
+    let mut files = Vec::new();
+    // 전위 순서 — 부모가 자식보다 앞에 온다. 거꾸로 지우면 자식이 먼저 지워진다
+    let mut dirs = Vec::new();
+    let mut failed = 0usize;
+    let mut first: Option<RemoteError> = None;
+    let mut pending = vec![(root.clone(), 0usize)];
+    while let Some((dir, depth)) = pending.pop() {
+        if worker.shutdown.load(Ordering::SeqCst) {
+            return Err(RemoteError::Cancelled);
+        }
+        if depth >= TREE_MAX_DEPTH {
+            worker.log(
+                LogKind::Error,
+                crate::i18n::dynamic::log_too_deep(dir.as_str()),
+            );
+            failed += 1;
+            continue;
+        }
+        let entries = match worker.session.list(&dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                if link_is_dead(worker, &err) {
+                    return Err(err);
+                }
+                worker.log(
+                    LogKind::Error,
+                    crate::i18n::dynamic::log_read_failed(dir.as_str(), &err.to_string()),
+                );
+                failed += 1;
+                first.get_or_insert(err);
+                continue;
+            }
+        };
+        dirs.push(dir.clone());
+        for entry in entries {
+            if entry.name == ".." || entry.name == "." {
+                continue;
+            }
+            let path = dir.join(&entry.name);
+            if entry.is_dir && !entry.is_symlink {
+                pending.push((path, depth + 1));
+            } else {
+                files.push(path);
+            }
+        }
+    }
+
+    let removals = files
+        .into_iter()
+        .map(|path| (path, false))
+        .chain(dirs.into_iter().rev().map(|path| (path, true)));
+    for (path, is_dir) in removals {
+        if worker.shutdown.load(Ordering::SeqCst) {
+            return Err(RemoteError::Cancelled);
+        }
+        let result = if is_dir {
+            worker.session.rmdir(&path)
+        } else {
+            worker.session.remove(&path)
+        };
+        let Err(err) = result else {
+            continue;
+        };
+        if link_is_dead(worker, &err) {
+            return Err(err);
+        }
+        worker.log(
+            LogKind::Error,
+            crate::i18n::dynamic::log_delete_failed(path.as_str(), &err.to_string()),
+        );
+        failed += 1;
+        first.get_or_insert(err);
+    }
+
+    match first {
+        None if failed == 0 => Ok(()),
+        // 깊이 상한만 걸린 경우 — 서버가 준 문장이 없어 로그 문구를 사유로 쓴다
+        None => Err(RemoteError::Incomplete {
+            failed,
+            detail: crate::i18n::dynamic::log_too_deep(root.as_str()),
+        }),
+        Some(err) => Err(RemoteError::Incomplete {
+            failed,
+            detail: err.to_string(),
+        }),
+    }
+}
+
+/// 이 실패가 연결이 죽어서 난 것인가 — `note_if_lost`와 같은 판정이되 단계는 올리지 않는다.
+/// 올리는 것은 뒤이은 `finish_op`의 몫이다(두 번 올리면 로그가 겹친다)
+fn link_is_dead(worker: &mut Worker, err: &RemoteError) -> bool {
+    probe_worthy(err) && worker.session.noop().is_err()
 }
 
 /// 전송 한 건 — 로컬 파일을 열고 세션에 스트림을 넘긴다 (NFR-12).
@@ -2497,5 +2605,191 @@ mod tests {
         assert!(local.exists());
         drop(file);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 폴더 삭제를 보내고 그 결과가 올 때까지 기다린다 — 연결은 먼저 세운다
+    fn remove_tree_on(server: &Arc<FakeServer>, root: &str) -> (Vec<ConnEvent>, RemoteResult<()>) {
+        let mut connection = spawn(server, fast_retry());
+        connection.send(ConnCommand::Connect);
+        connection.send(ConnCommand::RemoveTree(RemotePath::new(root)));
+        let events = wait_for(&mut connection, Duration::from_secs(3), |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    ConnEvent::OpDone {
+                        op: OpKind::Rmdir,
+                        ..
+                    }
+                )
+            })
+        });
+        let result = events
+            .iter()
+            .find_map(|event| match event {
+                ConnEvent::OpDone {
+                    op: OpKind::Rmdir,
+                    result,
+                } => Some(result.clone()),
+                _ => None,
+            })
+            .expect("삭제 결과가 오지 않았다");
+        (events, result)
+    }
+
+    /// 지운 차례에서 **자식이 모두 부모보다 앞에 오는가** — 부모를 먼저 지우면 서버가 거절한다
+    fn children_before_parents(deleted: &[String]) -> bool {
+        let path = |line: &str| {
+            line.split_once(':')
+                .map(|(_, p)| p.to_owned())
+                .unwrap_or_default()
+        };
+        deleted.iter().enumerate().all(|(at, line)| {
+            let dir = format!("{}/", path(line));
+            deleted[at + 1..]
+                .iter()
+                .all(|later| !path(later).starts_with(&dir))
+        })
+    }
+
+    #[test]
+    fn 폴더_삭제는_안에_든_것까지_깊은_것부터_지운다() {
+        // 사용자 보고 2026-09-23 — 비어 있지 않은 폴더는 RMD 한 번으로는 서버가 거절했다
+        let server = FakeServer::new();
+        server.set_entries(
+            "/t",
+            vec![fake_entry("a.txt", false), fake_entry("s", true)],
+        );
+        server.set_entries("/t/s", vec![fake_entry("b.txt", false)]);
+
+        let (_, result) = remove_tree_on(&server, "/t");
+
+        assert_eq!(result, Ok(()));
+        let mut deleted = server.deleted();
+        assert!(children_before_parents(&deleted), "{deleted:?}");
+        deleted.sort();
+        assert_eq!(
+            deleted,
+            vec![
+                "remove:/t/a.txt",
+                "remove:/t/s/b.txt",
+                "rmdir:/t",
+                "rmdir:/t/s"
+            ]
+        );
+    }
+
+    #[test]
+    fn 폴더_삭제는_못_지운_항목을_건너뛰고_그_수를_알린다() {
+        let server = FakeServer::new();
+        server.set_entries(
+            "/t",
+            vec![fake_entry("a.txt", false), fake_entry("s", true)],
+        );
+        server.set_entries("/t/s", vec![fake_entry("b.txt", false)]);
+        server.refuse_delete("/t/a.txt");
+
+        let (events, result) = remove_tree_on(&server, "/t");
+
+        // 그 파일 + 비지 않아 남는 뿌리 — 나머지는 지워졌다
+        assert!(
+            matches!(result, Err(RemoteError::Incomplete { failed: 2, .. })),
+            "{result:?}"
+        );
+        let deleted = server.deleted();
+        assert!(
+            deleted.contains(&"remove:/t/s/b.txt".to_owned()),
+            "{deleted:?}"
+        );
+        assert!(deleted.contains(&"rmdir:/t/s".to_owned()), "{deleted:?}");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ConnEvent::Log { kind: LogKind::Error, text } if text.contains("/t/a.txt")
+            )),
+            "못 지운 항목이 서버 로그에 없다: {events:?}"
+        );
+    }
+
+    #[test]
+    fn 깊은_항목이_남으면_조상_폴더도_각각_실패로_센다() {
+        let server = FakeServer::new();
+        server.set_entries("/t", vec![fake_entry("s", true)]);
+        server.set_entries("/t/s", vec![fake_entry("n", true)]);
+        server.set_entries("/t/s/n", vec![fake_entry("x", false)]);
+        server.refuse_delete("/t/s/n/x");
+
+        let (_, result) = remove_tree_on(&server, "/t");
+
+        // x · n · s · t
+        assert!(
+            matches!(result, Err(RemoteError::Incomplete { failed: 4, .. })),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn 폴더_삭제는_링크를_따라_들어가지_않는다() {
+        // 따라 들어가면 링크가 가리키는 다른 폴더의 내용을 지운다
+        let server = FakeServer::new();
+        let mut link = fake_entry("ln", true);
+        link.is_symlink = true;
+        server.set_entries("/t", vec![link]);
+        server.set_entries("/t/ln", vec![fake_entry("남의것.txt", false)]);
+
+        let (_, result) = remove_tree_on(&server, "/t");
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(server.deleted(), vec!["remove:/t/ln", "rmdir:/t"]);
+        let lists = server.calls().iter().filter(|name| *name == "list").count();
+        assert_eq!(lists, 1, "링크 아래를 읽었다");
+    }
+
+    #[test]
+    fn 폴더_삭제_중_연결이_죽으면_멈추고_끊김으로_올린다() {
+        let server = FakeServer::new();
+        server.set_entries("/t", vec![fake_entry("a.txt", false)]);
+        let mut connection = spawn(&server, fast_retry());
+        connection.send(ConnCommand::Connect);
+        wait_for(&mut connection, Duration::from_secs(2), |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, ConnEvent::Phase(ConnPhase::Ready)))
+        });
+        server.set_link_down(true);
+
+        connection.send(ConnCommand::RemoveTree(RemotePath::new("/t")));
+        let events = wait_for(&mut connection, Duration::from_secs(3), |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    ConnEvent::Phase(ConnPhase::Failed {
+                        kind: FailureKind::LinkLost,
+                        ..
+                    })
+                )
+            })
+        });
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ConnEvent::OpDone {
+                    op: OpKind::Rmdir,
+                    result: Err(RemoteError::Protocol { .. })
+                }
+            )),
+            "부분 실패가 아니라 끊긴 오류 그대로 와야 한다: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ConnEvent::Phase(ConnPhase::Failed {
+                    kind: FailureKind::LinkLost,
+                    ..
+                })
+            )),
+            "{events:?}"
+        );
+        assert!(server.deleted().is_empty());
     }
 }

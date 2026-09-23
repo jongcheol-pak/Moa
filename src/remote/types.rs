@@ -371,6 +371,9 @@ pub enum RemoteError {
     Protocol { detail: String },
     /// 사용자가 취소함 — 실패로 세지 않는다
     Cancelled,
+    /// 여러 항목을 지우다 일부를 지우지 못함 — 폴더 재귀 삭제의 부분 실패.
+    /// `detail`은 첫 실패의 문장이고 나머지 사유는 항목마다 서버 로그에 남는다
+    Incomplete { failed: usize, detail: String },
 }
 
 /// 실패 화면이 사유 뒤에 덧붙일 안내를 고르는 기준 (FR-32).
@@ -411,7 +414,8 @@ impl RemoteError {
             | RemoteError::Transfer { .. }
             | RemoteError::Unsupported { .. }
             | RemoteError::Protocol { .. }
-            | RemoteError::Cancelled => FailureKind::Other,
+            | RemoteError::Cancelled
+            | RemoteError::Incomplete { .. } => FailureKind::Other,
         }
     }
 
@@ -425,7 +429,8 @@ impl RemoteError {
             | RemoteError::PermissionDenied { detail, .. }
             | RemoteError::Transfer { detail, .. }
             | RemoteError::Unsupported { detail, .. }
-            | RemoteError::Protocol { detail } => detail,
+            | RemoteError::Protocol { detail }
+            | RemoteError::Incomplete { detail, .. } => detail,
             RemoteError::Cancelled => "",
         }
     }
@@ -523,6 +528,9 @@ impl std::fmt::Display for RemoteError {
             }
             RemoteError::Protocol { detail } => f.write_str(&t::err_protocol(detail)),
             RemoteError::Cancelled => f.write_str(crate::i18n::remote_cancelled()),
+            RemoteError::Incomplete { failed, detail } => {
+                f.write_str(&t::err_incomplete(*failed, detail))
+            }
         }
     }
 }

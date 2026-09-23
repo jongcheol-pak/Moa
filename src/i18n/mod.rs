@@ -1107,6 +1107,15 @@ pub mod dynamic {
         }
     }
 
+    /// 폴더를 지우다 일부가 남았을 때 — 첫 실패의 사유를 붙인다
+    pub fn err_incomplete(failed: usize, detail: &str) -> String {
+        match current() {
+            Language::Korean => format!("항목 {failed}개를 지우지 못했습니다 — {detail}"),
+            Language::English if failed == 1 => format!("1 item could not be deleted — {detail}"),
+            Language::English => format!("{failed} items could not be deleted — {detail}"),
+        }
+    }
+
     pub fn err_protocol(detail: &str) -> String {
         match current() {
             Language::Korean => format!("서버와 통신하지 못했습니다 — {detail}"),
@@ -1153,6 +1162,14 @@ pub mod dynamic {
         match current() {
             Language::Korean => format!("{path} 아래는 너무 깊어 건너뜁니다"),
             Language::English => format!("Skipping below {path} — too deep"),
+        }
+    }
+
+    /// 폴더 재귀 삭제 중 항목 하나를 지우지 못했을 때 — 서버 로그에 남는다
+    pub fn log_delete_failed(path: &str, error: &str) -> String {
+        match current() {
+            Language::Korean => format!("{path} 를 지우지 못했습니다: {error}"),
+            Language::English => format!("Could not delete {path}: {error}"),
         }
     }
 

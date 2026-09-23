@@ -1237,7 +1237,7 @@ pub(super) fn settle_dialog<T>(
 /// **둘 다 재귀가 아니다**: 안이 빈 폴더가 아니면 서버가 거절하고 그 사유가 로그에 남는다
 pub(super) fn delete_command(path: RemotePath, is_dir: bool) -> ConnCommand {
     if is_dir {
-        ConnCommand::Rmdir(path)
+        ConnCommand::RemoveTree(path)
     } else {
         ConnCommand::Remove(path)
     }
@@ -1693,7 +1693,10 @@ mod tests {
             delete_command(path.clone(), false),
             ConnCommand::Remove(path.clone())
         );
-        assert_eq!(delete_command(path.clone(), true), ConnCommand::Rmdir(path));
+        assert_eq!(
+            delete_command(path.clone(), true),
+            ConnCommand::RemoveTree(path)
+        );
     }
 
     #[test]
