@@ -690,15 +690,21 @@ fn classify_response(response: Response, operation: RemoteOp, path: Option<&str>
             operation: operation.label().to_owned(),
             detail,
         },
-        // 550은 "없음"과 "권한 없음"에 함께 쓰인다 — 서버 문구로만 갈린다
+        // 550은 "권한 없음"·"없음"·그 밖의 거절(`Directory not empty` 등)에 함께 쓰인다 —
+        // 서버 문구로만 갈린다. 어느 쪽도 아니면 「찾을 수 없음」으로 몰지 않고 원문을 보인다
         550 => {
             if mentions_permission(&detail) {
                 RemoteError::PermissionDenied {
                     path: path_of(),
                     detail,
                 }
-            } else {
+            } else if mentions_missing(&detail) {
                 RemoteError::NotFound {
+                    path: path_of(),
+                    detail,
+                }
+            } else {
+                RemoteError::Refused {
                     path: path_of(),
                     detail,
                 }
@@ -721,6 +727,23 @@ fn mentions_permission(detail: &str) -> bool {
         // 앱을 영어로 두었다고 서버 문구가 영어가 되지는 않는다. 한국어로 답하는 서버를
         // 위해 그 낱말을 그대로 둔다
         || detail.contains("권한")
+}
+
+/// 서버가 「없다」고 답했는가 — 권한 판정 **다음에** 본다(「권한이 없습니다」는 권한 쪽이다)
+fn mentions_missing(detail: &str) -> bool {
+    let lowered = detail.to_ascii_lowercase();
+    [
+        "no such",
+        "not found",
+        "does not exist",
+        "doesn't exist",
+        "cannot find",
+        "can't find",
+    ]
+    .iter()
+    .any(|word| lowered.contains(word))
+        // 위 `mentions_permission`과 같은 이유로 서버 원문의 한국어 낱말을 둔다
+        || detail.contains("없습니다")
 }
 
 #[cfg(test)]
@@ -1038,6 +1061,36 @@ mod tests {
             Some("/none"),
         );
         assert!(matches!(&missing, RemoteError::NotFound { path, .. } if path == "/none"));
+
+        // 권한도 「없음」도 아닌 550 — 종전에는 「찾을 수 없음」으로 보였다 (2026-09-23 실측)
+        let not_empty = classify(
+            response_error(550, "550 Directory not empty."),
+            RemoteOp::Raw("RMD"),
+            Some("/top"),
+        );
+        assert!(
+            matches!(&not_empty, RemoteError::Refused { path, .. } if path == "/top"),
+            "{not_empty:?}"
+        );
+        assert!(not_empty.detail().contains("Directory not empty"));
+
+        // 한국어로 답하는 서버 — 「없습니다」는 없음, 「권한이 없습니다」는 권한 쪽이다
+        assert!(matches!(
+            classify(
+                response_error(550, "550 파일이 없습니다"),
+                RemoteOp::Raw("DELE"),
+                Some("/a")
+            ),
+            RemoteError::NotFound { .. }
+        ));
+        assert!(matches!(
+            classify(
+                response_error(550, "550 권한이 없습니다"),
+                RemoteOp::Raw("DELE"),
+                Some("/a")
+            ),
+            RemoteError::PermissionDenied { .. }
+        ));
 
         let unsupported = classify(
             response_error(502, "502 Command not implemented"),

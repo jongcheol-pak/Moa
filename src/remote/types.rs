@@ -374,6 +374,9 @@ pub enum RemoteError {
     /// 여러 항목을 지우다 일부를 지우지 못함 — 폴더 재귀 삭제의 부분 실패.
     /// `detail`은 첫 실패의 문장이고 나머지 사유는 항목마다 서버 로그에 남는다
     Incomplete { failed: usize, detail: String },
+    /// 서버가 요청을 거절함 — 권한도 「없음」도 아닌 사유(`550 Directory not empty` 등).
+    /// 사유가 서버마다 제각각이라 우리 문장은 중립으로 두고 서버 원문을 그대로 보인다
+    Refused { path: String, detail: String },
 }
 
 /// 실패 화면이 사유 뒤에 덧붙일 안내를 고르는 기준 (FR-32).
@@ -415,7 +418,8 @@ impl RemoteError {
             | RemoteError::Unsupported { .. }
             | RemoteError::Protocol { .. }
             | RemoteError::Cancelled
-            | RemoteError::Incomplete { .. } => FailureKind::Other,
+            | RemoteError::Incomplete { .. }
+            | RemoteError::Refused { .. } => FailureKind::Other,
         }
     }
 
@@ -430,7 +434,8 @@ impl RemoteError {
             | RemoteError::Transfer { detail, .. }
             | RemoteError::Unsupported { detail, .. }
             | RemoteError::Protocol { detail }
-            | RemoteError::Incomplete { detail, .. } => detail,
+            | RemoteError::Incomplete { detail, .. }
+            | RemoteError::Refused { detail, .. } => detail,
             RemoteError::Cancelled => "",
         }
     }
@@ -531,6 +536,7 @@ impl std::fmt::Display for RemoteError {
             RemoteError::Incomplete { failed, detail } => {
                 f.write_str(&t::err_incomplete(*failed, detail))
             }
+            RemoteError::Refused { path, detail } => f.write_str(&t::err_refused(path, detail)),
         }
     }
 }
@@ -927,5 +933,19 @@ mod tests {
         let mut sink = NoProgress;
         assert!(sink.report(0));
         assert!(sink.report(u64::MAX));
+    }
+
+    #[test]
+    fn 거절은_경로와_서버_원문을_보이고_없음이라_하지_않는다() {
+        let _lang = crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+        let refused = RemoteError::Refused {
+            path: "/top".to_owned(),
+            detail: "550 Directory not empty".to_owned(),
+        };
+        let text = refused.to_string();
+        assert!(text.contains("/top"), "{text}");
+        assert!(text.contains("550 Directory not empty"), "{text}");
+        assert!(!text.contains("찾을 수 없"), "{text}");
+        assert_eq!(refused.failure_kind(), FailureKind::Other);
     }
 }

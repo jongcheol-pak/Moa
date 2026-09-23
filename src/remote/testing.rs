@@ -164,7 +164,11 @@ impl FakeServer {
             .lock()
             .map_err(|_| denied("가짜 서버 상태가 오염됐습니다"))?;
         if kind == "rmdir" && map.get(key).is_some_and(|children| !children.is_empty()) {
-            return Err(denied("Directory not empty"));
+            // 실서버의 `550 Directory not empty`가 분류되는 갈래와 같게 둔다(`ftp::classify_response`)
+            return Err(RemoteError::Refused {
+                path: key.to_owned(),
+                detail: "550 Directory not empty".to_owned(),
+            });
         }
         map.remove(key);
         if let (Some(parent), Some(name)) = (path.parent(), path.file_name())

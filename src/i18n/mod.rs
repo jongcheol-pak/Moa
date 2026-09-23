@@ -1082,6 +1082,14 @@ pub mod dynamic {
         }
     }
 
+    /// 서버가 거절했을 때 — 사유는 서버 원문에 맡기고 문장은 중립으로 둔다
+    pub fn err_refused(path: &str, detail: &str) -> String {
+        match current() {
+            Language::Korean => format!("'{path}' 요청을 서버가 거절했습니다 — {detail}"),
+            Language::English => format!("The server refused the request for '{path}' — {detail}"),
+        }
+    }
+
     pub fn err_permission(path: &str, detail: &str) -> String {
         match current() {
             Language::Korean => format!("'{path}'에 접근할 권한이 없습니다 — {detail}"),
@@ -1457,7 +1465,7 @@ mod tests {
         ///
         /// 위젯 상태를 잇는 열쇠(`Id::new`·`id_salt`)는 바꾸면 대화 상태가 초기화되고,
         /// 나머지는 화면에 나오지 않는 내부 값이다
-        const EXEMPT_LITERALS: [&str; 51] = [
+        const EXEMPT_LITERALS: [&str; 52] = [
             // 위젯 ID
             "정보 대화",
             "라이선스 대화",
@@ -1489,8 +1497,9 @@ mod tests {
             "한글",
             "글꼴 검증",
             // 서버가 보낸 응답을 살피는 낱말 (`remote::ftp::mentions_permission`) —
-            // 화면 언어를 따르면 안 되는 자리다
+            // 화면 언어를 따르면 안 되는 자리다. `mentions_missing`의 「없습니다」도 같다
             "권한",
+            "없습니다",
             // 가짜 서버(`remote::testing`)가 쓰는 값 — 화면에 나오지 않는다
             "연결되어 있지 않습니다",
             "가짜 서버 상태가 오염됐습니다",
