@@ -510,6 +510,7 @@ strings! {
     /// 목록에서 폴더임을 알리는 꼬리표
     conflict_folder_mark => "(폴더)" / "(folder)";
     remote_delete_irreversible => "되돌릴 수 없습니다." / "This cannot be undone.";
+    remote_delete_folder_contents => "폴더는 안에 든 것까지 모두 지워집니다." / "Folders are deleted together with everything inside them.";
 
     // ── 원격 탭 상태 (FR-31) ──
     remote_hint_head => "주소창에 " / "Type ";

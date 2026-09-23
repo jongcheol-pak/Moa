@@ -725,6 +725,11 @@ impl ExplorerApp {
                 self.manager.note(conn, LogKind::Error, text.clone());
                 self.notice = Some((text, now + NOTICE_SECS));
             }
+            OpOutcome::NoticeAndRelist(text) => {
+                self.manager.note(conn, LogKind::Error, text.clone());
+                self.notice = Some((text, now + NOTICE_SECS));
+                self.request_remote_list(conn);
+            }
             OpOutcome::Ignore => {}
         }
     }
@@ -1184,6 +1189,8 @@ pub(super) enum OpOutcome {
     Relist,
     /// 실패 사유를 상태 줄과 로그에 남긴다
     Notice(String),
+    /// 일부만 실패했다 — 사유를 남기고 **목록도 다시 읽는다**. 지워진 것이 있어 목록이 낡았다
+    NoticeAndRelist(String),
     /// 사용자가 시킨 작업이 아니라 알리지 않는다
     Ignore,
 }
@@ -1200,6 +1207,10 @@ pub(super) fn op_outcome(op: OpKind, result: Result<(), RemoteError>) -> OpOutco
     }
     match result {
         Ok(()) => OpOutcome::Relist,
+        Err(err @ RemoteError::Incomplete { .. }) => match op_failure_message(op, &err) {
+            Some(message) => OpOutcome::NoticeAndRelist(message),
+            None => OpOutcome::Ignore,
+        },
         Err(err) => match op_failure_message(op, &err) {
             Some(message) => OpOutcome::Notice(message),
             None => OpOutcome::Ignore,
@@ -1233,8 +1244,9 @@ pub(super) fn settle_dialog<T>(
 /// **이 함수를 부르는 곳은 확인 대화가 `Some`을 돌려준 자리 하나뿐이다** — 메뉴에서 곧바로
 /// 삭제로 가는 길은 없다(plan Halt Forecast).
 ///
-/// 폴더냐 파일이냐로 갈린다 — 폴더에는 `RMD`/`rmdir`, 파일에는 `DELE`/`unlink`가 나간다.
-/// **둘 다 재귀가 아니다**: 안이 빈 폴더가 아니면 서버가 거절하고 그 사유가 로그에 남는다
+/// 폴더냐 파일이냐로 갈린다 — 파일에는 `DELE`/`unlink` 한 번, 폴더에는 **안에 든 것까지**
+/// 지우는 `RemoveTree`가 나간다(워커가 훑어 조립한다 — 사용자 보고 2026-09-23). 링크는
+/// 목록이 폴더로 보이지 않으므로 파일 갈래로 가 링크만 지워진다
 pub(super) fn delete_command(path: RemotePath, is_dir: bool) -> ConnCommand {
     if is_dir {
         ConnCommand::RemoveTree(path)
@@ -1697,6 +1709,28 @@ mod tests {
             delete_command(path.clone(), true),
             ConnCommand::RemoveTree(path)
         );
+    }
+
+    #[test]
+    fn 폴더_삭제가_일부만_실패하면_알리고_목록도_다시_읽는다() {
+        // 일부는 지워졌으므로 알림만 남기면 목록이 실제와 어긋난다
+        let partial = RemoteError::Incomplete {
+            failed: 2,
+            detail: "permission denied".to_owned(),
+        };
+        let OpOutcome::NoticeAndRelist(text) = op_outcome(OpKind::Rmdir, Err(partial)) else {
+            panic!("부분 실패가 재조회를 부르지 않았다");
+        };
+        assert!(text.contains('2'), "{text}");
+        // 그 밖의 실패는 종전대로 알리기만 한다
+        let refused = RemoteError::PermissionDenied {
+            path: "/a".to_owned(),
+            detail: "550".to_owned(),
+        };
+        assert!(matches!(
+            op_outcome(OpKind::Remove, Err(refused)),
+            OpOutcome::Notice(_)
+        ));
     }
 
     #[test]

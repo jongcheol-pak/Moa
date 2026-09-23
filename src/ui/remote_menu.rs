@@ -566,6 +566,12 @@ pub fn show_conflict_dialog(
 /// 어차피 지워지지 않았다 — 문구가 하는 일과 달랐다.
 ///
 /// 돌려주는 값: `Confirmed(())`면 지운다. 다른 대화들과 같은 결론 타입을 쓴다
+/// 고른 것에 폴더가 있는가 — 있으면 삭제 확인에 「안에 든 것까지 지워진다」를 더한다.
+/// 폴더 삭제는 재귀라(`ConnCommand::RemoveTree`) 한 번의 확인으로 트리 전체가 사라진다
+pub fn has_folder(targets: &[RemoteTarget]) -> bool {
+    targets.iter().any(|item| item.is_dir)
+}
+
 pub fn show_delete_confirm(ctx: &egui::Context, targets: &[RemoteTarget]) -> DialogOutcome<()> {
     let mut confirmed = None;
     let mut closed = false;
@@ -593,6 +599,12 @@ pub fn show_delete_confirm(ctx: &egui::Context, targets: &[RemoteTarget]) -> Dia
                 ui.label(egui::RichText::new("…").color(theme::TEXT_MUTED));
             }
             ui.add_space(6.0);
+            if has_folder(targets) {
+                ui.label(
+                    egui::RichText::new(crate::i18n::remote_delete_folder_contents())
+                        .color(theme::ERROR_TEXT),
+                );
+            }
             ui.label(
                 egui::RichText::new(crate::i18n::remote_delete_irreversible())
                     .color(theme::ERROR_TEXT),
@@ -878,5 +890,18 @@ mod tests {
                 "새로 고침"
             ]
         );
+    }
+
+    #[test]
+    fn 폴더가_섞이면_삭제_확인에_경고를_더한다() {
+        let item = |path: &str, is_dir: bool| RemoteTarget {
+            path: RemotePath::new(path),
+            is_dir,
+            size: 0,
+            mode: None,
+        };
+        assert!(!has_folder(&[item("/a.txt", false), item("/b.txt", false)]));
+        assert!(has_folder(&[item("/a.txt", false), item("/dir", true)]));
+        assert!(!has_folder(&[]));
     }
 }
