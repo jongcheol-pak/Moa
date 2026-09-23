@@ -821,7 +821,7 @@ fn list_tree(worker: &mut Worker, root: &RemotePath) -> Vec<(RemotePath, u64)> {
                 continue;
             }
             let path = dir.join(&entry.name);
-            if entry.is_dir && !entry.is_symlink {
+            if entry.is_dir {
                 pending.push((path, depth + 1));
             } else {
                 found.push((path, entry.size));

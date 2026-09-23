@@ -555,6 +555,12 @@ pub fn show_conflict_dialog(
     }
 }
 
+/// 고른 것에 폴더가 있는가 — 있으면 삭제 확인에 「안에 든 것까지 지워진다」를 더한다.
+/// 폴더 삭제는 재귀라(`ConnCommand::RemoveTree`) 한 번의 확인으로 트리 전체가 사라진다
+pub fn has_folder(targets: &[RemoteTarget]) -> bool {
+    targets.iter().any(|item| item.is_dir)
+}
+
 /// 삭제 확인 대화 (Acceptance ①·Halt Forecast).
 ///
 /// **자동으로 지우는 경로는 없다** — 메뉴에서 곧바로 삭제로 가는 길이 없고, 이 대화가
@@ -566,12 +572,6 @@ pub fn show_conflict_dialog(
 /// 어차피 지워지지 않았다 — 문구가 하는 일과 달랐다.
 ///
 /// 돌려주는 값: `Confirmed(())`면 지운다. 다른 대화들과 같은 결론 타입을 쓴다
-/// 고른 것에 폴더가 있는가 — 있으면 삭제 확인에 「안에 든 것까지 지워진다」를 더한다.
-/// 폴더 삭제는 재귀라(`ConnCommand::RemoveTree`) 한 번의 확인으로 트리 전체가 사라진다
-pub fn has_folder(targets: &[RemoteTarget]) -> bool {
-    targets.iter().any(|item| item.is_dir)
-}
-
 pub fn show_delete_confirm(ctx: &egui::Context, targets: &[RemoteTarget]) -> DialogOutcome<()> {
     let mut confirmed = None;
     let mut closed = false;
