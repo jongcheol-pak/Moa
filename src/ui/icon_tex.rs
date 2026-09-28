@@ -8,6 +8,7 @@ use crate::fs::thumbnail::{ThumbnailCache, ThumbnailImage};
 use eframe::egui;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use windows::Win32::Graphics::Gdi::{DeleteObject, HBITMAP};
 use windows::Win32::UI::Controls::{HIMAGELIST, ILD_TRANSPARENT, ImageList_GetIcon};
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
@@ -24,6 +25,10 @@ pub struct IconTextures {
     created_this_frame: usize,
     /// 이번 프레임에 **다시** 시도한 수 — 처음 보는 아이콘의 몫과 따로 센다
     retried_this_frame: usize,
+    /// 이번 프레임에 변환을 시도한 수(성공·실패·재시도 모두) — 첫 시도는 시간 예산과 무관하다
+    attempted_this_frame: usize,
+    /// 이번 프레임의 변환에 쓴 시간 — `MAX_NEW_TEXTURE_TIME`과 견준다
+    spent_this_frame: Duration,
     /// 실패한 인덱스별 재시도 횟수. 성공하면 지운다 — 늘 실패하는 자리를 키당 상한으로 끊는다
     retries: HashMap<(isize, i32), u8>,
 }
@@ -47,8 +52,15 @@ const MAX_NEW_THUMBS_PER_FRAME: usize = 4;
 
 /// 한 프레임에 새로 만들 텍스처 수 상한.
 /// 실측에서 텍스처 다수가 한 프레임에 생성되며 3초급 스파이크가 났다 —
-/// 넘치는 것은 다음 프레임으로 미루고 그 프레임에는 아이콘 없이 그린다(몇 프레임 안에 채워진다)
+/// 넘치는 것은 다음 프레임으로 미루고 그 프레임에는 아이콘 없이 그린다(몇 프레임 안에 채워진다).
+/// 개수만으로는 변환 한 번이 비싼 아이콘에서 부족해 시간 예산(`MAX_NEW_TEXTURE_TIME`)이 함께 건다
 const MAX_NEW_TEXTURES_PER_FRAME: usize = 8;
+
+/// 한 프레임에 새 아이콘 변환에 쓸 시간 — 넘으면 나머지는 다음 프레임으로 미룬다.
+/// 처음 보는 exe 아이콘은 변환 한 번이 4~12ms라(2026-09-28 실측) 개수 상한 8만으로는
+/// 한 프레임이 35~100ms 멈췄다. **그 프레임의 첫 시도는 이 예산과 무관하다** — 한 번이
+/// 예산보다 오래 걸려도 매 프레임 하나씩은 나아가야 아이콘이 끝내 채워진다
+const MAX_NEW_TEXTURE_TIME: Duration = Duration::from_millis(6);
 
 /// 한 프레임에 **다시** 시도할 실패 인덱스 수 상한.
 /// 처음 보는 아이콘의 몫(`MAX_NEW_TEXTURES_PER_FRAME`)과 예산을 나눈다 — 같은 예산을 쓰면
@@ -72,6 +84,8 @@ impl IconTextures {
             by_key: HashMap::new(),
             created_this_frame: 0,
             retried_this_frame: 0,
+            attempted_this_frame: 0,
+            spent_this_frame: Duration::ZERO,
             retries: HashMap::new(),
         }
     }
@@ -81,6 +95,8 @@ impl IconTextures {
     pub fn begin_frame(&mut self) {
         self.created_this_frame = 0;
         self.retried_this_frame = 0;
+        self.attempted_this_frame = 0;
+        self.spent_this_frame = Duration::ZERO;
     }
 
     /// 인덱스에 해당하는 텍스처.
@@ -102,8 +118,11 @@ impl IconTextures {
         let known_failure = matches!(entry, Some(None));
 
         if unseen {
-            // 상한을 넘으면 이번 프레임에는 만들지 않는다 — 캐시에 넣지도 않으므로 다음 프레임에 재시도된다
-            if self.created_this_frame < MAX_NEW_TEXTURES_PER_FRAME {
+            // 상한(개수·시간)을 넘으면 이번 프레임에는 만들지 않는다 — 캐시에 넣지도 않으므로
+            // 다음 프레임에 재시도된다. 그 프레임의 첫 시도는 시간 예산과 무관하다
+            let within_time =
+                self.attempted_this_frame == 0 || self.spent_this_frame < MAX_NEW_TEXTURE_TIME;
+            if self.created_this_frame < MAX_NEW_TEXTURES_PER_FRAME && within_time {
                 self.convert_into(ctx, himl, index, key);
             }
         } else if known_failure {
@@ -119,7 +138,9 @@ impl IconTextures {
     }
 
     /// 변환해 캐시에 담는다 — 실패도 `None`으로 담아 다음 프레임이 재시도 대상으로 알아본다.
-    /// 성공하면 `created_this_frame`을 올리고(업로드 비용은 첫 시도와 같다) 재시도 이력을 지운다
+    /// 성공하면 `created_this_frame`을 올리고(업로드 비용은 첫 시도와 같다) 재시도 이력을 지운다.
+    /// 성공·실패와 무관하게 시도 수와 걸린 시간을 이번 프레임 몫에 더한다 — 시험 빌드에서는
+    /// `icon_to_image`의 셸 잠금 대기도 여기 섞이지만, 첫 시도는 예산과 무관해 진행은 멈추지 않는다
     fn convert_into(
         &mut self,
         ctx: &egui::Context,
@@ -127,10 +148,13 @@ impl IconTextures {
         index: i32,
         key: (isize, i32),
     ) {
+        let started = Instant::now();
         let handle = icon_to_image(himl, index).map(|img| {
             self.created_this_frame += 1;
             ctx.load_texture(format!("icon{}_{index}", key.0), img, IMAGE_TEXTURE)
         });
+        self.attempted_this_frame += 1;
+        self.spent_this_frame += started.elapsed();
         if handle.is_some() {
             self.retries.remove(&key);
         }
@@ -440,6 +464,64 @@ mod tests {
             재시도,
             vec![1, 1, 1, 0, 0],
             "키당 세 번까지만 다시 시도하고 그 뒤로는 예산도 GDI 호출도 쓰지 않는다"
+        );
+    }
+
+    /// 이번 프레임에 이미 시도가 있었고 시간 예산을 다 쓴 상태로 만든다
+    fn 예산을_다_쓴다(textures: &mut IconTextures) {
+        textures.attempted_this_frame = 1;
+        textures.spent_this_frame = MAX_NEW_TEXTURE_TIME;
+    }
+
+    #[test]
+    fn 시간_예산을_넘긴_프레임에는_처음_보는_아이콘을_변환하지_않는다() {
+        let ctx = egui::Context::default();
+        let himl = HIMAGELIST(1);
+        let mut textures = IconTextures::new();
+        textures.begin_frame();
+        예산을_다_쓴다(&mut textures);
+
+        textures.get(&ctx, himl, 실패_인덱스(0));
+
+        assert!(
+            !textures.by_key.contains_key(&(himl.0, 실패_인덱스(0))),
+            "예산을 넘겼는데 변환을 시도했다 — 한 프레임에 변환이 몰린다"
+        );
+    }
+
+    #[test]
+    fn 시도가_없던_프레임의_첫_변환은_예산과_무관하게_한다() {
+        // 변환 한 번이 예산보다 오래 걸려도 매 프레임 하나씩은 나아가야 한다
+        let ctx = egui::Context::default();
+        let himl = HIMAGELIST(1);
+        let mut textures = IconTextures::new();
+        textures.begin_frame();
+        textures.spent_this_frame = MAX_NEW_TEXTURE_TIME;
+
+        textures.get(&ctx, himl, 실패_인덱스(0));
+
+        assert!(
+            textures.by_key.contains_key(&(himl.0, 실패_인덱스(0))),
+            "그 프레임의 첫 시도까지 막았다 — 아이콘이 영영 채워지지 않는다"
+        );
+    }
+
+    #[test]
+    fn 예산에_밀린_아이콘은_다음_프레임에_변환된다() {
+        let ctx = egui::Context::default();
+        let himl = HIMAGELIST(1);
+        let mut textures = IconTextures::new();
+        textures.begin_frame();
+        예산을_다_쓴다(&mut textures);
+        textures.get(&ctx, himl, 실패_인덱스(0));
+        assert!(!textures.by_key.contains_key(&(himl.0, 실패_인덱스(0))));
+
+        textures.begin_frame();
+        textures.get(&ctx, himl, 실패_인덱스(0));
+
+        assert!(
+            textures.by_key.contains_key(&(himl.0, 실패_인덱스(0))),
+            "프레임이 바뀌어도 예산이 풀리지 않았다"
         );
     }
 

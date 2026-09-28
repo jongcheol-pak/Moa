@@ -3667,9 +3667,10 @@ fn 트리_줄에는_셸_아이콘이_붙는다() {
     let 드라이브 = { drive_rows().len() };
     let 예상 = favorites.len() + 드라이브;
 
-    // 텍스처는 프레임당 8개까지만 새로 만들어진다(`icon_tex`) — 몇 프레임 돌려 채운다
+    // 텍스처는 프레임당 개수·시간 예산 안에서만 새로 만들어진다(`icon_tex`) — 최악이면
+    // 한 프레임에 하나라, 그려야 할 아이콘 수만큼(+여유) 프레임을 돌려 채운다
     let mut 그려진 = 0;
-    for _ in 0..8 {
+    for _ in 0..예상 + 2 {
         let output = draw_once_with_favorites(&mut panel, &SiteStore::new(), &favorites);
         그려진 = tree_icon_count(&output);
         if 그려진 >= 예상 {
@@ -3791,9 +3792,10 @@ fn 끊긴_네트워크_드라이브_줄에만_배지가_붙는다() {
         drive_row(r"Z:\", true, true),
     ];
 
-    // 텍스처는 프레임당 8개까지만 만들어진다 — 몇 프레임 돌려 아이콘을 채운다
+    // 텍스처는 프레임당 개수·시간 예산 안에서만 만들어진다 — 최악이면 한 프레임에 하나라
+    // 드라이브 줄 수만큼(+여유) 프레임을 돌려 아이콘을 채운다
     let mut 배지 = 0;
-    for _ in 0..8 {
+    for _ in 0..drives.len() + 2 {
         let output = draw_once_with(&mut panel, &SiteStore::new(), &[], &drives);
         배지 = offline_badges(&output);
         if 배지 > 0 {
