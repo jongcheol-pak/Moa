@@ -261,8 +261,12 @@ pub fn show<R: ListRow>(
 }
 
 /// 보이는 항목에 한해 아이콘 인덱스를 조회한다 — 로드 시 전체를 미리 계산하면
-/// exe가 많은 폴더에서 로드가 길어진다(PoC 실측 585ms → 84ms)
-fn resolve_icon<R: ListRow>(
+/// exe가 많은 폴더에서 로드가 길어진다(PoC 실측 585ms → 84ms). 자세히 보기도 이 함수를 쓴다.
+///
+/// **확정된 값만 행 캐시에 담는다** — exe·lnk·ico는 워커가 파일 고유 아이콘을 찾는 동안
+/// 확장자 아이콘을 잠정으로 받는데(`IconLookup::settled`), 그것을 담으면 그 행이 거기 굳는다.
+/// 담지 않은 행은 다음 프레임에 다시 묻고, 결과가 거둬져 있으면 그때 담긴다
+pub(super) fn resolve_icon<R: ListRow>(
     dir: &Path,
     entry: &R,
     index: usize,
@@ -274,11 +278,11 @@ fn resolve_icon<R: ListRow>(
         Some(cached) => cached,
         None => {
             let full = local_paths.then(|| dir.join(entry.name()).to_string_lossy().into_owned());
-            let looked_up = icons
-                .icon_index(&entry.extension(), entry.is_dir(), full.as_deref())
-                .index;
-            icon_indices[index] = Some(looked_up);
-            looked_up
+            let looked_up = icons.icon_index(&entry.extension(), entry.is_dir(), full.as_deref());
+            if looked_up.settled {
+                icon_indices[index] = Some(looked_up.index);
+            }
+            looked_up.index
         }
     }
 }
@@ -1014,6 +1018,34 @@ mod tests {
         assert!(
             visible.is_empty(),
             "원격 항목은 썸네일을 요청하지 않아야 한다: {visible:?}"
+        );
+    }
+
+    #[test]
+    fn 잠정_아이콘은_행_캐시에_담지_않고_확정되면_담는다() {
+        // 워커가 파일 고유 아이콘을 찾는 동안 받은 확장자 아이콘을 담으면 그 행이 거기 굳는다
+        let exe = std::env::current_exe().expect("시험 실행 파일 경로");
+        let dir = exe.parent().expect("실행 파일 폴더");
+        let name = exe.file_name().expect("실행 파일 이름").to_string_lossy();
+        let rows = [entry(&name, false)];
+        // 기대값은 다른 인스턴스에서 얻는다 — 같은 인스턴스로 물으면 경로 캐시를 미리 채운다
+        let expected = IconCache::new().icon_index_for_path(&exe.to_string_lossy());
+        let mut icons = IconCache::new();
+        let mut cached = vec![None];
+
+        resolve_icon(dir, &rows[0], 0, &mut cached, &mut icons, true);
+        assert_eq!(cached[0], None, "잠정 아이콘을 행 캐시에 담았다");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while cached[0].is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            icons.pump_path_icons();
+            resolve_icon(dir, &rows[0], 0, &mut cached, &mut icons, true);
+        }
+        assert_eq!(
+            cached[0],
+            Some(expected),
+            "확정된 아이콘이 행 캐시에 담기지 않았다"
         );
     }
 }

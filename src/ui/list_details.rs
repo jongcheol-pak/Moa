@@ -547,20 +547,15 @@ pub fn show<R: ListRow>(
             let text_color =
                 cut_text_color(cut).unwrap_or_else(|| dim_if_hidden(theme::TEXT, dimmed));
             let editing = rename.as_ref().is_some_and(|edit| edit.index == index);
-            // 보이는 행에 한해 아이콘 인덱스를 조회한다 — 로드 시 전체를 미리 계산하면
-            // exe가 많은 폴더에서 로드가 길어진다(PoC 실측 585ms → 84ms)
-            let icon_index = match icon_indices[index] {
-                Some(cached) => cached,
-                None => {
-                    let full =
-                        local_paths.then(|| dir.join(entry.name()).to_string_lossy().into_owned());
-                    let looked_up = icons
-                        .icon_index(&entry.extension(), entry.is_dir(), full.as_deref())
-                        .index;
-                    icon_indices[index] = Some(looked_up);
-                    looked_up
-                }
-            };
+            // 보이는 행에 한해 아이콘 인덱스를 조회한다 — 규칙은 격자 보기와 같다
+            let icon_index = crate::ui::list_grid::resolve_icon(
+                dir,
+                entry,
+                index,
+                icon_indices,
+                icons,
+                local_paths,
+            );
             if let Some(tex) = textures.get(&ctx, himl, icon_index) {
                 let icon_rect = egui::Rect::from_min_size(
                     egui::pos2(left + ICON_X, y - ICON_SIZE / 2.0),
