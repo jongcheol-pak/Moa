@@ -554,8 +554,9 @@ pub fn show<R: ListRow>(
                 None => {
                     let full =
                         local_paths.then(|| dir.join(entry.name()).to_string_lossy().into_owned());
-                    let looked_up =
-                        icons.icon_index(&entry.extension(), entry.is_dir(), full.as_deref());
+                    let looked_up = icons
+                        .icon_index(&entry.extension(), entry.is_dir(), full.as_deref())
+                        .index;
                     icon_indices[index] = Some(looked_up);
                     looked_up
                 }

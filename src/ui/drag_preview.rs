@@ -126,9 +126,9 @@ fn texture_for(
     let index = match item {
         DragItem::Local { path, is_dir } => {
             let full = path.to_string_lossy();
-            icons.icon_index(&ext, *is_dir, Some(&full))
+            icons.icon_index(&ext, *is_dir, Some(&full)).index
         }
-        DragItem::Remote { is_dir, .. } => icons.icon_index(&ext, *is_dir, None),
+        DragItem::Remote { is_dir, .. } => icons.icon_index(&ext, *is_dir, None).index,
     };
     textures.get(ctx, himl, index).map(|tex| tex.id())
 }

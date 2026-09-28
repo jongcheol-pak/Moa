@@ -3,8 +3,10 @@
 //! 아이콘 인덱스는 **크기와 무관하게 같은 체계**를 쓴다 — 같은 인덱스를 16px 리스트에서 꺼내면
 //! 작은 아이콘이, 256px 리스트에서 꺼내면 큰 아이콘이 나온다. 그래서 크기별 리스트만
 //! 따로 들고 있으면 조회 로직은 하나로 충분하다 (FR-23·FR-24).
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::UI::Controls::{HIMAGELIST, IImageList};
 use windows::Win32::UI::Shell::{
     SHFILEINFOW, SHGFI_DISPLAYNAME, SHGFI_SMALLICON, SHGFI_SYSICONINDEX, SHGFI_TYPENAME,
@@ -59,6 +61,17 @@ impl IconSize {
 /// 개별(파일별) 아이콘이 필요한 확장자 — 실행 파일·바로가기는 파일마다 아이콘이 다르다
 const PER_FILE_ICON_EXTS: [&str; 3] = ["exe", "lnk", "ico"];
 
+/// 항목 아이콘 조회 결과.
+///
+/// `settled`가 거짓이면 `index`는 **확장자 기본 아이콘**이고 파일 고유 아이콘은 워커가
+/// 찾는 중이다 — 부르는 쪽은 이 값을 행 캐시에 담지 말고 다음 프레임에 다시 물어야 한다.
+/// 담으면 그 행이 기본 아이콘에 굳는다
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IconLookup {
+    pub index: i32,
+    pub settled: bool,
+}
+
 /// 확장자 → 시스템 이미지 리스트 인덱스/종류명 캐시.
 /// 아이콘 자체를 복사하지 않고 시스템 공유 이미지 리스트 인덱스만 보관한다 (NFR-2)
 pub struct IconCache {
@@ -67,8 +80,13 @@ pub struct IconCache {
     himl_by_size: HashMap<IconSize, HIMAGELIST>,
     icon_by_ext: HashMap<String, i32>,
     type_by_ext: HashMap<String, String>,
-    /// 개별 아이콘(경로별) 캐시 — 파일당 1회만 디스크 조회 (AGENTS UI 스레드 블로킹 최소화)
+    /// 개별 아이콘(경로별) 캐시 — 파일당 1회만 디스크 조회. exe·lnk·ico는 워커가,
+    /// 드라이브·트리 줄은 `icon_index_for_path`가 채운다
     icon_by_path: HashMap<String, i32>,
+    /// 경로별 아이콘 워커 — 처음 맡길 때 띄운다(`request_path_icon`)
+    path_worker: PathWorker,
+    /// 워커에 맡기고 아직 답을 거두지 않은 경로 — 같은 경로를 두 번 맡기지 않는다
+    pending_paths: HashSet<String>,
     /// 경로별 셸 표시 이름 캐시 — 드라이브 이름을 매 프레임 묻지 않는다
     name_by_path: HashMap<String, String>,
     dir_icon: i32,
@@ -79,6 +97,9 @@ pub struct IconCache {
     /// 네트워크 드라이브에서 UI를 멈출 수 있는 실경로 I/O라, "한 번만 묻는다"가 성능의 전제다 (plan D9)
     #[cfg(test)]
     shell_queries: usize,
+    /// 워커에 맡긴 횟수 — 대기 중 재요청이 없는지 시험이 본다
+    #[cfg(test)]
+    path_requests: usize,
 }
 
 impl Default for IconCache {
@@ -120,9 +141,13 @@ impl IconCache {
             icon_by_ext: HashMap::new(),
             type_by_ext: HashMap::new(),
             icon_by_path: HashMap::new(),
+            path_worker: PathWorker::NotStarted,
+            pending_paths: HashSet::new(),
             name_by_path: HashMap::new(),
             #[cfg(test)]
             shell_queries: 0,
+            #[cfg(test)]
+            path_requests: 0,
             dir_icon: info.iIcon,
             dir_type: wide_to_string(&info.szTypeName),
         }
@@ -146,35 +171,41 @@ impl IconCache {
         self.dir_icon
     }
 
-    /// 항목의 아이콘 인덱스. exe/lnk 등은 전체 경로로 개별 조회(표시 시점 지연 — 보이는 행만)
-    pub fn icon_index(&mut self, ext: &str, is_dir: bool, full_path: Option<&str>) -> i32 {
+    /// 항목의 아이콘 인덱스 — 보이는 행에 닿았을 때 부른다.
+    ///
+    /// exe·lnk·ico는 파일마다 아이콘이 달라 **실제 경로를 물어야** 하는데, 처음 보는 exe는 그
+    /// 조회가 한 건에 10~93ms다(실행 파일 리소스를 읽고 백신이 검사한다 — 2026-09-28 실측).
+    /// 보이는 행 전부를 한 프레임에 물으면 창이 수백 ms 멈추므로 **워커에 맡기고** 그 사이에는
+    /// 확장자 아이콘을 `settled: false`로 준다. 결과는 `pump_path_icons`가 거둔다
+    pub fn icon_index(&mut self, ext: &str, is_dir: bool, full_path: Option<&str>) -> IconLookup {
         if is_dir {
-            return self.dir_icon;
+            return IconLookup {
+                index: self.dir_icon,
+                settled: true,
+            };
         }
         if PER_FILE_ICON_EXTS.contains(&ext)
             && let Some(path) = full_path
         {
-            // 경로별 1회만 실제 조회 — 스크롤 재방문 시 캐시 히트 (blocking 최소화)
-            if let Some(&idx) = self.icon_by_path.get(path) {
-                return idx;
+            if let Some(&index) = self.icon_by_path.get(path) {
+                return IconLookup {
+                    index,
+                    settled: true,
+                };
             }
-            let mut info = SHFILEINFOW::default();
-            {
-                let _guard = shell_guard();
-                // 안전성: 실제 파일 경로 조회 — 실패 시 iIcon 0(기본)이 그대로 쓰인다
-                unsafe {
-                    SHGetFileInfoW(
-                        &HSTRING::from(path),
-                        Default::default(),
-                        Some(&mut info),
-                        size_of::<SHFILEINFOW>() as u32,
-                        SHGFI_SYSICONINDEX | SHGFI_SMALLICON,
-                    );
-                }
-            }
-            self.icon_by_path.insert(path.to_string(), info.iIcon);
-            return info.iIcon;
+            let index = self.ext_icon(ext);
+            // 워커를 쓸 수 없으면 확장자 아이콘으로 확정한다 — 행이 매 프레임 다시 묻지 않게
+            let settled = !self.request_path_icon(path);
+            return IconLookup { index, settled };
         }
+        IconLookup {
+            index: self.ext_icon(ext),
+            settled: true,
+        }
+    }
+
+    /// 확장자만으로 정해지는 아이콘 — 디스크를 보지 않아 UI 스레드에서 불러도 된다
+    fn ext_icon(&mut self, ext: &str) -> i32 {
         if let Some(&idx) = self.icon_by_ext.get(ext) {
             return idx;
         }
@@ -185,6 +216,75 @@ impl IconCache {
         self.icon_by_ext.insert(ext.to_string(), idx);
         self.type_by_ext.insert(ext.to_string(), type_name);
         idx
+    }
+
+    /// 경로를 워커에 맡긴다 — 맡겼거나 이미 대기 중이면 참, 워커를 쓸 수 없으면 거짓.
+    ///
+    /// 워커는 **처음 맡길 때 띄운다** — `IconCache`는 시험·드라이브 워커 등 수십 곳에서
+    /// 만들어지는데, 경로별 조회를 하는 것은 앱의 캐시 하나뿐이다
+    fn request_path_icon(&mut self, path: &str) -> bool {
+        if self.pending_paths.contains(path) {
+            return true;
+        }
+        if matches!(self.path_worker, PathWorker::NotStarted) {
+            self.path_worker =
+                spawn_path_worker().map_or(PathWorker::Unavailable, PathWorker::Running);
+        }
+        let PathWorker::Running(channels) = &self.path_worker else {
+            return false;
+        };
+        if channels.requests.send(path.to_string()).is_err() {
+            self.path_worker = PathWorker::Unavailable;
+            return false;
+        }
+        #[cfg(test)]
+        {
+            self.path_requests += 1;
+        }
+        self.pending_paths.insert(path.to_string());
+        true
+    }
+
+    /// 워커가 돌려준 경로별 아이콘을 거둔다 — 새로 온 것이 있으면 참.
+    ///
+    /// 워커가 사라졌으면(채널 끊김) 대기를 비운다 — 남겨 두면 앱이 영영 다시 그리기를
+    /// 청하고, 비워 두면 행이 다시 물어 확장자 아이콘으로 확정된다(`request_path_icon`)
+    pub fn pump_path_icons(&mut self) -> bool {
+        let PathWorker::Running(channels) = &self.path_worker else {
+            return false;
+        };
+        let mut arrived = false;
+        let mut lost = false;
+        loop {
+            match channels.results.try_recv() {
+                Ok((path, index)) => {
+                    self.pending_paths.remove(&path);
+                    self.icon_by_path.insert(path, index);
+                    arrived = true;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    lost = true;
+                    break;
+                }
+            }
+        }
+        if lost {
+            self.path_worker = PathWorker::Unavailable;
+            self.pending_paths.clear();
+        }
+        arrived
+    }
+
+    /// 워커가 찾는 중인 경로가 남았는가 — 앱이 다시 그릴지 정하는 데 쓴다
+    pub fn has_pending_paths(&self) -> bool {
+        !self.pending_paths.is_empty()
+    }
+
+    /// 워커에 맡긴 경로 수 — 대기 중 같은 경로를 다시 보내지 않는지 시험이 본다
+    #[cfg(test)]
+    pub fn path_requests(&self) -> usize {
+        self.path_requests
     }
 
     /// **경로로 직접 물어 얻는** 아이콘 인덱스 — 드라이브·특수 폴더가 각자의 아이콘을 갖는다.
@@ -198,27 +298,13 @@ impl IconCache {
         if let Some(&idx) = self.icon_by_path.get(path) {
             return idx;
         }
-        let mut info = SHFILEINFOW::default();
-        let ok = {
-            let _guard = shell_guard();
-            // 안전성: 실제 경로 조회 — 실패는 반환값 0으로 오고, 그때는 아래에서 `dir_icon`으로
-            // 갈아 끼우므로 `info`의 값을 읽지 않는다
-            unsafe {
-                SHGetFileInfoW(
-                    &HSTRING::from(path),
-                    Default::default(),
-                    Some(&mut info),
-                    size_of::<SHFILEINFOW>() as u32,
-                    SHGFI_SYSICONINDEX | SHGFI_SMALLICON,
-                )
-            }
-        };
+        let found = lookup_by_path(path);
         #[cfg(test)]
         {
             self.shell_queries += 1;
         }
         // 조회가 실패하면 일반 폴더 아이콘으로 떨어진다 — 빈 자리를 남기지 않는다
-        let idx = if ok == 0 { self.dir_icon } else { info.iIcon };
+        let idx = found.unwrap_or(self.dir_icon);
         self.icon_by_path.insert(path.to_string(), idx);
         idx
     }
@@ -306,6 +392,72 @@ fn system_image_list(size: IconSize) -> Option<HIMAGELIST> {
     }
 }
 
+/// 실제 경로로 아이콘 인덱스를 묻는다 — 실패하면 `None`.
+///
+/// 디스크를 읽는 조회라 느릴 수 있다(처음 보는 exe 10~93ms, 끊긴 네트워크 경로는 초 단위).
+/// **셸 잠금을 여기서 잡는다** — 부르는 쪽은 `icon_index_for_path`(UI 스레드의 드라이브·트리 줄)와
+/// 경로별 아이콘 워커 둘이고, 둘 다 잠금을 쥐지 않은 채 부른다
+fn lookup_by_path(path: &str) -> Option<i32> {
+    let mut info = SHFILEINFOW::default();
+    let _guard = shell_guard();
+    // 안전성: 스택의 `info`에 쓰는 읽기 전용 조회 — 실패는 반환값 0으로 오고 그때는 `info`를
+    // 읽지 않는다
+    let ok = unsafe {
+        SHGetFileInfoW(
+            &HSTRING::from(path),
+            Default::default(),
+            Some(&mut info),
+            size_of::<SHFILEINFOW>() as u32,
+            SHGFI_SYSICONINDEX | SHGFI_SMALLICON,
+        )
+    };
+    (ok != 0).then_some(info.iIcon)
+}
+
+/// 경로별 아이콘 워커와 잇는 통로
+struct PathWorkerChannels {
+    requests: Sender<String>,
+    results: Receiver<(String, i32)>,
+}
+
+/// 경로별 아이콘 워커의 상태 — 처음 맡길 때 띄우고, 띄우지 못했거나 사라지면 다시 띄우지 않는다
+enum PathWorker {
+    NotStarted,
+    Running(PathWorkerChannels),
+    Unavailable,
+}
+
+/// 경로별 아이콘 워커를 띄운다 — 스레드를 만들지 못하면 `None`(부르는 쪽이 확장자 아이콘으로 확정한다).
+///
+/// 워커는 요청 통로가 닫히면(캐시가 버려지면) 끝난다. 셸 조회가 COM을 쓰므로 STA로 초기화한다
+/// (`fs::drives`·`fs::thumbnail` 워커와 같다). 실패한 조회는 `0`(셸 기본 아이콘)을 돌려준다 —
+/// 동기 조회 시절 `SHFILEINFOW::default()`의 `iIcon`이 그대로 쓰이던 것과 같은 값이다
+fn spawn_path_worker() -> Option<PathWorkerChannels> {
+    let (request_tx, request_rx) = channel::<String>();
+    let (result_tx, result_rx) = channel();
+    std::thread::Builder::new()
+        .name("path-icons".into())
+        .spawn(move || {
+            // 안전성: 이 스레드에서 열고 루프를 벗어난 뒤 짝을 맞춰 닫는다
+            let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+            for path in request_rx {
+                let index = lookup_by_path(&path).unwrap_or(0);
+                if result_tx.send((path, index)).is_err() {
+                    break;
+                }
+            }
+            if com {
+                // 안전성: 위에서 성공한 초기화와 짝을 맞춘다
+                unsafe { CoUninitialize() };
+            }
+        })
+        .ok()?;
+    Some(PathWorkerChannels {
+        requests: request_tx,
+        results: result_rx,
+    })
+}
+
 /// 확장자만으로 아이콘·종류 조회 (디스크 접근 없음 — 대량 폴더에서도 빠름)
 fn lookup_by_attributes(ext: &str) -> (i32, String) {
     let dummy = if ext.is_empty() {
@@ -341,14 +493,17 @@ fn wide_to_string(buf: &[u16]) -> String {
 /// **잠금은 시험이 아니라 자원을 만지는 함수가 잡는다** — 호출부가 잡으면 계층마다 재진입
 /// 위험이 생기고, `std::sync::Mutex`는 재진입 불가라 그 자리에서 **타임아웃 없이 멎는다**.
 ///
-/// **잡는 곳(7)**: `IconCache::new` · `icon_index` · `icon_index_for_path` ·
+/// **잡는 곳(7)**: `IconCache::new` · `ext_icon` · `lookup_by_path` ·
 /// `shell_display_name` · `type_name`(이 파일) · `known_folders::known_folder` ·
 /// `ui::icon_tex::icon_to_image`. 잡는 자리는 **셸 호출 직전**이다 — 캐시 히트 앞에 두면
 /// 렌더 경로가 프레임마다 전역 잠금을 잡아 시험 스위트가 10분을 넘긴다(실측).
+/// `lookup_by_path`는 경로별 아이콘 **워커 스레드**에서도 불린다 — 시험 빌드에서는 그
+/// 조회(처음 보는 exe 수십 ms) 동안 다른 시험의 셸 호출이 기다린다.
 ///
-/// **잡지 않는 곳(4)**: `system_image_list`·`lookup_by_attributes`(위 함수들 안에서만 불리는
-/// private) · `fs::drives::list_drives`·`fs::known_folders::default_favorites`(안에서 잠금
-/// 함수를 부르는 조합 함수). **이 넷을 잠그면 재진입 데드락이다.**
+/// **잡지 않는 곳(6)**: `system_image_list`·`lookup_by_attributes`(위 함수들 안에서만 불리는
+/// private) · `icon_index`·`icon_index_for_path`(`ext_icon`·`lookup_by_path`를 부르는 조합
+/// 메서드) · `fs::drives::list_drives`·`fs::known_folders::default_favorites`(안에서 잠금
+/// 함수를 부르는 조합 함수). **이 여섯을 잠그면 재진입 데드락이다.**
 #[cfg(test)]
 static SHELL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -488,6 +643,96 @@ mod tests {
             after_first,
             "두 번째 요청이 셸을 다시 물었다 — 캐시가 듣지 않는다"
         );
+    }
+
+    /// 경로별 조회 대상인 실제 파일 — 시험 하네스 exe는 어느 PC에서나 있다
+    fn exe_path() -> String {
+        std::env::current_exe()
+            .expect("시험 실행 파일 경로")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn 첫_경로별_조회는_확장자_아이콘을_잠정으로_준다() {
+        // 처음 보는 exe의 셸 조회는 10~93ms라(실측) UI 스레드에서 기다리면 창이 멈춘다 —
+        // 그 자리에서는 확장자 아이콘을 주고 「아직 확정 아님」을 알려야 한다
+        let path = exe_path();
+        let mut icons = IconCache::new();
+        let ext_only = icons.icon_index("exe", false, None);
+
+        let first = icons.icon_index("exe", false, Some(&path));
+
+        assert!(
+            !first.settled,
+            "첫 조회가 곧바로 확정됐다 — 셸을 동기로 물었다"
+        );
+        assert_eq!(
+            first.index, ext_only.index,
+            "잠정 아이콘이 확장자 아이콘이 아니다"
+        );
+    }
+
+    #[test]
+    fn 거둔_경로별_아이콘은_확정되고_경로_조회와_같다() {
+        let path = exe_path();
+        // 기대값은 **다른 인스턴스**에서 얻는다 — 같은 인스턴스로 물으면 경로 캐시를 미리
+        // 채워 아래 조회가 워커를 거치지 않는다
+        let expected = IconCache::new().icon_index_for_path(&path);
+        let mut icons = IconCache::new();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut lookup = icons.icon_index("exe", false, Some(&path));
+        while !lookup.settled && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            icons.pump_path_icons();
+            lookup = icons.icon_index("exe", false, Some(&path));
+        }
+
+        assert!(
+            lookup.settled,
+            "5초 안에 확정되지 않았다 — 워커 결과를 거두지 못한다"
+        );
+        assert_eq!(
+            lookup.index, expected,
+            "워커가 준 아이콘이 경로 조회와 다르다"
+        );
+        assert!(!icons.has_pending_paths(), "거둔 뒤에도 대기가 남았다");
+    }
+
+    #[test]
+    fn 대기_중인_경로는_다시_맡기지_않는다() {
+        // 보이는 행은 확정될 때까지 매 프레임 다시 묻는다 — 그때마다 워커에 보내면 큐가 쌓인다
+        let path = exe_path();
+        let mut icons = IconCache::new();
+
+        icons.icon_index("exe", false, Some(&path));
+        icons.icon_index("exe", false, Some(&path));
+
+        assert!(
+            icons.has_pending_paths(),
+            "맡긴 경로가 대기로 잡히지 않았다"
+        );
+        assert_eq!(icons.path_requests(), 1, "같은 경로를 두 번 맡겼다");
+    }
+
+    #[test]
+    fn 폴더와_일반_확장자와_경로_없는_exe는_곧바로_확정된다() {
+        let mut icons = IconCache::new();
+
+        assert!(
+            icons.icon_index("", true, Some(r"C:\Windows")).settled,
+            "폴더"
+        );
+        assert!(
+            icons.icon_index("txt", false, Some(r"C:\a.txt")).settled,
+            "txt"
+        );
+        assert!(
+            icons.icon_index("exe", false, None).settled,
+            "경로 없는 exe(원격)"
+        );
+        assert_eq!(icons.path_requests(), 0, "워커를 거칠 이유가 없는데 맡겼다");
     }
 
     #[test]
