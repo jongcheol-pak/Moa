@@ -6,8 +6,9 @@
 use crate::fs::bitmap::bgra_from_hbitmap;
 use crate::fs::thumbnail::{ThumbnailCache, ThumbnailImage};
 use eframe::egui;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 use windows::Win32::Graphics::Gdi::{DeleteObject, HBITMAP};
 use windows::Win32::UI::Controls::{HIMAGELIST, ILD_TRANSPARENT, ImageList_GetIcon};
@@ -31,6 +32,33 @@ pub struct IconTextures {
     spent_this_frame: Duration,
     /// 실패한 인덱스별 재시도 횟수. 성공하면 지운다 — 늘 실패하는 자리를 키당 상한으로 끊는다
     retries: HashMap<(isize, i32), u8>,
+    /// 변환을 어디서 하는가 — 앱은 워커, 다른 모듈의 시험 하네스는 그 자리
+    converter: Converter,
+    /// 워커에 맡기고 아직 텍스처로 올리지 않은 키 — 같은 키를 두 번 맡기지 않는다
+    pending: HashSet<(isize, i32)>,
+    /// 워커가 돌려줬으나 이번 프레임 예산에 밀려 아직 올리지 못한 결과
+    ready: VecDeque<((isize, i32), Option<egui::ColorImage>)>,
+    /// 워커에 맡긴 횟수 — 대기 중 재요청이 없는지 시험이 본다
+    #[cfg(test)]
+    requests_sent: usize,
+}
+
+/// 아이콘 변환(HICON → RGBA)을 어디서 하는가.
+///
+/// **UI 스레드에서 하지 않는 것이 기본이다** — 새 아이콘 변환 한 번이 20~115ms 걸렸다
+/// (2026-09-28 실측, 첫 호출·처음 보는 exe 아이콘). 워커는 처음 맡길 때 띄우고, 띄우지 못했거나
+/// 사라지면 그 자리 변환으로 돌아간다 — 아이콘이 영영 비는 것보다 느린 편이 낫다
+enum Converter {
+    /// 그 자리에서 변환한다 — 시험 하네스와 워커를 쓸 수 없을 때
+    Inline,
+    NotStarted,
+    Running(ConvertChannels),
+}
+
+/// 변환 워커와 잇는 통로 — `HIMAGELIST`는 `isize`로 넘긴다(시스템 이미지 리스트는 프로세스 전역이다)
+struct ConvertChannels {
+    requests: Sender<(isize, i32)>,
+    results: Receiver<((isize, i32), Option<egui::ColorImage>)>,
 }
 
 /// 아이콘·썸네일 텍스처 옵션 — **밉맵을 함께 만든다**.
@@ -56,10 +84,11 @@ const MAX_NEW_THUMBS_PER_FRAME: usize = 4;
 /// 개수만으로는 변환 한 번이 비싼 아이콘에서 부족해 시간 예산(`MAX_NEW_TEXTURE_TIME`)이 함께 건다
 const MAX_NEW_TEXTURES_PER_FRAME: usize = 8;
 
-/// 한 프레임에 새 아이콘 변환에 쓸 시간 — 넘으면 나머지는 다음 프레임으로 미룬다.
+/// 한 프레임에 새 아이콘 텍스처에 쓸 시간 — 넘으면 나머지는 다음 프레임으로 미룬다.
 /// 처음 보는 exe 아이콘은 변환 한 번이 4~12ms라(2026-09-28 실측) 개수 상한 8만으로는
-/// 한 프레임이 35~100ms 멈췄다. **그 프레임의 첫 시도는 이 예산과 무관하다** — 한 번이
-/// 예산보다 오래 걸려도 매 프레임 하나씩은 나아가야 아이콘이 끝내 채워진다
+/// 한 프레임이 35~100ms 멈췄다. 변환이 워커로 간 뒤로는 주로 올리기(`load_texture`)와
+/// 워커를 쓸 수 없을 때의 그 자리 변환을 잰다. **그 프레임의 첫 시도는 이 예산과 무관하다** —
+/// 한 번이 예산보다 오래 걸려도 매 프레임 하나씩은 나아가야 아이콘이 끝내 채워진다
 const MAX_NEW_TEXTURE_TIME: Duration = Duration::from_millis(6);
 
 /// 한 프레임에 **다시** 시도할 실패 인덱스 수 상한.
@@ -87,7 +116,33 @@ impl IconTextures {
             attempted_this_frame: 0,
             spent_this_frame: Duration::ZERO,
             retries: HashMap::new(),
+            converter: Converter::NotStarted,
+            pending: HashSet::new(),
+            ready: VecDeque::new(),
+            #[cfg(test)]
+            requests_sent: 0,
         }
+    }
+
+    /// 시험 하네스용 — 변환을 그 자리에서 한다. 트리·목록 그리기를 재는 시험이 프레임 반복을
+    /// 스레드 타이밍에 기대지 않게 한다
+    #[cfg(test)]
+    pub fn inline() -> IconTextures {
+        IconTextures {
+            converter: Converter::Inline,
+            ..IconTextures::new()
+        }
+    }
+
+    /// 워커가 변환 중인 아이콘이 남았는가 — 앱이 다시 그릴지 정하는 데 쓴다
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// 워커에 맡긴 변환 수 — 대기 중 같은 키를 다시 맡기지 않는지 시험이 본다
+    #[cfg(test)]
+    fn requests_sent(&self) -> usize {
+        self.requests_sent
     }
 
     /// 프레임 시작 시 호출 — 프레임당 생성·재시도 상한을 초기화한다.
@@ -113,9 +168,13 @@ impl IconTextures {
         index: i32,
     ) -> Option<&egui::TextureHandle> {
         let key = (himl.0, index);
+        self.collect_results();
+        self.upload_ready(ctx);
+        // 워커가 변환 중인 키는 처음 보는 것도 실패한 것도 아니다 — 다시 맡기지 않는다
+        let waiting = self.pending.contains(&key);
         let entry = self.by_key.get(&key);
-        let unseen = entry.is_none();
-        let known_failure = matches!(entry, Some(None));
+        let unseen = entry.is_none() && !waiting;
+        let known_failure = matches!(entry, Some(None)) && !waiting;
 
         if unseen {
             // 상한(개수·시간)을 넘으면 이번 프레임에는 만들지 않는다 — 캐시에 넣지도 않으므로
@@ -137,10 +196,10 @@ impl IconTextures {
         self.by_key.get(&key).and_then(|h| h.as_ref())
     }
 
-    /// 변환해 캐시에 담는다 — 실패도 `None`으로 담아 다음 프레임이 재시도 대상으로 알아본다.
-    /// 성공하면 `created_this_frame`을 올리고(업로드 비용은 첫 시도와 같다) 재시도 이력을 지운다.
-    /// 성공·실패와 무관하게 시도 수와 걸린 시간을 이번 프레임 몫에 더한다 — 시험 빌드에서는
-    /// `icon_to_image`의 셸 잠금 대기도 여기 섞이지만, 첫 시도는 예산과 무관해 진행은 멈추지 않는다
+    /// 변환을 맡기거나(워커) 그 자리에서 한다.
+    ///
+    /// 음수 인덱스는 셸에 닿기 전에 실패하므로 워커를 거치지 않는다. 워커를 띄우지 못하면
+    /// 그 자리 변환으로 돌아간다
     fn convert_into(
         &mut self,
         ctx: &egui::Context,
@@ -148,10 +207,90 @@ impl IconTextures {
         index: i32,
         key: (isize, i32),
     ) {
+        if index >= 0 && self.dispatch(key) {
+            return;
+        }
         let started = Instant::now();
-        let handle = icon_to_image(himl, index).map(|img| {
+        let image = icon_to_image(himl, index);
+        self.store(ctx, key, image, started);
+    }
+
+    /// 워커에 맡긴다 — 맡겼으면 참, 워커를 쓸 수 없으면 거짓
+    fn dispatch(&mut self, key: (isize, i32)) -> bool {
+        if matches!(self.converter, Converter::NotStarted) {
+            self.converter = spawn_converter().map_or(Converter::Inline, Converter::Running);
+        }
+        let Converter::Running(channels) = &self.converter else {
+            return false;
+        };
+        if channels.requests.send(key).is_err() {
+            self.converter = Converter::Inline;
+            return false;
+        }
+        #[cfg(test)]
+        {
+            self.requests_sent += 1;
+        }
+        self.pending.insert(key);
+        true
+    }
+
+    /// 워커가 돌려준 결과를 받아 둔다 — 올리는 것은 `upload_ready`가 예산 안에서 한다.
+    ///
+    /// 워커가 사라졌으면(채널 끊김) 받지 못한 키의 대기를 풀고 그 자리 변환으로 돌아간다 —
+    /// 남겨 두면 그 아이콘은 다시 맡겨지지도 않고 앱은 영영 다시 그리기를 청한다
+    fn collect_results(&mut self) {
+        let Converter::Running(channels) = &self.converter else {
+            return;
+        };
+        let mut lost = false;
+        loop {
+            match channels.results.try_recv() {
+                Ok(result) => self.ready.push_back(result),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    lost = true;
+                    break;
+                }
+            }
+        }
+        if lost {
+            self.converter = Converter::Inline;
+            let ready = &self.ready;
+            self.pending
+                .retain(|key| ready.iter().any(|(done, _)| done == key));
+        }
+    }
+
+    /// 받아 둔 결과를 텍스처로 올린다 — 처음 보는 아이콘과 같은 개수·시간 예산 안에서
+    fn upload_ready(&mut self, ctx: &egui::Context) {
+        while !self.ready.is_empty()
+            && self.created_this_frame < MAX_NEW_TEXTURES_PER_FRAME
+            && (self.attempted_this_frame == 0 || self.spent_this_frame < MAX_NEW_TEXTURE_TIME)
+        {
+            let Some((key, image)) = self.ready.pop_front() else {
+                break;
+            };
+            self.pending.remove(&key);
+            self.store(ctx, key, image, Instant::now());
+        }
+    }
+
+    /// 변환 결과를 캐시에 담는다 — 실패도 `None`으로 담아 다음 프레임이 재시도 대상으로 알아본다.
+    /// 성공하면 텍스처를 올리고 `created_this_frame`을 올리며 재시도 이력을 지운다.
+    /// 성공·실패와 무관하게 시도 수와 `started`부터 걸린 시간을 이번 프레임 몫에 더한다 —
+    /// 시험 빌드의 그 자리 변환에서는 `icon_to_image`의 셸 잠금 대기도 여기 섞이지만, 첫 시도는
+    /// 예산과 무관해 진행은 멈추지 않는다
+    fn store(
+        &mut self,
+        ctx: &egui::Context,
+        key: (isize, i32),
+        image: Option<egui::ColorImage>,
+        started: Instant,
+    ) {
+        let handle = image.map(|img| {
             self.created_this_frame += 1;
-            ctx.load_texture(format!("icon{}_{index}", key.0), img, IMAGE_TEXTURE)
+            ctx.load_texture(format!("icon{}_{}", key.0, key.1), img, IMAGE_TEXTURE)
         });
         self.attempted_this_frame += 1;
         self.spent_this_frame += started.elapsed();
@@ -160,6 +299,30 @@ impl IconTextures {
         }
         self.by_key.insert(key, handle);
     }
+}
+
+/// 아이콘 변환 워커를 띄운다 — 스레드를 만들지 못하면 `None`(부르는 쪽이 그 자리 변환으로 간다).
+///
+/// 요청 통로가 닫히면(캐시가 버려지면) 끝난다. 셸 잠금은 `icon_to_image`가 안에서 잡으므로
+/// 여기서 다시 잡지 않는다(재진입 데드락 — `fs::icons::SHELL_LOCK` 주석)
+fn spawn_converter() -> Option<ConvertChannels> {
+    let (request_tx, request_rx) = channel::<(isize, i32)>();
+    let (result_tx, result_rx) = channel();
+    std::thread::Builder::new()
+        .name("icon-tex".into())
+        .spawn(move || {
+            for (himl, index) in request_rx {
+                let image = icon_to_image(HIMAGELIST(himl), index);
+                if result_tx.send(((himl, index), image)).is_err() {
+                    break;
+                }
+            }
+        })
+        .ok()?;
+    Some(ConvertChannels {
+        requests: request_tx,
+        results: result_rx,
+    })
 }
 
 /// 경로별 썸네일 텍스처 (FR-24).
@@ -377,7 +540,7 @@ mod tests {
         let icons = crate::fs::icons::IconCache::new();
         let (himl, index) = (icons.himl(), icons.dir_icon());
 
-        let mut probe = IconTextures::new();
+        let mut probe = IconTextures::inline();
         probe.begin_frame();
         if probe.get(&ctx, himl, index).is_none() {
             // 셸에서 이미지 리스트를 얻지 못하는 환경 — 이 시험은 성립하지 않는다.
@@ -386,7 +549,7 @@ mod tests {
             return;
         }
 
-        let mut textures = IconTextures::new();
+        let mut textures = IconTextures::inline();
         textures.begin_frame();
         assert!(textures.get(&ctx, himl, index).is_some());
         assert_eq!(textures.created_this_frame, 1);
@@ -423,7 +586,7 @@ mod tests {
         let icons = crate::fs::icons::IconCache::new();
         let (himl, index) = (icons.himl(), icons.dir_icon());
 
-        let mut probe = IconTextures::new();
+        let mut probe = IconTextures::inline();
         probe.begin_frame();
         if probe.get(&ctx, himl, index).is_none() {
             // 셸 미가용 환경 — 성공 변환을 전제로 하는 시험이라 성립하지 않는다
@@ -431,7 +594,7 @@ mod tests {
             return;
         }
 
-        let mut textures = IconTextures::new();
+        let mut textures = IconTextures::inline();
         실패_키를_담는다(&mut textures, &ctx, himl, 8);
 
         textures.begin_frame();
@@ -465,6 +628,56 @@ mod tests {
             vec![1, 1, 1, 0, 0],
             "키당 세 번까지만 다시 시도하고 그 뒤로는 예산도 GDI 호출도 쓰지 않는다"
         );
+    }
+
+    #[test]
+    fn 처음_보는_아이콘은_워커가_변환하고_그_프레임에는_기다리지_않는다() {
+        // 새 아이콘 변환 한 번이 UI 스레드에서 20~115ms 걸렸다(2026-09-28 실측) —
+        // 그 자리에서 기다리지 않고 맡긴 뒤, 결과가 오면 다음 프레임에 올린다
+        let ctx = egui::Context::default();
+        let icons = crate::fs::icons::IconCache::new();
+        let (himl, index) = (icons.himl(), icons.dir_icon());
+        let mut textures = IconTextures::new();
+
+        textures.begin_frame();
+        assert!(
+            textures.get(&ctx, himl, index).is_none(),
+            "첫 요청에서 곧바로 변환했다 — UI 스레드가 기다린다"
+        );
+        assert!(textures.has_pending(), "맡긴 변환이 대기로 잡히지 않았다");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut ready = false;
+        while !ready && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+            textures.begin_frame();
+            ready = textures.get(&ctx, himl, index).is_some();
+        }
+        if !ready {
+            // 셸에서 이미지 리스트를 얻지 못하는 환경이면 변환 자체가 실패한다
+            let mut probe = IconTextures::inline();
+            probe.begin_frame();
+            if probe.get(&ctx, himl, index).is_none() {
+                eprintln!("[skip] 처음_보는_아이콘은_워커가_변환하고… — 이미지 리스트 미가용");
+                return;
+            }
+        }
+        assert!(ready, "5초 안에 워커 변환 결과가 올라오지 않았다");
+        assert!(!textures.has_pending(), "올린 뒤에도 대기가 남았다");
+    }
+
+    #[test]
+    fn 변환_중인_아이콘은_다시_맡기지_않는다() {
+        let ctx = egui::Context::default();
+        let icons = crate::fs::icons::IconCache::new();
+        let (himl, index) = (icons.himl(), icons.dir_icon());
+        let mut textures = IconTextures::new();
+
+        textures.begin_frame();
+        textures.get(&ctx, himl, index);
+        textures.get(&ctx, himl, index);
+
+        assert_eq!(textures.requests_sent(), 1, "같은 아이콘을 두 번 맡겼다");
     }
 
     /// 이번 프레임에 이미 시도가 있었고 시간 예산을 다 쓴 상태로 만든다

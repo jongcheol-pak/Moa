@@ -673,7 +673,7 @@ mod tests {
         let selection = BTreeSet::new();
         let mut visible = Vec::new();
         let mut icons = IconCache::new();
-        let mut icon_textures = IconTextures::new();
+        let mut icon_textures = IconTextures::inline();
 
         let _ = ctx.run_ui(Default::default(), |ui| {
             visible.clear();
@@ -821,7 +821,7 @@ mod tests {
         let mut visible = Vec::new();
         let textures = ThumbnailTextures::new();
         let mut icons = IconCache::new();
-        let mut icon_textures = IconTextures::new();
+        let mut icon_textures = IconTextures::inline();
 
         let _ = ctx.run_ui(Default::default(), |ui| {
             visible.clear();
@@ -989,7 +989,7 @@ mod tests {
         let selection = BTreeSet::new();
         let mut visible = Vec::new();
         let mut icons = IconCache::new();
-        let mut icon_textures = IconTextures::new();
+        let mut icon_textures = IconTextures::inline();
         let textures = ThumbnailTextures::new();
         let dir = PathBuf::new();
 

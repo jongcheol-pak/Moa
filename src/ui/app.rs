@@ -2682,14 +2682,15 @@ impl eframe::App for ExplorerApp {
         // 첫 프레임의 이 자리는 뷰가 없어 빈손으로 지나가고, 폴더 열거가 다음 프레임에야
         // 시작된다. 그 한 프레임 사이에 창이 이미 표시돼 **빈 목록**이 보인다(2026-08-14 실측)
         self.ensure_active_view();
-        // 화면에 없는 워크스페이스는 폴링하지 않는다 — 전환하면 그때 밀린 결과가 반영된다
         // 워커가 찾아 둔 exe·lnk·ico 아이콘을 거둔다 — 목록을 그리기 전이라 이번 프레임에
         // 바로 쓰인다. 아직 찾는 중이면 짧은 주기로 다시 그린다: 워커는 egui를 모르고(`fs`)
         // 입력이 없으면 프레임이 돌지 않아, 도착한 아이콘이 마우스를 움직일 때까지 묻힌다
+        // 아이콘 텍스처 변환도 워커가 한다(`IconTextures`) — 같은 이유로 결과를 기다리는 동안 깨운다
         self.icons.pump_path_icons();
-        if self.icons.has_pending_paths() {
+        if self.icons.has_pending_paths() || self.textures.has_pending() {
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
         }
+        // 화면에 없는 워크스페이스는 폴링하지 않는다 — 전환하면 그때 밀린 결과가 반영된다
         let id = self.workspaces.active().id;
         if let Some(view) = self.views.get_mut(&id) {
             // 패널은 서로 독립이라 각자 자기 열거 결과만 처리한다

@@ -282,7 +282,7 @@ fn draw_once_with(
     };
     let ctx = egui::Context::default();
     let mut icons = crate::fs::icons::IconCache::new();
-    let mut textures = crate::ui::icon_tex::IconTextures::new();
+    let mut textures = crate::ui::icon_tex::IconTextures::inline();
     ctx.run_ui(Default::default(), |ui| {
         egui::CentralPanel::default().show(ui, |ui| {
             let ctx = ui.ctx().clone();
@@ -2216,7 +2216,7 @@ fn 사라진_즐겨찾기는_눌러도_옮겨가지_않는다() {
 
     let ctx = egui::Context::default();
     let mut icons = crate::fs::icons::IconCache::new();
-    let mut textures = crate::ui::icon_tex::IconTextures::new();
+    let mut textures = crate::ui::icon_tex::IconTextures::inline();
     let tree_cache = crate::remote::tree_cache::TreeCache::new();
     let draw = |input: egui::RawInput,
                 panel: &mut PanelState,
@@ -2290,7 +2290,7 @@ fn 즐겨찾기를_누르면_그_폴더로_옮겨간다() {
     // 첫 프레임 — 즐겨찾기 줄이 어디에 그려졌는지 얻는다
     let ctx = egui::Context::default();
     let mut icons = crate::fs::icons::IconCache::new();
-    let mut textures = crate::ui::icon_tex::IconTextures::new();
+    let mut textures = crate::ui::icon_tex::IconTextures::inline();
     let tree_cache = crate::remote::tree_cache::TreeCache::new();
     let draw = |input: egui::RawInput,
                 panel: &mut PanelState,
@@ -2366,7 +2366,7 @@ impl FavoriteHarness {
         FavoriteHarness {
             ctx: egui::Context::default(),
             icons: IconCache::new(),
-            textures: crate::ui::icon_tex::IconTextures::new(),
+            textures: crate::ui::icon_tex::IconTextures::inline(),
             tree: crate::remote::tree_cache::TreeCache::new(),
             sites: SiteStore::new(),
         }
@@ -4008,7 +4008,7 @@ impl 클릭하네스 {
             sites: SiteStore::new(),
             ctx: egui::Context::default(),
             icons: IconCache::new(),
-            textures: crate::ui::icon_tex::IconTextures::new(),
+            textures: crate::ui::icon_tex::IconTextures::inline(),
             시계: 0.0,
         };
         let mut icons = IconCache::new();

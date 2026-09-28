@@ -1093,7 +1093,7 @@ mod tests {
     fn badges_of_node(drive: Option<&DriveRow>, icons: &mut IconCache) -> (usize, usize) {
         let ctx = egui::Context::default();
         let mut view = FolderTreeView::new();
-        let mut textures = IconTextures::new();
+        let mut textures = IconTextures::inline();
         let himl = icons.himl();
         let mut counted = (0, 0);
         // 한 프레임이면 충분하다 — 배지는 아이콘 텍스처와 묶여 있지 않다(`tree_row`).
@@ -1340,7 +1340,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut view = FolderTreeView::new();
         let mut icons = IconCache::new();
-        let mut textures = IconTextures::new();
+        let mut textures = IconTextures::inline();
         let mut outcome = TreeOutcome::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {

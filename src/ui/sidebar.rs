@@ -837,7 +837,7 @@ mod tests {
         let mut sidebar = WorkspaceSidebar::new();
         let list = WorkspaceList::new();
         let mut icons = IconCache::new();
-        let mut textures = IconTextures::new();
+        let mut textures = IconTextures::inline();
         let output = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
                 sidebar.show(ui, &list, sites, connected, &mut icons, &mut textures);
@@ -857,7 +857,7 @@ mod tests {
         let list = WorkspaceList::new();
         let sites = SiteStore::new();
         let mut icons = IconCache::new();
-        let mut textures = IconTextures::new();
+        let mut textures = IconTextures::inline();
         let mut input = egui::RawInput::default();
         input.events.push(egui::Event::Key {
             key: egui::Key::F2,
