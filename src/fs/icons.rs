@@ -72,6 +72,29 @@ pub struct IconLookup {
     pub settled: bool,
 }
 
+/// 확장자 하나의 아이콘·종류 문자열 — 열거 워커가 미리 물어 UI 캐시에 넣는다(`accept_ext_info`)
+#[derive(Debug, Clone)]
+pub struct ExtInfo {
+    pub ext: String,
+    pub icon: i32,
+    pub type_name: String,
+}
+
+/// 확장자 하나를 셸에 묻는다 — 디스크는 보지 않지만 **확장자마다 첫 조회가 3~60ms**다
+/// (2026-09-28 실측: exe 5.5~8.8 · ico 9.7~22.3 · txt 18.5~31.0ms, 재조회 0.4~0.7ms).
+/// 그래서 UI 스레드 대신 폴더를 읽는 워커가 부른다
+pub fn lookup_ext(ext: &str) -> ExtInfo {
+    let (icon, type_name) = {
+        let _guard = shell_guard();
+        lookup_by_attributes(ext)
+    };
+    ExtInfo {
+        ext: ext.to_string(),
+        icon,
+        type_name,
+    }
+}
+
 /// 확장자 → 시스템 이미지 리스트 인덱스/종류명 캐시.
 /// 아이콘 자체를 복사하지 않고 시스템 공유 이미지 리스트 인덱스만 보관한다 (NFR-2)
 pub struct IconCache {
@@ -100,6 +123,9 @@ pub struct IconCache {
     /// 워커에 맡긴 횟수 — 대기 중 재요청이 없는지 시험이 본다
     #[cfg(test)]
     path_requests: usize,
+    /// 확장자 정보를 UI 쪽에서 직접 셸에 물은 횟수 — 열거 워커가 미리 채웠는지 시험이 본다
+    #[cfg(test)]
+    type_queries: usize,
 }
 
 impl Default for IconCache {
@@ -148,6 +174,8 @@ impl IconCache {
             shell_queries: 0,
             #[cfg(test)]
             path_requests: 0,
+            #[cfg(test)]
+            type_queries: 0,
             dir_icon: info.iIcon,
             dir_type: wide_to_string(&info.szTypeName),
         }
@@ -204,10 +232,32 @@ impl IconCache {
         }
     }
 
-    /// 확장자만으로 정해지는 아이콘 — 디스크를 보지 않아 UI 스레드에서 불러도 된다
+    /// 열거 워커가 미리 물어 둔 확장자 정보를 담는다 — 이미 아는 확장자는 건드리지 않는다
+    pub fn accept_ext_info(&mut self, infos: Vec<ExtInfo>) {
+        for info in infos {
+            if self.icon_by_ext.contains_key(&info.ext) {
+                continue;
+            }
+            self.icon_by_ext.insert(info.ext.clone(), info.icon);
+            self.type_by_ext.insert(info.ext, info.type_name);
+        }
+    }
+
+    /// 확장자 정보를 UI 쪽에서 직접 셸에 물은 횟수
+    #[cfg(test)]
+    pub fn type_queries(&self) -> usize {
+        self.type_queries
+    }
+
+    /// 확장자만으로 정해지는 아이콘 — 대개 열거 워커가 미리 채워 둔 캐시에 맞는다(`accept_ext_info`).
+    /// 못 맞으면 여기서 묻는다(확장자마다 첫 조회 3~60ms)
     fn ext_icon(&mut self, ext: &str) -> i32 {
         if let Some(&idx) = self.icon_by_ext.get(ext) {
             return idx;
+        }
+        #[cfg(test)]
+        {
+            self.type_queries += 1;
         }
         let (idx, type_name) = {
             let _guard = shell_guard();
@@ -367,6 +417,10 @@ impl IconCache {
         if let Some(t) = self.type_by_ext.get(ext) {
             return t.clone();
         }
+        #[cfg(test)]
+        {
+            self.type_queries += 1;
+        }
         let (idx, type_name) = {
             let _guard = shell_guard();
             lookup_by_attributes(ext)
@@ -493,11 +547,11 @@ fn wide_to_string(buf: &[u16]) -> String {
 /// **잠금은 시험이 아니라 자원을 만지는 함수가 잡는다** — 호출부가 잡으면 계층마다 재진입
 /// 위험이 생기고, `std::sync::Mutex`는 재진입 불가라 그 자리에서 **타임아웃 없이 멎는다**.
 ///
-/// **잡는 곳(7)**: `IconCache::new` · `ext_icon` · `lookup_by_path` ·
+/// **잡는 곳(8)**: `IconCache::new` · `ext_icon` · `lookup_by_path` · `lookup_ext` ·
 /// `shell_display_name` · `type_name`(이 파일) · `known_folders::known_folder` ·
 /// `ui::icon_tex::icon_to_image`. 잡는 자리는 **셸 호출 직전**이다 — 캐시 히트 앞에 두면
 /// 렌더 경로가 프레임마다 전역 잠금을 잡아 시험 스위트가 10분을 넘긴다(실측).
-/// `lookup_by_path`는 경로별 아이콘 **워커 스레드**에서도 불린다 — 시험 빌드에서는 그
+/// `lookup_by_path`는 경로별 아이콘 **워커 스레드**에서, `lookup_ext`는 폴더 **열거 워커**에서 불린다 — 시험 빌드에서는 그
 /// 조회(처음 보는 exe 수십 ms) 동안 다른 시험의 셸 호출이 기다린다.
 ///
 /// **잡지 않는 곳(6)**: `system_image_list`·`lookup_by_attributes`(위 함수들 안에서만 불리는
@@ -733,6 +787,22 @@ mod tests {
             "경로 없는 exe(원격)"
         );
         assert_eq!(icons.path_requests(), 0, "워커를 거칠 이유가 없는데 맡겼다");
+    }
+
+    #[test]
+    fn 미리_받은_확장자는_셸을_묻지_않고_그_종류와_아이콘을_준다() {
+        // 열거 워커가 물어 둔 값이 UI 캐시에 들어가면 목록 반영이 셸을 기다리지 않는다.
+        // 가짜 확장자라 셸에 물으면 「ZZQTEST 파일」 같은 일반 종류가 온다
+        let mut icons = IconCache::new();
+        icons.accept_ext_info(vec![ExtInfo {
+            ext: "zzqtest".into(),
+            icon: 7,
+            type_name: "미리 받은 종류".into(),
+        }]);
+
+        assert_eq!(icons.type_name("zzqtest", false), "미리 받은 종류");
+        assert_eq!(icons.icon_index("zzqtest", false, None).index, 7);
+        assert_eq!(icons.type_queries(), 0, "받아 둔 확장자를 셸에 다시 물었다");
     }
 
     #[test]

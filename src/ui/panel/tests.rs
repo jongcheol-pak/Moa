@@ -346,6 +346,35 @@ fn commit_dir(panel: &mut PanelState, dir: &str, icons: &mut IconCache) {
     );
 }
 
+#[test]
+fn 폴더를_읽으면_종류_문자열은_워커가_미리_묻고_화면은_셸을_묻지_않는다() {
+    // 확장자마다 첫 조회가 3~60ms라(2026-09-28 실측) UI 스레드가 목록을 반영하며 물으면 프레임이 멎는다
+    let dir = std::env::temp_dir().join(format!("moa-ext-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("임시 폴더");
+    std::fs::write(dir.join("a.zzqa"), b"").expect("파일");
+    std::fs::write(dir.join("b.zzqb"), b"").expect("파일");
+    let ctx = egui::Context::default();
+    let mut icons = IconCache::new();
+    let mut cache = crate::panel::dir_cache::DirCache::new();
+    let mut panel = PanelState::new(dir.clone());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    panel.poll(&ctx, &mut icons, &mut cache);
+    while panel.load.is_loading() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        panel.poll(&ctx, &mut icons, &mut cache);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(!panel.load.is_loading(), "5초 안에 열거가 끝나지 않았다");
+    assert_eq!(panel.list.counts(), (0, 2), "두 파일이 목록에 서지 않았다");
+    assert_eq!(
+        icons.type_queries(),
+        0,
+        "UI 스레드가 종류 문자열을 셸에 직접 물었다 — 워커가 미리 묻지 않았다"
+    );
+}
+
 /// 배치 하나를 만든다 — 이름만 다른 파일 항목
 fn batch(names: &[&str]) -> Vec<crate::fs::enumerate::FileEntry> {
     names

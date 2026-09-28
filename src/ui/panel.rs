@@ -597,6 +597,9 @@ impl PanelState {
         // 한 번 더 옮긴다)
         let mut pending: Option<Vec<crate::fs::enumerate::FileEntry>> = None;
         while let Some(chunk) = self.load.poll() {
+            // 워커가 미리 물어 둔 확장자 정보를 먼저 담는다 — 아래 반영의 종류 문자열 조회가
+            // 캐시에 맞아 UI 스레드가 셸을 기다리지 않는다
+            icons.accept_ext_info(self.load.take_ext_infos());
             match chunk {
                 EnumChunk::Partial(entries) => match &mut pending {
                     Some(acc) => acc.extend(entries),
