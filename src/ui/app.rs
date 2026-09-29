@@ -675,6 +675,8 @@ pub struct ExplorerApp {
     menu_worker: Option<crate::fs::shell_menu_worker::ShellMenuWorker>,
     /// 메뉴 한 판마다 새로 매기는 번호 — 늦게 온 옛 판의 응답을 가려낸다
     menu_ticket: u64,
+    /// 이 프레임의 구간 시계 (`crate::perf`) — `logic`에서 시작해 `ui` 끝에서 느린 프레임을 남긴다
+    frame_timer: crate::perf::FrameTimer,
     /// 곧 띄울 **종전 표준 메뉴** (`기본 메뉴`가 여는 것) — 그것은 `TrackPopupMenuEx`가
     /// 자체 메시지 루프를 돌려 그리기 도중에 부를 수 없고, **우리 메뉴가 없는 화면이 실제로
     /// 표시된 뒤**에 띄워야 두 메뉴가 겹치지 않는다(`shell_menu::SHOW_MORE_SKIP_FRAMES`)
@@ -862,6 +864,7 @@ impl ExplorerApp {
             shell_menu: None,
             menu_worker,
             menu_ticket: 0,
+            frame_timer: crate::perf::FrameTimer::default(),
             file_op_tx,
             file_op_rx,
             pending_show_more: None,
@@ -2634,6 +2637,8 @@ impl eframe::App for ExplorerApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 느린 프레임 계측의 시작 — `ui` 끝에서 구간을 모아 남긴다(`crate::perf`)
+        self.frame_timer = crate::perf::FrameTimer::start();
         self.intercept_close(ctx);
         self.track_window(ctx);
         self.textures.begin_frame();
@@ -2657,6 +2662,7 @@ impl eframe::App for ExplorerApp {
         self.pump_relist(now);
         // 드라이브 줄·연결 상태·즐겨찾기 실재 (T4 · FR-67) — 워커가 나눠 올린다
         self.poll_drives();
+        self.frame_timer.mark("remote_drives");
         // 펼쳐진 로컬 폴더를 큐로 옮긴다 (FR-38)
         while let Ok((site, files, skipped)) = self.expand_rx.try_recv() {
             // 이 펼치기가 끝났다 — 상태 줄의 `펼치는 중`이 그만큼 줄어든다
@@ -2690,6 +2696,7 @@ impl eframe::App for ExplorerApp {
         // 첫 프레임의 이 자리는 뷰가 없어 빈손으로 지나가고, 폴더 열거가 다음 프레임에야
         // 시작된다. 그 한 프레임 사이에 창이 이미 표시돼 **빈 목록**이 보인다(2026-08-14 실측)
         self.ensure_active_view();
+        self.frame_timer.mark("pumps");
         // 워커가 찾아 둔 exe·lnk·ico 아이콘을 거둔다 — 목록을 그리기 전이라 이번 프레임에
         // 바로 쓰인다. 아직 찾는 중이면 짧은 주기로 다시 그린다: 워커는 egui를 모르고(`fs`)
         // 입력이 없으면 프레임이 돌지 않아, 도착한 아이콘이 마우스를 움직일 때까지 묻힌다
@@ -2706,10 +2713,12 @@ impl eframe::App for ExplorerApp {
                 panel.poll(ctx, &mut self.icons, &mut self.dir_cache);
             }
         }
+        self.frame_timer.mark("panels_poll");
         self.sync_subtitle();
         self.pump_auto_refresh(ctx, now);
         self.pump_rescan(ctx, now);
         self.pump_autosave(ctx, now);
+        self.frame_timer.mark("logic_rest");
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -2744,6 +2753,7 @@ impl eframe::App for ExplorerApp {
         let mut layout_area = None;
         // 타이틀바를 먼저 그린다 — 남는 영역이 아래 CentralPanel의 몫이 된다 (FR-22)
         let titlebar_command = self.show_titlebar(ui, &ctx);
+        self.frame_timer.mark("titlebar");
         // eframe이 주는 Ui는 여백·배경이 없다 — CentralPanel로 감싸야 바탕이 칠해진다.
         // **기본 여백은 끈다**(`Frame::NONE` + 바탕색): egui의 중앙 패널은 사방에 여백을 두는데,
         // 그만큼 패널 줄이 타이틀바 선에서 떨어져 뜬다(사용자 보고). 이 앱의 화면은 창
@@ -2985,6 +2995,7 @@ impl eframe::App for ExplorerApp {
                     self.release_conn(conn);
                 }
             });
+        self.frame_timer.mark("central");
 
         // 삭제 확인은 egui 모달이라 `CentralPanel` 밖에서 그려도 된다(자체 레이어를 쓴다)
         self.show_remove_confirm(&ctx);
@@ -3029,6 +3040,7 @@ impl eframe::App for ExplorerApp {
         }
         // 열려 있으면 그린다 — 모든 패널 위에 떠야 해서 그리기 맨 끝이다
         self.show_shell_menu(&ctx);
+        self.frame_timer.mark("dialogs_menu");
 
         // **종전 표준 메뉴만** 그리기가 모두 끝난 뒤에 띄운다 — `TrackPopupMenuEx`가 자체
         // 메시지 루프를 돌려 이벤트 루프를 재진입시키므로, 위젯 트리가 절반만 구성된 상태로
@@ -3057,6 +3069,9 @@ impl eframe::App for ExplorerApp {
             );
             shell.popup(&pending.folder, &pending.items, x, y);
         }
+        // `기본 메뉴`는 사용자가 닫을 때까지 여기서 돌아오지 않는다 — 그 시간이 프리징으로
+        // 읽히지 않게 이 구간만 따로 적는다(D14)
+        self.frame_timer.mark("legacy_menu");
         // 사이트 목록 파일 대화도 같은 제약이다 (FR-59). **셸 메뉴가 뜬 프레임에는 미룬다** —
         // 두 모달을 겹쳐 띄우면 어느 쪽이 답을 기다리는지 알 수 없다. 요청은 그대로 남아
         // 다음 프레임에 뜬다
@@ -3069,6 +3084,13 @@ impl eframe::App for ExplorerApp {
         // 이어 불릴 수 있지만, 그쪽이 답을 받고 돌아온 뒤라 실제로 겹치지는 않는다
         if !shell_menu_pending {
             self.pump_export_drag(&ctx);
+        }
+        self.frame_timer.mark("ui_rest");
+        // 느린 프레임을 구간별로 남긴다 (`crate::perf` — 계측이 꺼져 있으면 구간이 비어 있다)
+        if let Some(line) =
+            crate::perf::slow_frame_line(self.frame_timer.phases(), crate::perf::SLOW_FRAME)
+        {
+            crate::perf::log(|| line);
         }
     }
 }
