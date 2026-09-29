@@ -18,6 +18,7 @@ use windows::Win32::UI::Shell::{
 use windows::core::HSTRING;
 
 use crate::fs::bitmap::bgra_from_hbitmap;
+use crate::fs::enumerate::FileStamp;
 
 /// 패널 하나가 들고 있을 썸네일 수 상한 (NFR-9 — 약 50MB).
 /// 넘으면 가장 오래 안 쓴 것부터 버린다
@@ -40,25 +41,35 @@ pub struct ThumbnailImage {
     pub rgba: Vec<u8>,
 }
 
-/// 워커에게 보내는 요청. 세대 번호를 실어 보내 **늦게 도착한 이전 폴더의 결과**를 가려낸다
+/// 워커에게 보내는 요청. 세대 번호를 실어 보내 **늦게 도착한 이전 폴더의 결과**를 가려낸다.
+///
+/// **도장(`stamp`)도 실어 보낸다** — 결과가 어느 내용의 그림인지 되돌아와야, 그 사이 파일이
+/// 다시 바뀌어 새 요청이 나간 뒤 늦게 온 옛 결과를 가려낼 수 있다
 enum Request {
-    Make { generation: u64, path: PathBuf },
+    Make {
+        generation: u64,
+        path: PathBuf,
+        stamp: FileStamp,
+    },
     Stop,
 }
+
+/// 워커가 돌려주는 결과 — `(세대, 경로, 도장, 그림)`
+type Outcome = (u64, PathBuf, FileStamp, Option<ThumbnailImage>);
 
 /// 썸네일 캐시 — 요청 큐·결과 수신·LRU 축출을 함께 관리한다.
 ///
 /// 패널마다 하나씩 둔다(NFR-9의 상한이 패널당이다). 폴더를 떠나면 `clear`로 비운다
 pub struct ThumbnailCache {
     tx: Sender<Request>,
-    rx: Receiver<(u64, PathBuf, Option<ThumbnailImage>)>,
-    /// 완성된 썸네일. `None`은 **만들 수 없는 파일**(썸네일 없는 형식)이며,
-    /// 다시 요청하지 않기 위해 실패도 기억한다
-    ready: HashMap<PathBuf, Option<ThumbnailImage>>,
+    rx: Receiver<Outcome>,
+    /// 완성된 썸네일과 **그것을 만든 내용의 도장**. `None`은 **만들 수 없는 파일**(썸네일 없는
+    /// 형식)이며, 다시 요청하지 않기 위해 실패도 기억한다
+    ready: HashMap<PathBuf, (FileStamp, Option<ThumbnailImage>)>,
     /// 최근 사용 순서 — 앞이 가장 오래됐다. 항목 수가 상한을 넘으면 앞에서 버린다
     order: Vec<PathBuf>,
-    /// 요청을 보냈고 아직 결과가 안 온 것 — 같은 파일을 거듭 요청하지 않는다
-    pending: Vec<PathBuf>,
+    /// 요청을 보냈고 아직 결과가 안 온 것과 그 도장 — 같은 내용을 거듭 요청하지 않는다
+    pending: Vec<(PathBuf, FileStamp)>,
     /// 지금 담긴 썸네일이 속한 폴더. **호출 경로마다 판정을 흩지 않으려고 캐시가 직접 든다** —
     /// 탐색·탭 전환·탭 닫기가 각자 다른 순서로 폴더를 바꾸므로, 바깥에서 비교하면
     /// 한 경로만 빠뜨려도 조용히 새어나간다 (F-7 B1·m1)
@@ -96,23 +107,35 @@ impl ThumbnailCache {
         true
     }
 
-    /// 썸네일을 요청한다. 이미 있으면 **최근 사용으로 올리고** 끝낸다.
+    /// 썸네일을 요청한다. **같은 도장으로** 이미 있으면 **최근 사용으로 올리고** 끝낸다.
     ///
     /// 화면에 보이는 항목마다 매 프레임 불리므로, 여기서 올려야 보이는 것이 축출되지 않는다 —
-    /// 그리기는 텍스처만 보고 픽셀 캐시를 건드리지 않아 이 경로가 유일한 갱신 지점이다
-    pub fn request(&mut self, path: &Path) {
-        if self.ready.contains_key(path) {
+    /// 그리기는 텍스처만 보고 픽셀 캐시를 건드리지 않아 이 경로가 유일한 갱신 지점이다.
+    ///
+    /// **도장이 다르면 다시 만든다**(2026-09-29) — 같은 이름의 파일이 새 내용으로 바뀐 것이다.
+    /// 그동안 **옛 그림은 그대로 둔다**: 형식 아이콘으로 떨어졌다 돌아오는 깜빡임이 없고,
+    /// 새 결과가 오면 `accept`가 갈아 끼운다
+    pub fn request(&mut self, path: &Path, stamp: FileStamp) {
+        let held = self.stamp_of(path);
+        if held.is_some() {
+            // 보이는 것이므로 도장과 무관하게 최근으로 올린다 — 새 그림을 기다리는 동안에도
+            // 옛 그림이 축출되지 않게
             self.touch(path);
+        }
+        if held == Some(stamp) {
             return;
         }
-        if self.pending.iter().any(|p| p == path) {
+        if self.pending.iter().any(|(p, s)| p == path && *s == stamp) {
             return;
         }
-        self.pending.push(path.to_path_buf());
+        // 옛 도장으로 기다리던 것이 있으면 새 도장으로 바꿔 단다 — 옛 결과는 `accept`가 버린다
+        self.pending.retain(|(p, _)| p != path);
+        self.pending.push((path.to_path_buf(), stamp));
         // 워커가 죽었으면(앱 종료 중) 전송 실패는 무해하다
         let _ = self.tx.send(Request::Make {
             generation: self.generation,
             path: path.to_path_buf(),
+            stamp,
         });
     }
 
@@ -122,9 +145,9 @@ impl ThumbnailCache {
         let mut arrived = Vec::new();
         loop {
             match self.rx.try_recv() {
-                Ok((generation, path, image)) => {
-                    // 폴더를 떠난 뒤 도착한 결과는 `accept`가 걸러낸다
-                    if self.accept(generation, path.clone(), image) {
+                Ok((generation, path, stamp, image)) => {
+                    // 폴더를 떠난 뒤·파일이 다시 바뀐 뒤 도착한 결과는 `accept`가 걸러낸다
+                    if self.accept(generation, path.clone(), stamp, image) {
                         arrived.push(path);
                     }
                 }
@@ -149,7 +172,7 @@ impl ThumbnailCache {
         if self.ready.contains_key(path) {
             self.touch(path);
         }
-        self.ready.get(path)?.as_ref()
+        self.ready.get(path)?.1.as_ref()
     }
 
     /// 폴더를 떠날 때 호출 — 그 폴더의 썸네일을 즉시 놓는다 (NFR-9).
@@ -172,7 +195,18 @@ impl ThumbnailCache {
     /// 텍스처 캐시 동기화처럼 셸 호출과 무관한 로직을 검증하는 데 쓴다
     #[cfg(test)]
     pub fn accept_for_test(&mut self, path: PathBuf, image: Option<ThumbnailImage>) {
-        self.insert(path, image);
+        self.insert(path, FileStamp::default(), image);
+    }
+
+    /// 위와 같되 도장을 정해 넣는다 — 같은 경로의 내용이 바뀐 경우를 시험한다
+    #[cfg(test)]
+    pub fn accept_for_test_stamped(
+        &mut self,
+        path: PathBuf,
+        stamp: FileStamp,
+        image: Option<ThumbnailImage>,
+    ) {
+        self.insert(path, stamp, image);
     }
 
     /// 만들어진 썸네일이 있는 경로들 — 텍스처 캐시가 동기화에 쓴다.
@@ -180,7 +214,7 @@ impl ThumbnailCache {
     pub fn ready_paths(&self) -> Vec<PathBuf> {
         self.ready
             .iter()
-            .filter(|(_, image)| image.is_some())
+            .filter(|(_, (_, image))| image.is_some())
             .map(|(path, _)| path.clone())
             .collect()
     }
@@ -188,12 +222,19 @@ impl ThumbnailCache {
     /// 이 경로의 썸네일이 캐시에 있는가 (실패 기억은 제외).
     /// 텍스처 캐시가 "픽셀이 사라진 텍스처"를 찾아내는 데 쓴다
     pub fn has_image(&self, path: &Path) -> bool {
-        self.ready.get(path).is_some_and(|image| image.is_some())
+        self.ready
+            .get(path)
+            .is_some_and(|(_, image)| image.is_some())
+    }
+
+    /// 담긴 그림을 만든 내용의 도장 — 텍스처 캐시가 「그림이 바뀌었는가」를 가르는 데 쓴다
+    pub fn stamp_of(&self, path: &Path) -> Option<FileStamp> {
+        self.ready.get(path).map(|(stamp, _)| *stamp)
     }
 
     /// 최근 사용 순서를 바꾸지 않고 들여다본다 — 동기화 중에는 순서를 흔들면 안 된다
     pub fn peek(&self, path: &Path) -> Option<&ThumbnailImage> {
-        self.ready.get(path)?.as_ref()
+        self.ready.get(path)?.1.as_ref()
     }
 
     /// 캐시가 쥐고 있는 픽셀 바이트 합 — NFR-9 상한이 실제로 지켜지는지 재는 데 쓴다.
@@ -202,7 +243,7 @@ impl ThumbnailCache {
     pub fn memory_bytes(&self) -> usize {
         self.ready
             .values()
-            .filter_map(|image| image.as_ref())
+            .filter_map(|(_, image)| image.as_ref())
             .map(|image| image.rgba.len())
             .sum()
     }
@@ -213,18 +254,33 @@ impl ThumbnailCache {
 
     /// 도착한 결과 하나를 세대 검사 후 받아들인다. 담았으면 `true`.
     /// `poll`과 테스트가 같은 판정을 쓰도록 한 곳에 둔다
-    fn accept(&mut self, generation: u64, path: PathBuf, image: Option<ThumbnailImage>) -> bool {
+    fn accept(
+        &mut self,
+        generation: u64,
+        path: PathBuf,
+        stamp: FileStamp,
+        image: Option<ThumbnailImage>,
+    ) -> bool {
         if generation != self.generation {
             return false;
         }
-        self.pending.retain(|p| p != &path);
+        // **파일이 또 바뀌어 새 도장으로 기다리는 중이면 옛 결과는 버린다** — 담으면 새 그림이
+        // 오기 전까지 더 옛 그림이 한 번 비친다
+        if self
+            .pending
+            .iter()
+            .any(|(p, waiting)| p == &path && *waiting != stamp)
+        {
+            return false;
+        }
+        self.pending.retain(|(p, _)| p != &path);
         let is_image = image.is_some();
-        self.insert(path, image);
+        self.insert(path, stamp, image);
         is_image
     }
 
-    fn insert(&mut self, path: PathBuf, image: Option<ThumbnailImage>) {
-        if self.ready.insert(path.clone(), image).is_none() {
+    fn insert(&mut self, path: PathBuf, stamp: FileStamp, image: Option<ThumbnailImage>) {
+        if self.ready.insert(path.clone(), (stamp, image)).is_none() {
             self.order.push(path);
         }
         self.evict();
@@ -269,16 +325,20 @@ impl Drop for ThumbnailCache {
 ///
 /// **스레드마다 COM을 따로 초기화한다** — 셸 인터페이스는 아파트 단위라
 /// 메인 스레드의 초기화가 여기까지 미치지 않는다
-fn worker(rx: Receiver<Request>, tx: Sender<(u64, PathBuf, Option<ThumbnailImage>)>) {
+fn worker(rx: Receiver<Request>, tx: Sender<Outcome>) {
     // 안전성: 이 스레드에서 초기화하고, **성공했을 때만** 같은 스레드에서 해제한다 —
     // 실패한 초기화를 짝지어 해제하면 COM 참조 수가 어긋난다.
     // 실패해도 셸 호출이 동작하는 경우가 있어 작업 자체는 계속 시도한다
     let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
     while let Ok(request) = rx.recv() {
         match request {
-            Request::Make { generation, path } => {
+            Request::Make {
+                generation,
+                path,
+                stamp,
+            } => {
                 let image = make_thumbnail(&path);
-                if tx.send((generation, path, image)).is_err() {
+                if tx.send((generation, path, stamp, image)).is_err() {
                     break; // 수신부가 사라졌다 — 패널이 닫혔거나 앱이 끝났다
                 }
             }
@@ -358,6 +418,12 @@ fn bitmap_to_rgba(bitmap: HBITMAP) -> Option<ThumbnailImage> {
 mod tests {
     use super::*;
 
+    /// 도장을 가리지 않는 시험이 쓰는 한 가지 도장
+    const S: FileStamp = FileStamp {
+        size: 0,
+        modified: 0,
+    };
+
     fn image(size: usize) -> ThumbnailImage {
         ThumbnailImage {
             width: size,
@@ -376,7 +442,7 @@ mod tests {
         // 상한이 없으면 큰 폴더를 훑는 동안 메모리가 끝없이 는다 (NFR-9)
         let mut cache = cache();
         for index in 0..MAX_CACHED + 10 {
-            cache.insert(PathBuf::from(format!("f{index}.jpg")), Some(image(1)));
+            cache.insert(PathBuf::from(format!("f{index}.jpg")), S, Some(image(1)));
         }
         assert_eq!(cache.len(), MAX_CACHED, "상한을 넘겨 들고 있다");
         // 처음 10개는 밀려났다
@@ -390,11 +456,11 @@ mod tests {
         // 화면에 보이는 썸네일이 먼저 버려지면 스크롤할 때마다 다시 만든다
         let mut cache = cache();
         for index in 0..MAX_CACHED {
-            cache.insert(PathBuf::from(format!("f{index}.jpg")), Some(image(1)));
+            cache.insert(PathBuf::from(format!("f{index}.jpg")), S, Some(image(1)));
         }
         // 가장 오래된 것을 한 번 쓰면 최근으로 올라간다
         assert!(cache.get(Path::new("f0.jpg")).is_some());
-        cache.insert(PathBuf::from("new.jpg"), Some(image(1)));
+        cache.insert(PathBuf::from("new.jpg"), S, Some(image(1)));
         assert!(
             cache.get(Path::new("f0.jpg")).is_some(),
             "방금 쓴 것이 버려졌다"
@@ -410,14 +476,14 @@ mod tests {
         // 기억하지 않으면 스크롤할 때마다 같은 파일을 다시 요청한다
         let mut cache = cache();
         let path = PathBuf::from("문서.txt");
-        cache.insert(path.clone(), None);
+        cache.insert(path.clone(), S, None);
         assert!(
             cache.get(&path).is_none(),
             "만들 수 없는데 무언가를 돌려줬다"
         );
         assert_eq!(cache.len(), 1, "실패가 기억되지 않았다");
         // 이미 아는 파일은 다시 요청하지 않는다
-        cache.request(&path);
+        cache.request(&path, S);
         assert!(cache.pending.is_empty());
     }
 
@@ -425,9 +491,9 @@ mod tests {
     fn 같은_파일을_거듭_요청하지_않는다() {
         let mut cache = cache();
         let path = PathBuf::from("사진.jpg");
-        cache.request(&path);
-        cache.request(&path);
-        cache.request(&path);
+        cache.request(&path, S);
+        cache.request(&path, S);
+        cache.request(&path, S);
         assert_eq!(cache.pending.len(), 1, "같은 요청이 쌓였다");
     }
 
@@ -438,11 +504,11 @@ mod tests {
         // 이것이 없으면 지금 보고 있는 썸네일이 축출돼 스크롤할 때마다 다시 만든다
         let mut cache = cache();
         for index in 0..MAX_CACHED {
-            cache.insert(PathBuf::from(format!("f{index}.jpg")), Some(image(1)));
+            cache.insert(PathBuf::from(format!("f{index}.jpg")), S, Some(image(1)));
         }
         let oldest = PathBuf::from("f0.jpg");
-        cache.request(&oldest); // 화면에 보여서 다시 요청됐다
-        cache.insert(PathBuf::from("new.jpg"), Some(image(1)));
+        cache.request(&oldest, S); // 화면에 보여서 다시 요청됐다
+        cache.insert(PathBuf::from("new.jpg"), S, Some(image(1)));
         assert!(
             cache.has_image(&oldest),
             "보이는 항목인데 축출됐다 — request가 LRU를 갱신하지 않는다"
@@ -457,8 +523,8 @@ mod tests {
     fn 준비된_경로만_동기화_대상이다() {
         // 실패로 기억한 것(None)은 올릴 그림이 없다 — 텍스처 캐시가 헛돌면 안 된다
         let mut cache = cache();
-        cache.insert(PathBuf::from("사진.jpg"), Some(image(1)));
-        cache.insert(PathBuf::from("문서.txt"), None);
+        cache.insert(PathBuf::from("사진.jpg"), S, Some(image(1)));
+        cache.insert(PathBuf::from("문서.txt"), S, None);
         let paths = cache.ready_paths();
         assert_eq!(paths.len(), 1);
         assert!(paths[0].ends_with("사진.jpg"));
@@ -472,7 +538,7 @@ mod tests {
         // 동기화 중에 순서가 흔들리면 축출 대상이 프레임마다 달라진다
         let mut cache = cache();
         for index in 0..3 {
-            cache.insert(PathBuf::from(format!("f{index}.jpg")), Some(image(1)));
+            cache.insert(PathBuf::from(format!("f{index}.jpg")), S, Some(image(1)));
         }
         let before = cache.order.clone();
         let _ = cache.peek(Path::new("f0.jpg"));
@@ -486,19 +552,19 @@ mod tests {
         // 지금 폴더의 캐시 자리를 뺏는다 (`DirLoad`와 같은 세대 방식)
         let mut cache = cache();
         let old = PathBuf::from("이전폴더/사진.jpg");
-        cache.request(&old);
+        cache.request(&old, S);
         let stale_generation = cache.generation;
         cache.clear(); // 폴더 이동 — 세대가 오른다
         assert_ne!(cache.generation, stale_generation, "세대가 오르지 않았다");
 
         // 워커가 이전 세대로 보낸 결과가 뒤늦게 도착한 상황을 그대로 재현한다
-        cache.accept(stale_generation, old.clone(), Some(image(1)));
+        cache.accept(stale_generation, old.clone(), S, Some(image(1)));
         assert!(cache.is_empty(), "떠난 폴더의 결과가 담겼다");
 
         // 지금 세대의 결과는 정상으로 담긴다
         let now = PathBuf::from("현재폴더/사진.jpg");
         let generation = cache.generation;
-        cache.accept(generation, now.clone(), Some(image(1)));
+        cache.accept(generation, now.clone(), S, Some(image(1)));
         assert!(cache.get(&now).is_some());
     }
 
@@ -507,9 +573,9 @@ mod tests {
         // 떠난 폴더의 썸네일을 들고 있으면 여러 폴더를 오갈 때 상한이 의미를 잃는다 (NFR-9)
         let mut cache = cache();
         for index in 0..20 {
-            cache.insert(PathBuf::from(format!("f{index}.jpg")), Some(image(1)));
+            cache.insert(PathBuf::from(format!("f{index}.jpg")), S, Some(image(1)));
         }
-        cache.request(Path::new("진행중.jpg"));
+        cache.request(Path::new("진행중.jpg"), S);
         cache.clear();
         assert!(cache.is_empty());
         assert!(cache.pending.is_empty(), "진행 중 표시가 남았다");
@@ -520,8 +586,8 @@ mod tests {
         // 감시 갱신 등으로 같은 파일이 다시 오면 순서 목록에 중복이 쌓일 수 있다
         let mut cache = cache();
         let path = PathBuf::from("사진.jpg");
-        cache.insert(path.clone(), Some(image(1)));
-        cache.insert(path.clone(), Some(image(2)));
+        cache.insert(path.clone(), S, Some(image(1)));
+        cache.insert(path.clone(), S, Some(image(2)));
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.order.len(), 1, "순서 목록에 중복이 쌓였다");
     }
@@ -533,7 +599,7 @@ mod tests {
     /// 첫 호출은 COM 초기화까지 겹쳐 수 초가 걸리므로 여유를 넉넉히 둔다
     fn wait_for(cache: &mut ThumbnailCache, path: &Path, timeout_ms: u64) -> bool {
         let start = std::time::Instant::now();
-        cache.request(path);
+        cache.request(path, S);
         while start.elapsed().as_millis() < timeout_ms as u128 {
             cache.poll();
             if cache.ready.contains_key(path) {
@@ -542,6 +608,88 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         false
+    }
+
+    /// 도장을 정해 요청하고, 그 도장의 결과가 담길 때까지 기다린다
+    fn wait_for_stamp(
+        cache: &mut ThumbnailCache,
+        path: &Path,
+        stamp: FileStamp,
+        timeout_ms: u64,
+    ) -> bool {
+        let start = std::time::Instant::now();
+        cache.request(path, stamp);
+        while start.elapsed().as_millis() < timeout_ms as u128 {
+            cache.poll();
+            if cache.stamp_of(path) == Some(stamp) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
+    fn 도장(size: u64, modified: u64) -> FileStamp {
+        FileStamp { size, modified }
+    }
+
+    #[test]
+    fn 도장이_바뀌면_옛_그림을_둔_채_다시_만든다() {
+        // 같은 이름의 파일이 새 내용으로 바뀌었다 — 경로만 보면 옛 그림을 계속 준다
+        let mut cache = cache();
+        let path = PathBuf::from("사진.png");
+        cache.insert(path.clone(), 도장(0, 1), Some(image(1)));
+        cache.request(&path, 도장(100, 2));
+        assert!(cache.is_pending(), "도장이 바뀌었는데 다시 청하지 않았다");
+        assert_eq!(
+            cache.peek(&path).map(|img| img.width),
+            Some(1),
+            "새 그림이 오기 전에 옛 그림을 치웠다 — 형식 아이콘으로 깜빡인다"
+        );
+        // 파일이 또 바뀌기 전에 옛 도장으로 늦게 온 결과는 버린다
+        let generation = cache.generation;
+        cache.accept(generation, path.clone(), 도장(0, 1), Some(image(3)));
+        assert_eq!(cache.peek(&path).map(|img| img.width), Some(1));
+        // 새 도장의 결과가 오면 갈아 끼운다
+        cache.accept(generation, path.clone(), 도장(100, 2), Some(image(2)));
+        assert_eq!(cache.peek(&path).map(|img| img.width), Some(2));
+        assert_eq!(cache.stamp_of(&path), Some(도장(100, 2)));
+        assert!(!cache.is_pending());
+    }
+
+    #[test]
+    fn 같은_도장이면_다시_청하지_않는다() {
+        let mut cache = cache();
+        let path = PathBuf::from("사진.png");
+        cache.insert(path.clone(), 도장(5, 5), Some(image(1)));
+        cache.request(&path, 도장(5, 5));
+        assert!(!cache.is_pending());
+    }
+
+    #[test]
+    fn 영바이트로_받은_아이콘은_내용이_쓰이면_실제_그림으로_바뀐다() {
+        // 2026-09-29 재현 — 복사 시작 직후(0바이트) 셸은 썸네일 대신 형식 아이콘을 준다.
+        // 경로만 키로 삼던 캐시는 내용이 다 쓰인 뒤에도 그 아이콘을 계속 줬다
+        let dir = std::env::temp_dir().join(format!("fe_thumb_stamp_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("빨강.png");
+        std::fs::write(&file, b"").unwrap();
+
+        let mut cache = ThumbnailCache::new();
+        assert!(wait_for_stamp(&mut cache, &file, 도장(0, 1), 20_000));
+
+        image::RgbaImage::from_pixel(600, 400, image::Rgba([255, 0, 0, 255]))
+            .save(&file)
+            .unwrap();
+        let arrived = wait_for_stamp(&mut cache, &file, 도장(1, 2), 20_000);
+        let 가운데 = cache.peek(&file).map(|img| {
+            let i = ((img.height / 2) * img.width + img.width / 2) * 4;
+            [img.rgba[i], img.rgba[i + 1], img.rgba[i + 2]]
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(arrived, "새 도장의 결과가 오지 않았다");
+        assert_eq!(가운데, Some([255, 0, 0]), "여전히 옛 그림이다");
     }
 
     #[test]
@@ -585,6 +733,7 @@ mod tests {
         for index in 0..MAX_CACHED + 50 {
             cache.insert(
                 PathBuf::from(format!("f{index}.jpg")),
+                S,
                 Some(ThumbnailImage {
                     width: THUMB_PX as usize,
                     height: THUMB_PX as usize,

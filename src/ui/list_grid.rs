@@ -3,6 +3,7 @@
 //! 배치 계산은 `ui::view_mode`(순수 로직)가 하고 이 모듈은 그 자리에 그리기만 한다.
 //! 선택·더블클릭·우클릭은 `ui::list_details`(자세히 보기)와 **같은 규칙**을 따른다 —
 //! 보기 모드를 바꿨다고 조작법이 달라지면 안 되기 때문이다.
+use crate::fs::enumerate::FileStamp;
 use crate::fs::icons::{IconCache, IconSize};
 use crate::panel::file_list::{ListRow, format_filetime, format_size};
 use crate::ui::icon_tex::{IconTextures, ThumbnailTextures};
@@ -51,8 +52,9 @@ pub struct GridInput<'a, R: ListRow> {
     pub thumbnails: &'a ThumbnailTextures,
     /// 이번 프레임에 화면에 보인 파일들. 호출부가 이것으로 썸네일을 **요청하고 동시에
     /// 최근 사용으로 올린다** — 보이는 것만 담아야 큰 폴더에서 요청이 폭주하지 않고,
-    /// 이미 준비된 것까지 담아야 보고 있는 썸네일이 축출되지 않는다
-    pub visible: &'a mut Vec<PathBuf>,
+    /// 이미 준비된 것까지 담아야 보고 있는 썸네일이 축출되지 않는다. **도장을 함께 싣는다** —
+    /// 같은 이름의 파일이 새 내용으로 바뀌면 썸네일을 다시 만든다
+    pub visible: &'a mut Vec<(PathBuf, FileStamp)>,
     /// 항목이 로컬 파일인가. 원격이면 **전체 경로로 하는 일**(썸네일 요청·셸 아이콘 정밀 조회)을
     /// 하지 않는다 — 원격은 썸네일 비대상이고, 이름을 로컬 경로에 이어 붙이면 없는 파일을 묻게 된다 (D11)
     pub local_paths: bool,
@@ -191,7 +193,7 @@ pub fn show<R: ListRow>(
                 // **텍스처가 이미 있어도 담는다** — 이 목록은 "요청 대상"이자 "지금 화면에
                 // 보인다"는 신호다. 없을 때만 담으면 텍스처가 올라간 뒤로는 최근 사용
                 // 갱신이 멈춰, 화면에 떠 있는 썸네일이 축출됐다 다시 만들어지길 반복한다
-                visible.push(path);
+                visible.push((path, row_stamp(entry)));
                 ready
             } else {
                 None
@@ -258,6 +260,14 @@ pub fn show<R: ListRow>(
         }
     }
     outcome
+}
+
+/// 행의 도장 — 썸네일·경로별 아이콘 캐시가 내용 변화를 가르는 데 쓴다(`fs::enumerate::FileStamp`)
+pub(super) fn row_stamp<R: ListRow>(entry: &R) -> FileStamp {
+    FileStamp {
+        size: entry.size(),
+        modified: entry.modified_key(),
+    }
 }
 
 /// 보이는 항목에 한해 아이콘 인덱스를 조회한다 — 로드 시 전체를 미리 계산하면
@@ -697,7 +707,7 @@ mod tests {
                 &mut icon_textures,
             );
         });
-        visible
+        visible.into_iter().map(|(path, _)| path).collect()
     }
 
     /// 크기만 다르게 둔 썸네일 그림 — 텍스처 id는 이 판정에 쓰이지 않는다
@@ -846,7 +856,7 @@ mod tests {
             );
         });
         assert_eq!(visible.len(), 1, "폴더까지 요청했다: {visible:?}");
-        assert!(visible[0].ends_with("사진.jpg"));
+        assert!(visible[0].0.ends_with("사진.jpg"));
     }
 
     #[test]

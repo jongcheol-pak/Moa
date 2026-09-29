@@ -3,7 +3,7 @@
 //! 표시 규칙(크기·날짜 문자열)과 정렬 비교는 `panel::file_list`의 순수 함수를 그대로 쓴다 —
 //! 복제하면 두 벌로 갈라진다. **그리기는 보기 모드별 모듈이 맡고**(자세히 보기는
 //! `ui::list_details`) 이 파일은 상태를 들고 그 모듈에 넘긴 뒤, 돌아온 조작을 상태에 반영한다.
-use crate::fs::enumerate::FileEntry;
+use crate::fs::enumerate::{FileEntry, FileStamp};
 use crate::fs::icons::IconCache;
 use crate::panel::file_list::{ListRow, SortKey, compare_rows};
 use crate::remote::types::RemoteEntry;
@@ -570,7 +570,7 @@ impl FileListView {
         icons: &mut IconCache,
         textures: &mut IconTextures,
         thumbnails: &ThumbnailTextures,
-        visible: &mut Vec<PathBuf>,
+        visible: &mut Vec<(PathBuf, FileStamp)>,
     ) -> ListInteraction {
         // 필드를 미리 풀어 둔다 — 모델을 빌리는 동안 나머지 필드도 함께 빌려야 한다
         let FileListView {
@@ -919,7 +919,7 @@ struct RenderRequest<'a> {
     column_flags: ColumnFlags,
     view_mode: ViewMode,
     thumbnails: &'a ThumbnailTextures,
-    visible: &'a mut Vec<PathBuf>,
+    visible: &'a mut Vec<(PathBuf, FileStamp)>,
     local_paths: bool,
     /// 이름 뒤 확장자를 보일지 (FR-52)
     show_extensions: bool,

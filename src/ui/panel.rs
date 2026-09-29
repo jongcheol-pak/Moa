@@ -2297,8 +2297,9 @@ impl PanelState {
         let interaction = self
             .list
             .show(ui, icons, textures, &self.thumb_textures, &mut visible);
-        for path in visible {
-            self.thumbs.request(&path);
+        // 도장이 바뀐 파일(같은 이름의 새 내용)은 `request`가 다시 만든다
+        for (path, stamp) in visible {
+            self.thumbs.request(&path, stamp);
         }
         // 다 읽었는데 아무것도 없으면 그 사실을 적는다 (2026-08-16 검토).
         // **목록을 대신 그리지 않고 그 위에 얹는다** — 목록 자리가 그대로 있어야

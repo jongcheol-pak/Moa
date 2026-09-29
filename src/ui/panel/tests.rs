@@ -933,9 +933,10 @@ fn 썸네일을_기다리는_동안은_스스로_깨어난다() {
     // 이 신호가 없으면 사진이 사용자가 마우스를 움직일 때까지 안 나타난다(F-8 실측)
     let ctx = egui::Context::default();
     let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\Users"));
-    panel
-        .thumbs
-        .request(std::path::Path::new(r"C:\Users\아직없음.jpg"));
+    panel.thumbs.request(
+        std::path::Path::new(r"C:\Users\아직없음.jpg"),
+        crate::fs::enumerate::FileStamp::default(),
+    );
 
     assert_eq!(
         panel.poll_thumbnails(&ctx),

@@ -28,7 +28,27 @@ pub struct FileEntry {
     pub attributes: u32,
 }
 
+/// 파일 내용이 바뀌었는지 가르는 도장 — 크기와 수정 시각 (2026-09-29).
+///
+/// 썸네일·경로별 아이콘 캐시가 경로만 보면, 같은 이름의 파일이 새 내용으로 바뀌어도(덮어쓰기·
+/// 복사 중 0바이트였다가 채워짐) 옛 그림을 계속 준다. 둘 중 하나라도 다르면 다시 만든다.
+/// 감시(`fs::watcher`)가 크기·쓰기 시각 변화를 통지하므로 새 도장은 다시 읽은 목록에 실린다
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct FileStamp {
+    pub size: u64,
+    /// FILETIME 원시값 (100ns 단위)
+    pub modified: u64,
+}
+
 impl FileEntry {
+    /// 이 항목의 도장 — 캐시가 내용 변화를 가르는 데 쓴다
+    pub fn stamp(&self) -> FileStamp {
+        FileStamp {
+            size: self.size,
+            modified: self.modified,
+        }
+    }
+
     /// 표시용 문자열 (널 종단 제외)
     pub fn name_string(&self) -> String {
         String::from_utf16_lossy(&self.name[..self.name.len().saturating_sub(1)])

@@ -332,7 +332,8 @@ fn spawn_converter() -> Option<ConvertChannels> {
 /// 함께 버려야 NFR-9 상한이 GPU 쪽에서도 지켜지고, 프레임 상한에 걸려 못 올린 것도
 /// 다음 프레임에 실제로 다시 시도된다
 pub struct ThumbnailTextures {
-    by_path: HashMap<PathBuf, egui::TextureHandle>,
+    /// 올린 텍스처와 **그 픽셀을 만든 내용의 도장** — 도장이 픽셀 캐시와 다르면 다시 올린다
+    by_path: HashMap<PathBuf, (crate::fs::enumerate::FileStamp, egui::TextureHandle)>,
     created_this_frame: usize,
 }
 
@@ -363,17 +364,33 @@ impl ThumbnailTextures {
             if self.created_this_frame >= MAX_NEW_THUMBS_PER_FRAME {
                 break;
             }
+            let Some(stamp) = cache.stamp_of(&path) else {
+                continue;
+            };
+            // **같은 도장으로 이미 올라가 있으면 건너뛴다.** 도장이 다르면 같은 이름의 파일이 새
+            // 내용으로 바뀐 것이라 갈아 올린다 — 이번 프레임 상한에 걸리면 다음 프레임까지 옛
+            // 텍스처가 남는다(형식 아이콘으로 떨어지지 않는다)
+            if self
+                .by_path
+                .get(&path)
+                .is_some_and(|(held, _)| *held == stamp)
+            {
+                continue;
+            }
             if let Some(image) = cache.peek(&path) {
-                self.upload(ctx, &path, image);
+                self.upload(ctx, &path, stamp, image);
             }
         }
     }
 
-    /// 준비된 썸네일을 텍스처로 올린다. 이미 있으면 아무 일도 하지 않는다
-    fn upload(&mut self, ctx: &egui::Context, path: &Path, image: &ThumbnailImage) {
-        if self.by_path.contains_key(path) {
-            return;
-        }
+    /// 준비된 썸네일을 텍스처로 올린다 — 같은 경로의 옛 텍스처는 갈아 끼운다
+    fn upload(
+        &mut self,
+        ctx: &egui::Context,
+        path: &Path,
+        stamp: crate::fs::enumerate::FileStamp,
+        image: &ThumbnailImage,
+    ) {
         let color =
             egui::ColorImage::from_rgba_unmultiplied([image.width, image.height], &image.rgba);
         let handle = ctx.load_texture(
@@ -382,11 +399,11 @@ impl ThumbnailTextures {
             IMAGE_TEXTURE,
         );
         self.created_this_frame += 1;
-        self.by_path.insert(path.to_path_buf(), handle);
+        self.by_path.insert(path.to_path_buf(), (stamp, handle));
     }
 
     pub fn get(&self, path: &Path) -> Option<&egui::TextureHandle> {
-        self.by_path.get(path)
+        self.by_path.get(path).map(|(_, handle)| handle)
     }
 
     /// 폴더를 떠날 때 — 픽셀 캐시와 함께 비운다 (NFR-9)
@@ -806,5 +823,34 @@ mod tests {
         textures.sync(&ctx, &cache);
         textures.sync(&ctx, &cache);
         assert_eq!(textures.len(), 2, "중복으로 올라갔다");
+    }
+
+    #[test]
+    fn 같은_경로의_그림이_바뀌면_텍스처도_다시_올린다() {
+        // 같은 이름의 파일이 새 내용으로 바뀌어 픽셀이 갈렸다 — 경로만 보면 옛 텍스처가 남는다
+        let ctx = egui::Context::default();
+        let path = PathBuf::from("사진.png");
+        let stamp = |modified| crate::fs::enumerate::FileStamp { size: 1, modified };
+        let mut cache = ThumbnailCache::new();
+        cache.accept_for_test_stamped(path.clone(), stamp(1), Some(image()));
+        let mut textures = ThumbnailTextures::new();
+        textures.sync(&ctx, &cache);
+        assert_eq!(textures.get(&path).map(|tex| tex.size()), Some([2, 2]));
+
+        cache.accept_for_test_stamped(
+            path.clone(),
+            stamp(2),
+            Some(ThumbnailImage {
+                width: 3,
+                height: 1,
+                rgba: vec![255; 3 * 4],
+            }),
+        );
+        textures.sync(&ctx, &cache);
+        assert_eq!(
+            textures.get(&path).map(|tex| tex.size()),
+            Some([3, 1]),
+            "옛 그림의 텍스처가 그대로다"
+        );
     }
 }
