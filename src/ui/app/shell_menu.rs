@@ -1043,14 +1043,17 @@ impl ExplorerApp {
         let row_top = picked.as_ref().map(|(_, top)| *top);
         let mut picked = picked.map(|(pick, _)| pick);
 
-        // 펼쳐 둔 하위 메뉴는 부모 오른쪽에 붙인다 — 셸의 것이든 `앱 확장`이든 같다
+        // 펼쳐 둔 하위 메뉴는 부모 오른쪽에 붙인다 — 셸의 것이든 `앱 확장`이든 같다.
+        // 화면 오른쪽을 넘으면 부모 왼쪽으로 뒤집는다(`menu::submenu_pos`)
+        let parent_x = egui::Rangef::new(at.x, at.x + size.x);
         let mut submenu_rect = None;
         // **업로드 하위 메뉴는 재료가 달라 따로 그린다** — 셸 항목이 아니라 앱이 모은 글자다
         if let Some(OpenSubmenu::Upload(labels)) = open.submenu.as_ref() {
-            let sub_at = menu::clamp_menu_pos(
+            let sub_at = menu::submenu_pos(
                 viewport,
-                // 셸 하위 메뉴와 **같은 자리 계산**이다 — 부모 오른쪽, 펼친 줄의 높이
-                egui::pos2(at.x + size.x, open.submenu_top),
+                // 셸 하위 메뉴와 **같은 자리 계산**이다 — 부모 오른쪽(넘치면 왼쪽), 펼친 줄의 높이
+                parent_x,
+                open.submenu_top,
                 shell_context_menu::upload_submenu_size(ctx, labels.len()),
             );
             let (sub_pick, rect) = shell_context_menu::show_upload_submenu_popup(
@@ -1073,12 +1076,12 @@ impl ExplorerApp {
                     ..
                 ))
             );
-            let sub_at = menu::clamp_menu_pos(
+            let sub_at = menu::submenu_pos(
                 viewport,
+                parent_x,
                 // **펼친 줄의 높이에 붙인다**(2026-08-26) — 종전에는 `at.y`(부모 맨 위)라
-                // 어느 줄을 펼쳤든 같은 자리에 떴다. 화면 아래로 넘치면 `clamp_menu_pos`가
-                // 위로 민다
-                egui::pos2(at.x + size.x, open.submenu_top),
+                // 어느 줄을 펼쳤든 같은 자리에 떴다. 화면 아래로 넘치면 위로 민다
+                open.submenu_top,
                 shell_context_menu::submenu_size_at(ctx, zip_row, rows),
             );
             let (sub_picked, sub_rect) = shell_context_menu::show_submenu_popup(

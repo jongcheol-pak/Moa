@@ -611,6 +611,25 @@ pub(crate) fn clamp_menu_pos(screen: egui::Rect, at: egui::Pos2, size: egui::Vec
     )
 }
 
+/// 하위 메뉴의 시작점 — 부모 오른쪽에 붙이되 **화면 오른쪽을 넘으면 부모 왼쪽으로 뒤집는다**.
+///
+/// `clamp_menu_pos`만 쓰면 넘친 만큼 안으로 당겨져 하위 메뉴가 부모를 덮는다(2026-09-29 보고).
+/// 왼쪽에도 자리가 없으면 종전처럼 화면 안으로 당긴다 — 세로는 언제나 `clamp_menu_pos`가 맞춘다
+pub(crate) fn submenu_pos(
+    screen: egui::Rect,
+    parent_x: egui::Rangef,
+    top: f32,
+    size: egui::Vec2,
+) -> egui::Pos2 {
+    let right = parent_x.max;
+    let x = if right + size.x > screen.right() && parent_x.min - size.x >= screen.left() {
+        parent_x.min - size.x
+    } else {
+        right
+    };
+    clamp_menu_pos(screen, egui::pos2(x, top), size)
+}
+
 /// 팝업 **프레임**이 안쪽 내용 밖에 더 차지하는 크기 — 화면 밖 보정에 더한다.
 ///
 /// 안쪽 여백은 `Frame::menu`가 스타일에서 읽어 가는 그대로(`spacing.menu_margin`)를 읽는다.
@@ -1261,6 +1280,26 @@ mod tests {
         assert_eq!(
             clamp_menu_pos(screen, egui::pos2(600.0, 400.0), huge),
             egui::pos2(0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn 오른쪽이_넘치면_하위_메뉴는_부모_왼쪽에_선다() {
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 800.0));
+        let sub = egui::vec2(250.0, 200.0);
+        // 자리가 있으면 부모 오른쪽에 붙는다
+        assert_eq!(
+            submenu_pos(screen, egui::Rangef::new(100.0, 400.0), 300.0, sub),
+            egui::pos2(400.0, 300.0)
+        );
+        // 부모가 화면 오른쪽 끝에 붙어 있으면 부모 왼쪽으로 뒤집는다 — 부모와 겹치지 않는다
+        let at = submenu_pos(screen, egui::Rangef::new(900.0, 1200.0), 300.0, sub);
+        assert_eq!(at, egui::pos2(650.0, 300.0));
+        assert!(at.x + sub.x <= 900.0);
+        // 양쪽 다 자리가 없으면 화면 안으로 당긴다(종전 규칙)
+        assert_eq!(
+            submenu_pos(screen, egui::Rangef::new(100.0, 1100.0), 700.0, sub),
+            egui::pos2(950.0, 600.0)
         );
     }
 }
