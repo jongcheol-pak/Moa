@@ -7,6 +7,7 @@
 //! `WM_INITMENUPOPUP` 등을 받아야 채워지는데, winit은 그 메시지를 우리 코드로 넘겨주지 않는다.
 //! 그래서 창을 서브클래싱해 `forward_menu_msg`로 전달한다(서브클래스가 없으면 서브메뉴가 빈다).
 use crate::fs::shell_menu::{ShellMenu, forward_menu_msg, show_context_menu};
+use crate::fs::shell_menu_worker::ShellMenuWorker;
 use eframe::egui;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::path::{Path, PathBuf};
@@ -61,6 +62,14 @@ impl ShellHost {
     /// 메뉴가 닫힐 때까지 이 호출은 반환하지 않는다(TrackPopupMenuEx 모달 루프)
     pub fn popup(&self, folder: &Path, items: &[PathBuf], screen_x: i32, screen_y: i32) {
         show_context_menu(self.hwnd, folder, items, screen_x, screen_y);
+    }
+
+    /// 셸 메뉴 워커를 띄운다 (FR-8) — 셸 대화가 이 창에 붙도록 핸들 값을 넘긴다.
+    ///
+    /// 우리가 그리는 메뉴의 셸 조회(열기·하위 메뉴 채움·실행)는 전부 그 워커가 한다 —
+    /// UI 스레드에서 돌리면 우클릭마다 0.3~1.8초 창이 멈춘다(`fs::shell_menu_worker`)
+    pub fn spawn_menu_worker(&self) -> Option<ShellMenuWorker> {
+        ShellMenuWorker::spawn(self.hwnd.0 as isize)
     }
 
     /// **우리가 그릴 메뉴**를 연다 (FR-8 개정) — 항목은 셸에서 읽고 그리기는 `ui`가 한다.
