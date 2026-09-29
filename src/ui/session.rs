@@ -53,8 +53,13 @@ pub struct PanelTabs {
     pub active_tab: usize,
     /// 자세히 보기 열 폭 — 비면 기본 폭으로 시작한다
     pub columns: Vec<f32>,
-    /// 보기 모드 키 — 비면 기본값(자세히)으로 시작한다
+    /// 보기 모드 키 — **활성 탭의 것**이며 탭별 키가 비었을 때의 대체다. 이것도 비면 기본값(자세히)
     pub view_mode: String,
+    /// 탭마다의 보기 모드 키 (FR-23) — `tabs`와 순서가 1:1이다.
+    ///
+    /// **비었거나 모자라도 여기서 채우지 않는다** — 저장된 그대로 옮기고, 패널 값으로 대신하는
+    /// 것은 `PanelState::from_tabs` 한 곳이다(여기서 채우면 왕복이 입력과 달라진다)
+    pub tab_view_modes: Vec<String>,
     /// 정렬 기준 키 — 비면 기본값(이름 오름차순)으로 시작한다
     pub sort_key: String,
     /// 정렬 방향 — 참이면 오름차순. **`sort_key`가 비면 읽지 않는다**(둘은 함께 담긴다)
@@ -104,7 +109,20 @@ pub fn to_session(
                     .panels
                     .iter()
                     .map(|panel| PanelSession {
-                        tabs: panel.tabs.iter().map(to_tab_session).collect(),
+                        tabs: panel
+                            .tabs
+                            .iter()
+                            .enumerate()
+                            .map(|(index, tab)| TabSession {
+                                // 모자라면 빈 값("저장 안 됨")이다 — 채우는 것은 패널이다
+                                view_mode: panel
+                                    .tab_view_modes
+                                    .get(index)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                ..to_tab_session(tab)
+                            })
+                            .collect(),
                         active_tab: panel.active_tab,
                         columns: panel.columns.clone(),
                         view_mode: panel.view_mode.clone(),
@@ -161,6 +179,7 @@ pub fn restore(session: &Session) -> Vec<WorkspaceState> {
                     active_tab: panel.active_tab,
                     columns: panel.columns.clone(),
                     view_mode: panel.view_mode.clone(),
+                    tab_view_modes: panel.tabs.iter().map(|tab| tab.view_mode.clone()).collect(),
                     sort_key: panel.sort_key.clone(),
                     sort_ascending: panel.sort_ascending,
                     column_order: panel.column_order.clone(),
@@ -378,6 +397,8 @@ mod tests {
                         active_tab: 1,
                         columns: vec![200.0, 60.0, 120.0, 90.0],
                         view_mode: "tiles".into(),
+                        // 활성 탭(1)의 것이 `view_mode`와 같다 — 앱이 저장하는 모양 그대로다
+                        tab_view_modes: vec!["list".into(), "tiles".into()],
                         sort_key: "size".into(),
                         sort_ascending: false,
                         column_order: vec!["size".into(), "name".into()],
@@ -387,6 +408,8 @@ mod tests {
                         active_tab: 0,
                         columns: Vec::new(),
                         view_mode: String::new(),
+                        // 탭과 1:1 — 저장본은 탭마다 키 자리를 하나씩 든다(비었으면 "저장 안 됨")
+                        tab_view_modes: vec![String::new()],
                         sort_key: String::new(),
                         sort_ascending: true,
                         column_order: Vec::new(),
@@ -402,6 +425,7 @@ mod tests {
                     active_tab: 0,
                     columns: Vec::new(),
                     view_mode: "large_icons".into(),
+                    tab_view_modes: vec![String::new()],
                     sort_key: "modified".into(),
                     sort_ascending: true,
                     column_order: Vec::new(),
@@ -523,6 +547,24 @@ mod tests {
         assert_eq!(restored[0].panels[0].view_mode, "tiles");
         assert!(restored[0].panels[1].view_mode.is_empty());
         assert_eq!(restored[1].panels[0].view_mode, "large_icons");
+    }
+
+    #[test]
+    fn 탭마다의_보기_모드는_파일을_거쳐도_남는다() {
+        // 재시작하면 탭별 보기가 사라지고 패널 하나의 모드로 뭉개지면 "탭마다 따로"가 반쪽이다
+        let session = to_session(
+            window(),
+            SidebarSession::default(),
+            0,
+            &sample(),
+            empty_remote(),
+        );
+        let text = serde_json::to_string(&session).expect("직렬화");
+        let parsed = parse_session(&text).expect("앱이 쓴 세션이 거부됐다");
+        let restored = restore(&parsed);
+        assert_eq!(restored[0].panels[0].tab_view_modes, ["list", "tiles"]);
+        // 탭별로 바꾼 적 없는 패널은 빈 채로 돌아온다 — 채우는 것은 패널이다
+        assert!(restored[1].panels[0].tab_view_modes.iter().all(String::is_empty));
     }
 
     #[test]

@@ -988,6 +988,7 @@ fn 정렬_기준과_방향이_세션을_왕복한다() {
         active_tab: 0,
         columns: Vec::new(),
         view_mode: "tiles".into(),
+        tab_view_modes: Vec::new(),
         sort_key: "size".into(),
         sort_ascending: false,
         column_order: vec!["modified".into(), "name".into()],
@@ -1114,6 +1115,48 @@ fn 보던_탭을_닫으면_남은_탭의_보기로_돌아간다() {
 
     panel.handle_tab(TabAction::Close(1), &ctx);
     assert_eq!(panel.view_mode(), ViewMode::Tiles);
+}
+
+#[test]
+fn 탭별_보기가_없는_옛_세션은_패널_보기를_모든_탭에_준다() {
+    // 탭별 저장 이전의 파일로 재시작해도 지금 보이던 대로 살아나야 한다
+    let ctx = egui::Context::default();
+    let saved = crate::ui::session::PanelTabs {
+        tabs: vec![
+            crate::ui::session::TabSpec::Local(std::path::PathBuf::from(r"C:\")),
+            crate::ui::session::TabSpec::Local(std::path::PathBuf::from(r"D:\")),
+        ],
+        view_mode: "tiles".into(),
+        ..Default::default()
+    };
+    let mut panel = PanelState::from_tabs(&saved).expect("탭이 있으니 되살아난다");
+    assert_eq!(panel.view_mode(), ViewMode::Tiles);
+    panel.handle_tab(TabAction::Switch(1), &ctx);
+    assert_eq!(panel.view_mode(), ViewMode::Tiles, "둘째 탭이 패널 보기를 받지 못했다");
+}
+
+#[test]
+fn 탭별_보기가_있으면_그것이_이기고_다시_저장된다() {
+    let ctx = egui::Context::default();
+    let saved = crate::ui::session::PanelTabs {
+        tabs: vec![
+            crate::ui::session::TabSpec::Local(std::path::PathBuf::from(r"C:\")),
+            crate::ui::session::TabSpec::Local(std::path::PathBuf::from(r"D:\")),
+        ],
+        active_tab: 1,
+        view_mode: "tiles".into(),
+        // 둘째 탭은 비었다 — 패널 값으로 대신한다
+        tab_view_modes: vec!["list".into(), String::new()],
+        ..Default::default()
+    };
+    let mut panel = PanelState::from_tabs(&saved).expect("탭이 있으니 되살아난다");
+    assert_eq!(panel.view_mode(), ViewMode::Tiles, "활성 탭");
+    panel.handle_tab(TabAction::Switch(0), &ctx);
+    assert_eq!(panel.view_mode(), ViewMode::List, "탭별 값이 이기지 못했다");
+
+    let round = panel.to_tabs();
+    assert_eq!(round.tab_view_modes, ["list", "tiles"]);
+    assert_eq!(round.view_mode, "list", "패널 값은 활성 탭의 것이다");
 }
 
 #[test]

@@ -429,7 +429,7 @@ impl PanelState {
     /// 저장된 탭 구성과 목록 표시 상태로 패널을 되살린다 (FR-11). 탭 목록이 비면 `None`.
     ///
     /// 히스토리는 복원하지 않는다 — 세션에는 경로만 저장한다(현행과 같은 규칙).
-    /// 열 폭·보기 모드·정렬은 저장된 값이 없으면 각자의 기본으로 시작한다.
+    /// 열 폭·보기 모드·정렬은 저장된 값이 없으면 각자의 기본으로 시작한다. 보기 모드만 탭마다다.
     ///
     /// **인자를 하나씩 늘리지 않고 `PanelTabs`를 통째로 받는다**(D12) — 저장할 것이 늘 때마다
     /// 인자가 늘면 이 시그니처와 호출부가 함께 흔들린다. `PanelTabs`는 이미 저장 형식과
@@ -451,9 +451,27 @@ impl PanelState {
         if !saved.columns.is_empty() {
             panel.list.set_columns(&saved.columns);
         }
-        if !saved.view_mode.is_empty() {
-            panel.set_view_mode(ViewMode::from_key(&saved.view_mode));
-        }
+        // 탭마다 제 키를, 없으면 패널 키를(탭별 저장 이전의 파일), 그것도 없으면 기본값을 준다.
+        // **되살린 탭 전부를 등록한다** — `new`가 등록한 처음 탭은 버려진 탭이라 함께 걷는다
+        let fallback = if saved.view_mode.is_empty() {
+            ViewMode::default()
+        } else {
+            ViewMode::from_key(&saved.view_mode)
+        };
+        panel.tab_views = panel
+            .tabs
+            .tabs()
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                let mode = match saved.tab_view_modes.get(index) {
+                    Some(key) if !key.is_empty() => ViewMode::from_key(key),
+                    _ => fallback,
+                };
+                (tab.id, mode)
+            })
+            .collect();
+        panel.sync_tab_view_mode();
         // **비었으면 방향도 읽지 않는다** — 둘은 함께 담기므로, 정렬을 저장한 적 없는 옛
         // 세션에서 `bool`의 기본값이 내림차순으로 새어 나오지 않는다
         if !saved.sort_key.is_empty() {
@@ -477,7 +495,17 @@ impl PanelState {
             tabs: self.tab_specs(),
             active_tab: self.active_tab(),
             columns: self.list.columns(),
+            // 패널 키는 활성 탭의 것이다 — 탭별 키를 모르는 옛 판이 이 값을 읽는다
             view_mode: self.view_mode().as_key().to_owned(),
+            tab_view_modes: self
+                .tabs
+                .tabs()
+                .iter()
+                .map(|tab| {
+                    let mode = self.tab_views.get(&tab.id).copied();
+                    mode.unwrap_or_else(|| self.view_mode()).as_key().to_owned()
+                })
+                .collect(),
             sort_key: sort_key.as_key().to_owned(),
             sort_ascending,
             column_order: self.list.column_order(),

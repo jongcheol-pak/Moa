@@ -410,6 +410,13 @@ pub struct TabSession {
     pub path: String,
     /// 원격 탭이 가리키는 사이트 — 로컬이면 `None`
     pub site: Option<u32>,
+    /// 이 탭의 보기 모드 키 (FR-23) — 빈 문자열은 "저장 안 됨"이며 복원 시 패널의
+    /// `view_mode`로 대신한다(탭별 저장 이전의 파일이 그렇다).
+    ///
+    /// **비면 적지 않는다** — 탭별로 바꾼 적 없는 파일이 탭마다 빈 키를 끌고 다니지 않게 한다.
+    /// 읽는 쪽은 아래 `Deserialize`가 키가 없어도 받는다(스키마 버전은 그대로다)
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub view_mode: String,
 }
 
 /// 원격 탭이 담는 것 — 사이트와 그 안의 경로 (plan 신규 심볼 `RemoteTabSession`)
@@ -428,6 +435,7 @@ impl TabSession {
             kind: TabSession::LOCAL.to_owned(),
             path,
             site: None,
+            view_mode: String::new(),
         }
     }
 
@@ -436,6 +444,7 @@ impl TabSession {
             kind: TabSession::REMOTE.to_owned(),
             path: remote.path,
             site: Some(remote.site),
+            view_mode: String::new(),
         }
     }
 
@@ -473,11 +482,23 @@ impl<'de> Deserialize<'de> for TabSession {
                 path: String,
                 #[serde(default)]
                 site: Option<u32>,
+                #[serde(default)]
+                view_mode: String,
             },
         }
         Ok(match Repr::deserialize(deserializer)? {
             Repr::Legacy(path) => TabSession::local(path),
-            Repr::Tab { kind, path, site } => TabSession { kind, path, site },
+            Repr::Tab {
+                kind,
+                path,
+                site,
+                view_mode,
+            } => TabSession {
+                kind,
+                path,
+                site,
+                view_mode,
+            },
         })
     }
 }
@@ -494,7 +515,8 @@ pub struct PanelSession {
     /// 빈 벡터는 "저장된 폭 없음"이며 복원 시 기본 폭이 된다
     #[serde(default)]
     pub columns: Vec<f32>,
-    /// 보기 모드 키 (FR-23). 빈 문자열은 "저장 안 됨"이며 복원 시 기본값(자세히)이 된다.
+    /// 보기 모드 키 (FR-23) — **활성 탭의 것**이며, 탭 객체에 `view_mode`가 없을 때(탭별 저장
+    /// 이전의 파일)의 대체다. 빈 문자열은 "저장 안 됨"이며 복원 시 기본값(자세히)이 된다.
     /// 열 폭과 같은 이유로 `default`를 쓴다 — 스키마 버전을 올리면 옛 세션이 통째로 버려진다
     #[serde(default)]
     pub view_mode: String,
@@ -1081,6 +1103,30 @@ mod tests {
     }
 
     #[test]
+    fn 탭의_보기_모드는_왕복하고_비면_키를_쓰지_않는다() {
+        // 빈 값까지 적으면 탭별로 바꾼 적 없는 파일이 탭마다 쓸모없는 키를 끌고 다닌다
+        let mut tab = TabSession::local(r"C:\Users".to_owned());
+        let text = serde_json::to_string(&tab).expect("직렬화");
+        assert!(!text.contains("view_mode"), "빈 보기 모드를 적었다: {text}");
+
+        tab.view_mode = "tiles".to_owned();
+        let text = serde_json::to_string(&tab).expect("직렬화");
+        let back: TabSession = serde_json::from_str(&text).expect("역직렬화");
+        assert_eq!(back.view_mode, "tiles");
+    }
+
+    #[test]
+    fn 보기_모드_키가_없는_탭도_그대로_읽힌다() {
+        // 탭별 저장 이전의 파일(v3 객체 탭)과 더 옛날의 v2 문자열 탭 — 둘 다 거부되면 세션이 통째로 날아간다
+        let object: TabSession =
+            serde_json::from_str(r#"{"kind":"local","path":"C:\\Users"}"#).expect("객체 탭");
+        assert_eq!(object.path, r"C:\Users");
+        assert!(object.view_mode.is_empty());
+        let legacy: TabSession = serde_json::from_str(r#""C:\\Users""#).expect("v2 문자열 탭");
+        assert!(legacy.view_mode.is_empty());
+    }
+
+    #[test]
     fn 알_수_없는_탭_종류는_폴백이다() {
         // quality 리뷰 m1 — 조용히 로컬로 취급하면 원격 경로가 로컬 경로인 척 되살아난다
         let mut session = sample();
@@ -1088,6 +1134,7 @@ mod tests {
             kind: "무엇".to_owned(),
             path: "/var/www".to_owned(),
             site: Some(1),
+            view_mode: String::new(),
         }];
         session.workspaces[0].panels[0].active_tab = 0;
         let text = serde_json::to_string(&session).expect("직렬화");
@@ -1098,6 +1145,7 @@ mod tests {
             kind: TabSession::REMOTE.to_owned(),
             path: "/var/www".to_owned(),
             site: None,
+            view_mode: String::new(),
         }];
         let text = serde_json::to_string(&session).expect("직렬화");
         assert!(
