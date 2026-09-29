@@ -64,8 +64,6 @@ pub enum Command {
     NewFile,
     /// 표시 중인 폴더에 새 폴더를 만든다 (FR-25)
     NewFolder,
-    /// 파일 목록 보기 모드를 바꾼다 (FR-23)
-    SetViewMode(ViewMode),
     ToggleSidebar,
     /// 앱 설정 대화를 연다 (FR-47) — 타이틀바 설정 메뉴의 `설정` 항목이 유일한 진입점이다.
     ///
@@ -123,8 +121,6 @@ pub enum Command {
 pub struct PanelMenuState {
     /// 패널이 2개 이상인가 — 마지막 하나는 닫을 수 없다 (FR-2)
     pub can_close_panel: bool,
-    /// 지금 이 패널이 쓰는 보기 모드 — 하위 메뉴에서 점으로 표시한다 (FR-23)
-    pub view_mode: ViewMode,
 }
 
 impl PanelMenuState {
@@ -133,10 +129,9 @@ impl PanelMenuState {
     /// 패널은 서로를 모르므로 이 판정은 트리를 아는 쪽(`ui::splitter`)이 내려준다 (plan D15).
     /// 그 계산을 여기 두는 이유는 "마지막 하나는 닫을 수 없다"는 규칙(FR-2)이 갈리지 않게
     /// 한 곳에 모으기 위해서다
-    pub fn for_panes(pane_count: usize, view_mode: ViewMode) -> PanelMenuState {
+    pub fn for_panes(pane_count: usize) -> PanelMenuState {
         PanelMenuState {
             can_close_panel: pane_count > 1,
-            view_mode,
         }
     }
 }
@@ -146,14 +141,7 @@ impl PanelMenuState {
 /// 항목 순서·구분선 위치는 plan `## 시각 요소 분해`의 인벤토리 표 13행 그대로다.
 /// 진입점이 이 메뉴 하나뿐이므로, 여기서 빠진 기능은 마우스로 닿을 수 없게 된다
 pub fn panel_menu_items(ui: &mut egui::Ui, state: PanelMenuState, out: &mut Option<Command>) {
-    // 마우스를 올리기만 해도 펼쳐진다 — `SubMenuButton`이 hover로 여는 팝업이다 (사용자 요청 8번).
-    // 화살표를 egui 기본값(`⏵` U+23F5) 대신 아이콘 글꼴에서 가져오는 이유: 이 앱은 egui 내장
-    // 글꼴을 끄고 맑은 고딕만 쓰는데 맑은 고딕에 U+23F5가 없어 두부(`?`)로 보였다
-    egui::containers::menu::SubMenuButton::from_button(
-        egui::Button::new(crate::i18n::menu_view()).right_text(egui_phosphor::regular::CARET_RIGHT),
-    )
-    .ui(ui, |ui| view_items(ui, state.view_mode, out));
-    ui.separator();
+    // 보기 모드는 여기 두지 않는다 — 상태 줄의 보기 버튼이 진입점이다(2026-09-29 사용자 요청)
     split_items(ui, out);
     ui.separator();
     item(
@@ -328,14 +316,15 @@ fn column_menu_label(ui: &egui::Ui, kind: ColumnKind, checked: bool) -> egui::te
     job
 }
 
-/// 보기 모드 8종 (FR-23) — 지금 쓰는 모드 왼쪽에 점을 찍는다.
+/// 보기 모드 8종 (FR-23) — 상태 줄 보기 버튼의 팝업 본문이다. 지금 쓰는 모드 왼쪽에 점을 찍는다.
 ///
 /// 문구·순서는 plan `### 참조 정합 인벤토리 — '보기' 하위 메뉴` 8행 그대로다.
 /// 모드를 나타내는 아이콘은 넣지 않는다 — phosphor에 대응 글리프가 없어 두부가 될 위험이
-/// 있고(사이드바 `◧` 사례), 점만으로도 지금 모드가 드러난다
-fn view_items(ui: &mut egui::Ui, current: ViewMode, out: &mut Option<Command>) {
-    // 하위 메뉴는 부모 팝업의 스타일을 잇지 않는 **별도 `Area`**라 여기서 다시 세운다
-    theme::menu_style(ui);
+/// 있고(사이드바 `◧` 사례), 점만으로도 지금 모드가 드러난다.
+///
+/// 스타일은 여기서 세우지 않는다 — 팝업을 여는 쪽(`ui::panel`)이 `theme::menu_style`을 부른다
+/// (`column_menu_items`와 같은 규칙). 고른 모드를 돌려주고 적용은 패널이 한다
+pub(crate) fn view_items(ui: &mut egui::Ui, current: ViewMode, out: &mut Option<ViewMode>) {
     for mode in ViewMode::ALL {
         let mark = if mode == current {
             egui_phosphor::regular::DOT_OUTLINE
@@ -344,7 +333,7 @@ fn view_items(ui: &mut egui::Ui, current: ViewMode, out: &mut Option<Command>) {
         };
         let button = egui::Button::new(format!("{mark} {}", mode.label()));
         if ui.add(button).clicked() {
-            *out = Some(Command::SetViewMode(mode));
+            *out = Some(mode);
             ui.close();
         }
     }
@@ -429,7 +418,6 @@ fn targets_file_list(command: Command) -> bool {
         | Command::ClosePanel
         | Command::NewFile
         | Command::NewFolder
-        | Command::SetViewMode(_)
         | Command::ToggleSidebar
         | Command::OpenAppSettings
         | Command::OpenLicenses
@@ -1110,13 +1098,25 @@ mod tests {
         })
     }
 
-    /// '보기' 하위 메뉴를 그려 라벨을 모은다 — 호버로 열리는 팝업이라
-    /// 패널 메뉴를 그리는 것만으로는 잡히지 않아 직접 부른다
+    /// 보기 팝업 본문을 그려 라벨을 모은다 — 상태 줄 버튼을 눌러야 열리는 팝업이라
+    /// 패널을 그리는 것만으로는 잡히지 않아 직접 부른다
     fn view_labels(current: ViewMode) -> Vec<String> {
         drawn_labels(|ui| {
-            let mut command = None;
-            view_items(ui, current, &mut command);
+            let mut picked = None;
+            view_items(ui, current, &mut picked);
         })
+    }
+
+    #[test]
+    fn 패널_메뉴에는_보기가_없다() {
+        // 보기 전환은 상태 줄의 보기 버튼으로 옮겼다(2026-09-29) — 두 곳에 두면 한쪽만 고쳐진다
+        let _guard =
+            crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+        let labels = menu_labels(PanelMenuState::for_panes(2));
+        assert!(
+            !labels.iter().any(|label| label == "보기"),
+            "패널 메뉴에 보기가 남았다: {labels:?}"
+        );
     }
 
     #[test]
@@ -1126,9 +1126,8 @@ mod tests {
         // plan `## 시각 요소 분해`의 인벤토리 표 13행 중 글자가 있는 항목들.
         // 메뉴 바를 없앤 뒤 이 메뉴가 유일한 마우스 진입점이라, 항목이 빠지면 그 기능에
         // 마우스로 닿을 수 없게 된다
-        let labels = menu_labels(PanelMenuState::for_panes(2, ViewMode::Details));
+        let labels = menu_labels(PanelMenuState::for_panes(2));
         let expected = [
-            crate::i18n::menu_view(),
             crate::i18n::menu_split_right(),
             crate::i18n::menu_split_left(),
             crate::i18n::menu_split_up(),
@@ -1197,12 +1196,11 @@ mod tests {
     #[test]
     fn 마지막_패널_하나는_닫을_수_없다() {
         // FR-2 — 이 조건이 뒤집히면 마지막 패널을 닫아 빈 화면이 된다
-        let mode = ViewMode::Details;
-        assert!(!PanelMenuState::for_panes(1, mode).can_close_panel);
-        assert!(PanelMenuState::for_panes(2, mode).can_close_panel);
-        assert!(PanelMenuState::for_panes(4, mode).can_close_panel);
+        assert!(!PanelMenuState::for_panes(1).can_close_panel);
+        assert!(PanelMenuState::for_panes(2).can_close_panel);
+        assert!(PanelMenuState::for_panes(4).can_close_panel);
         // 패널이 0개인 상태는 정상 흐름에 없지만, 그때도 닫기를 열어주면 안 된다
-        assert!(!PanelMenuState::for_panes(0, mode).can_close_panel);
+        assert!(!PanelMenuState::for_panes(0).can_close_panel);
     }
 
     #[test]

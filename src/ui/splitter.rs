@@ -263,7 +263,7 @@ pub fn show_layout(
         let builder = egui::UiBuilder::new()
             .max_rect(pane)
             .id_salt(("pane", id.0));
-        let menu_state = PanelMenuState::for_panes(pane_count, panel.view_mode());
+        let menu_state = PanelMenuState::for_panes(pane_count);
         let requested = ui
             .scope_builder(builder, |ui| {
                 ui.set_clip_rect(pane);

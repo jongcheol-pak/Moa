@@ -57,6 +57,12 @@ mod tests;
 /// 문구(`폴더 트리`·`원격 트리`)를 그대로 두면 좁은 패널에서 상태 줄의 절반을 먹는다
 const TREE_TOGGLE_ICON: &str = egui_phosphor::regular::TREE_VIEW;
 
+/// 보기 버튼 아이콘 — 트리 토글 바로 오른쪽에 서며 누르면 보기 모드 8종이 뜬다 (FR-23).
+///
+/// 모드마다 바꾸지 않고 하나로 둔다(2026-09-29 사용자 선택) — 아이콘 보기 넷은 크기만 달라
+/// 글리프로 갈리지 않고, 지금 모드는 목록 모양과 팝업의 점이 이미 보인다
+const VIEW_MODE_ICON: &str = egui_phosphor::regular::SQUARES_FOUR;
+
 /// 트리와 목록을 가르는 세로 선 두께 — 현행 판 트리의 테두리(`WS_EX_CLIENTEDGE`)를 대신한다
 const TREE_BORDER: f32 = 1.0;
 
@@ -2125,14 +2131,17 @@ impl PanelState {
         }
     }
 
-    /// 패널 상태 줄 — 트리 토글·진행 상황과 항목 수를 **패널 전폭**에 둔다.
+    /// 패널 상태 줄 — 트리 토글·보기 버튼·진행 상황과 항목 수를 **패널 전폭**에 둔다.
     ///
     /// 트리 위가 아니라 트리를 포함한 폭을 쓰는 이유는, 토글이 여는 것이 왼쪽 트리라서
     /// 버튼이 그 트리 위쪽에 있어야 무엇을 여는지 읽히기 때문이다 (2026-08-16 사용자 결정)
     fn show_status_bar(&mut self, ui: &mut egui::Ui, connected: bool) {
         // 클로저 밖에서 정한다 — `Sides`의 클로저가 `self`를 통째로 빌린다 (인벤토리 #94)
         let tree_tip = self.tree_toggle_tooltip();
-        // 왼쪽에 트리 토글·진행 상황, 오른쪽 끝에 항목 수를 둔다 (사용자 요청 7).
+        let current_view = self.view_mode();
+        // 보기 팝업에서 고른 모드 — `Sides` 클로저가 끝난 뒤 적용한다(아래 토글 주석과 같은 이유)
+        let mut picked_view = None;
+        // 왼쪽에 트리 토글·보기 버튼·진행 상황, 오른쪽 끝에 항목 수를 둔다 (사용자 요청 7).
         // `Sides`는 오른쪽 것을 먼저 자리잡게 하므로, 오류 문구가 길어져도 항목 수가 밀리지 않는다
         egui::Sides::new().show(
             ui,
@@ -2146,6 +2155,14 @@ impl PanelState {
                     // 토글 진입점이 이 버튼 하나뿐이라 규칙이 흩어질 여지도 없다
                     self.tree_visible = !self.tree_visible;
                 }
+                // 보기 모드 전환의 진입점 (FR-23) — 트리 토글 바로 오른쪽에 선다(2026-09-29 사용자 요청)
+                let view_button = ui
+                    .selectable_label(false, VIEW_MODE_ICON)
+                    .on_hover_text(crate::i18n::menu_view());
+                egui::Popup::menu(&view_button).show(|ui| {
+                    theme::menu_style(ui);
+                    crate::ui::menu::view_items(ui, current_view, &mut picked_view);
+                });
                 if self.load.is_loading() {
                     ui.spinner();
                     ui.colored_label(theme::TEXT_MUTED, crate::i18n::tree_loading());
@@ -2172,6 +2189,9 @@ impl PanelState {
                 }
             },
         );
+        if let Some(mode) = picked_view {
+            self.set_view_mode(mode);
+        }
     }
 
     /// 상태 줄 아래의 본문 — 트리 오른쪽 자리를 채운다.

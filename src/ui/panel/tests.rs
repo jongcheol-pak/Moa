@@ -295,7 +295,7 @@ fn draw_once_with(
                 &mut icons,
                 &mut textures,
                 remote,
-                PanelMenuState::for_panes(1, ViewMode::Details),
+                PanelMenuState::for_panes(1),
                 // 전송 대상이 없는 상태 — 이 시험들은 탭 아이콘이 아니라 배치·상태를 본다
                 crate::ui::tabs::TransferTargets::default(),
                 favorites,
@@ -1050,7 +1050,7 @@ fn 보기_모드를_바꿔도_정렬은_유지된다() {
 
 #[test]
 fn 보기_모드는_패널을_거쳐_목록까지_전달된다() {
-    // `Command::SetViewMode`가 닿는 지점이다 — 여기서 끊기면 메뉴에서 골라도
+    // 상태 줄 보기 팝업에서 고른 모드가 닿는 지점이다 — 여기서 끊기면 팝업에서 골라도
     // 목록은 이전 모드로 그려진다 (FR-23)
     let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\"));
     assert_eq!(panel.view_mode(), ViewMode::Details);
@@ -2367,7 +2367,7 @@ fn 사라진_즐겨찾기는_눌러도_옮겨가지_않는다() {
                     icons,
                     textures,
                     remote,
-                    PanelMenuState::for_panes(1, ViewMode::Details),
+                    PanelMenuState::for_panes(1),
                     crate::ui::tabs::TransferTargets::default(),
                     &favorites,
                     drive_rows(),
@@ -2441,7 +2441,7 @@ fn 즐겨찾기를_누르면_그_폴더로_옮겨간다() {
                     icons,
                     textures,
                     remote,
-                    PanelMenuState::for_panes(1, ViewMode::Details),
+                    PanelMenuState::for_panes(1),
                     crate::ui::tabs::TransferTargets::default(),
                     &favorites,
                     drive_rows(),
@@ -2528,7 +2528,7 @@ impl FavoriteHarness {
                     icons,
                     textures,
                     remote,
-                    PanelMenuState::for_panes(1, ViewMode::Details),
+                    PanelMenuState::for_panes(1),
                     crate::ui::tabs::TransferTargets::default(),
                     favorites,
                     drive_rows(),
@@ -2573,6 +2573,65 @@ impl FavoriteHarness {
         }
         last.expect("두 프레임을 그렸다")
     }
+}
+
+#[test]
+fn 보기_버튼은_트리_토글_바로_오른쪽에_선다() {
+    // 보기 전환 진입점이 상태 줄로 옮겨 왔다 — 버튼이 없으면 보기를 바꿀 마우스 길이 없다
+    let mut harness = FavoriteHarness::new();
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\"));
+    panel.deferred_start = None;
+
+    let texts = drawn_text_positions(&harness.frame(&mut panel, &[]));
+    let 토글 = texts
+        .iter()
+        .find(|(text, _)| text == TREE_TOGGLE_ICON)
+        .expect("트리 토글 아이콘")
+        .1;
+    let 보기 = texts
+        .iter()
+        .find(|(text, _)| text == VIEW_MODE_ICON)
+        .expect("상태 줄에 보기 버튼이 없다")
+        .1;
+    assert!(보기.x > 토글.x, "보기 버튼이 트리 토글 왼쪽에 섰다");
+    assert!((보기.y - 토글.y).abs() < 4.0, "보기 버튼이 트리 토글과 다른 줄이다");
+}
+
+#[test]
+fn 보기_버튼에서_고른_모드가_그_탭에_걸린다() {
+    let _guard = crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+    let mut harness = FavoriteHarness::new();
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\"));
+    panel.deferred_start = None;
+
+    let first = harness.frame(&mut panel, &[]);
+    let 보기 = drawn_text_positions(&first)
+        .into_iter()
+        .find(|(text, _)| text == VIEW_MODE_ICON)
+        .expect("상태 줄에 보기 버튼이 없다")
+        .1;
+    harness.click(
+        &mut panel,
+        &[],
+        egui::pos2(보기.x + 6.0, 보기.y + 6.0),
+        egui::PointerButton::Primary,
+        0.1,
+    );
+    // 떠 있는 영역은 첫 프레임에 자리만 잰다 — 한 프레임 더 그려야 항목이 보인다
+    let opened = harness.frame(&mut panel, &[]);
+    let 목록 = drawn_text_positions(&opened)
+        .into_iter()
+        .find(|(text, _)| text.trim() == "목록")
+        .expect("보기 팝업에 `목록`이 없다")
+        .1;
+    harness.click(
+        &mut panel,
+        &[],
+        egui::pos2(목록.x + 8.0, 목록.y + 6.0),
+        egui::PointerButton::Primary,
+        0.5,
+    );
+    assert_eq!(panel.view_mode(), ViewMode::List);
 }
 
 /// 트리 구역에 그려진 그 글의 한가운데 — 없으면 시험을 세운다
@@ -4173,7 +4232,6 @@ impl 클릭하네스 {
         let icons = &mut self.icons;
         let textures = &mut self.textures;
         let sites = &self.sites;
-        let mode = panel.view_mode();
         self.ctx.run_ui(input, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
                 let ctx = ui.ctx().clone();
@@ -4188,7 +4246,7 @@ impl 클릭하네스 {
                         connected: &[],
                         tree: &tree,
                     },
-                    PanelMenuState::for_panes(1, mode),
+                    PanelMenuState::for_panes(1),
                     crate::ui::tabs::TransferTargets::default(),
                     &[],
                     drive_rows(),

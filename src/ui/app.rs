@@ -1989,9 +1989,8 @@ impl ExplorerApp {
             | Command::Forward
             | Command::Up
             | Command::NewFile
-            | Command::NewFolder
-            | Command::SetViewMode(_) => {
-                // 새 폴더만 원격 대응이 있다 (FR-12·D5) — 나머지 여섯은 패널 층에서
+            | Command::NewFolder => {
+                // 새 폴더만 원격 대응이 있다 (FR-12·D5) — 나머지 다섯은 패널 층에서
                 // 원격 탭에도 그대로 듣는다
                 if self.route_to_remote(command, target) {
                     return;
@@ -2006,7 +2005,6 @@ impl ExplorerApp {
                     Command::Up => panel.go_up(ctx),
                     Command::NewFile => panel.new_file(ctx),
                     Command::NewFolder => panel.new_folder(ctx),
-                    Command::SetViewMode(mode) => panel.set_view_mode(mode),
                     // 위 분기에서 걸러진 명령들 — 여기 오지 않는다
                     _ => {}
                 }
