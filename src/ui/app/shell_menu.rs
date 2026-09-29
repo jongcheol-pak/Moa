@@ -958,6 +958,11 @@ fn accept_expanded(
     (got == ticket && *open == handle).then_some(items)
 }
 
+/// 셸 하위 메뉴를 아직 채우는 중인가 — **펼친 것이 셸 하위 메뉴일 때만** 기다린다
+fn submenu_still_loading(loading: bool, submenu: Option<&OpenSubmenu>) -> bool {
+    loading && matches!(submenu, Some(OpenSubmenu::Shell(..)))
+}
+
 /// 그 verb를 목록에서 뺄 것인가 — 아이콘 줄에 이미 있거나 두지 않기로 한 것 (FR-8).
 ///
 /// **`ShellMenu`가 아니라 문자열을 받는다** — 셸 조회(COM)를 떼어 내면 두 목록을 함께 보는
@@ -1101,6 +1106,9 @@ impl ExplorerApp {
         if open.shell == ShellState::Loading && loading_expired(open.requested_at.elapsed()) {
             open.fail();
         }
+        // 채우던 셸 하위 메뉴가 접히거나(다른 줄·앱 묶음) 셸 항목 도착으로 걷혔으면 더는
+        // 기다리지 않는다 — 늦게 온 응답은 버려지므로 여기서 풀지 않으면 메뉴가 닫힐 때까지 깨어난다
+        open.submenu_loading = submenu_still_loading(open.submenu_loading, open.submenu.as_ref());
         if open.shell == ShellState::Loading || open.submenu_loading {
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
         }
@@ -2935,6 +2943,28 @@ mod tests {
         assert_eq!(accept_expanded(1, Some(&펼침), expanded(2, 손잡이)), None);
         assert_eq!(accept_expanded(1, Some(&펼침), expanded(1, 다른것)), None);
         assert_eq!(accept_expanded(1, None, expanded(1, 손잡이)), None);
+    }
+
+    #[test]
+    fn 채우던_하위_메뉴가_접히면_기다림을_푼다() {
+        // 풀지 않으면 늦게 온 응답이 버려진 뒤에도 메뉴가 닫힐 때까지 30ms마다 깨어난다
+        let 손잡이 = crate::fs::shell_menu::SubmenuHandle::for_test(7, 3);
+        let 셸 = OpenSubmenu::Shell(
+            손잡이,
+            vec![shell_context_menu::loading_submenu_item()],
+            shell_context_menu::MenuIcons::for_test(),
+        );
+        assert!(submenu_still_loading(true, Some(&셸)));
+        assert!(!submenu_still_loading(true, None), "접혔는데 기다린다");
+        let 묶음 = OpenSubmenu::Virtual(
+            shell_context_menu::VirtualSubmenu::Extensions,
+            Vec::new(),
+            shell_context_menu::MenuIcons::for_test(),
+        );
+        assert!(
+            !submenu_still_loading(true, Some(&묶음)),
+            "앱 묶음으로 바뀌었는데 기다린다"
+        );
     }
 
     #[test]
