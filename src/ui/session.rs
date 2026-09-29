@@ -564,7 +564,12 @@ mod tests {
         let restored = restore(&parsed);
         assert_eq!(restored[0].panels[0].tab_view_modes, ["list", "tiles"]);
         // 탭별로 바꾼 적 없는 패널은 빈 채로 돌아온다 — 채우는 것은 패널이다
-        assert!(restored[1].panels[0].tab_view_modes.iter().all(String::is_empty));
+        assert!(
+            restored[1].panels[0]
+                .tab_view_modes
+                .iter()
+                .all(String::is_empty)
+        );
     }
 
     #[test]

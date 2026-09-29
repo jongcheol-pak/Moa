@@ -1132,7 +1132,11 @@ fn 탭별_보기가_없는_옛_세션은_패널_보기를_모든_탭에_준다()
     let mut panel = PanelState::from_tabs(&saved).expect("탭이 있으니 되살아난다");
     assert_eq!(panel.view_mode(), ViewMode::Tiles);
     panel.handle_tab(TabAction::Switch(1), &ctx);
-    assert_eq!(panel.view_mode(), ViewMode::Tiles, "둘째 탭이 패널 보기를 받지 못했다");
+    assert_eq!(
+        panel.view_mode(),
+        ViewMode::Tiles,
+        "둘째 탭이 패널 보기를 받지 못했다"
+    );
 }
 
 #[test]
@@ -2594,7 +2598,10 @@ fn 보기_버튼은_트리_토글_바로_오른쪽에_선다() {
         .expect("상태 줄에 보기 버튼이 없다")
         .1;
     assert!(보기.x > 토글.x, "보기 버튼이 트리 토글 왼쪽에 섰다");
-    assert!((보기.y - 토글.y).abs() < 4.0, "보기 버튼이 트리 토글과 다른 줄이다");
+    assert!(
+        (보기.y - 토글.y).abs() < 4.0,
+        "보기 버튼이 트리 토글과 다른 줄이다"
+    );
 }
 
 #[test]
