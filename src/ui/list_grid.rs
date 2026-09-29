@@ -288,7 +288,12 @@ pub(super) fn resolve_icon<R: ListRow>(
         Some(cached) => cached,
         None => {
             let full = local_paths.then(|| dir.join(entry.name()).to_string_lossy().into_owned());
-            let looked_up = icons.icon_index(&entry.extension(), entry.is_dir(), full.as_deref());
+            // 도장을 함께 넘긴다 — 같은 이름의 exe가 새 내용으로 바뀌면 다시 묻는다
+            let looked_up = icons.icon_index(
+                &entry.extension(),
+                entry.is_dir(),
+                full.as_deref().map(|path| (path, Some(row_stamp(entry)))),
+            );
             if looked_up.settled {
                 icon_indices[index] = Some(looked_up.index);
             }

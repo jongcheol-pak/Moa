@@ -122,12 +122,12 @@ fn texture_for(
     let himl = icons.himl_for(IconSize::for_px(PREVIEW_PX));
     let ext = extension_of(item);
     // 로컬은 전체 경로를 함께 준다 — exe·lnk·ico는 파일마다 아이콘이 다르다.
-    // 목록이 이미 같은 조회를 맡겼으므로 대개 캐시에 맞고, 워커가 아직 찾는 중이면 그 동안은
-    // 확장자 아이콘이다(매 프레임 다시 물으므로 도착하면 바뀐다)
+    // **도장은 없다**(끄는 항목에 크기·시각이 없다) — 목록이 이미 같은 조회를 맡겨 대개 캐시에
+    // 맞고, 없으면 확장자 아이콘으로 확정된다(여기서 워커에 맡기지 않는다)
     let index = match item {
         DragItem::Local { path, is_dir } => {
             let full = path.to_string_lossy();
-            icons.icon_index(&ext, *is_dir, Some(&full)).index
+            icons.icon_index(&ext, *is_dir, Some((&full, None))).index
         }
         DragItem::Remote { is_dir, .. } => icons.icon_index(&ext, *is_dir, None).index,
     };

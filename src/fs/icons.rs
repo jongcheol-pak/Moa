@@ -3,7 +3,7 @@
 //! 아이콘 인덱스는 **크기와 무관하게 같은 체계**를 쓴다 — 같은 인덱스를 16px 리스트에서 꺼내면
 //! 작은 아이콘이, 256px 리스트에서 꺼내면 큰 아이콘이 나온다. 그래서 크기별 리스트만
 //! 따로 들고 있으면 조회 로직은 하나로 충분하다 (FR-23·FR-24).
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
@@ -14,6 +14,8 @@ use windows::Win32::UI::Shell::{
     SHIL_LARGE, SHIL_SMALL,
 };
 use windows::core::{HSTRING, Interface};
+
+use crate::fs::enumerate::FileStamp;
 
 /// 시스템 이미지 리스트의 아이콘 크기 (FR-23의 보기 모드가 고르는 단계).
 ///
@@ -103,13 +105,17 @@ pub struct IconCache {
     himl_by_size: HashMap<IconSize, HIMAGELIST>,
     icon_by_ext: HashMap<String, i32>,
     type_by_ext: HashMap<String, String>,
-    /// 개별 아이콘(경로별) 캐시 — 파일당 1회만 디스크 조회. exe·lnk·ico는 워커가,
-    /// 드라이브·트리 줄은 `icon_index_for_path`가 채운다
+    /// 드라이브·특수 폴더·트리 줄의 경로별 아이콘 — `icon_index_for_path`가 채운다
     icon_by_path: HashMap<String, i32>,
+    /// exe·lnk·ico 파일의 고유 아이콘과 **그것을 물은 내용의 도장** — 워커가 채운다.
+    ///
+    /// 위 표와 나눈 이유: 이쪽은 같은 이름의 파일이 새 내용으로 바뀌면 다시 물어야 하는데
+    /// (2026-09-29), 드라이브 쪽은 도장이 없다
+    icon_by_file: HashMap<String, (FileStamp, i32)>,
     /// 경로별 아이콘 워커 — 처음 맡길 때 띄운다(`request_path_icon`)
     path_worker: PathWorker,
-    /// 워커에 맡기고 아직 답을 거두지 않은 경로 — 같은 경로를 두 번 맡기지 않는다
-    pending_paths: HashSet<String>,
+    /// 워커에 맡기고 아직 답을 거두지 않은 경로와 그 도장 — 같은 내용을 두 번 맡기지 않는다
+    pending_paths: HashMap<String, FileStamp>,
     /// 경로별 셸 표시 이름 캐시 — 드라이브 이름을 매 프레임 묻지 않는다
     name_by_path: HashMap<String, String>,
     dir_icon: i32,
@@ -168,7 +174,8 @@ impl IconCache {
             type_by_ext: HashMap::new(),
             icon_by_path: HashMap::new(),
             path_worker: PathWorker::NotStarted,
-            pending_paths: HashSet::new(),
+            icon_by_file: HashMap::new(),
+            pending_paths: HashMap::new(),
             name_by_path: HashMap::new(),
             #[cfg(test)]
             shell_queries: 0,
@@ -204,8 +211,17 @@ impl IconCache {
     /// exe·lnk·ico는 파일마다 아이콘이 달라 **실제 경로를 물어야** 하는데, 처음 보는 exe는 그
     /// 조회가 한 건에 10~93ms다(실행 파일 리소스를 읽고 백신이 검사한다 — 2026-09-28 실측).
     /// 보이는 행 전부를 한 프레임에 물으면 창이 수백 ms 멈추므로 **워커에 맡기고** 그 사이에는
-    /// 확장자 아이콘을 `settled: false`로 준다. 결과는 `pump_path_icons`가 거둔다
-    pub fn icon_index(&mut self, ext: &str, is_dir: bool, full_path: Option<&str>) -> IconLookup {
+    /// 확장자 아이콘을 `settled: false`로 준다. 결과는 `pump_path_icons`가 거둔다.
+    ///
+    /// `full_path`는 `(경로, 도장)`이다. **도장이 담긴 것과 다르면 다시 묻는다**(2026-09-29) —
+    /// 같은 이름의 파일이 새 내용으로 바뀌었다. 그동안은 옛 아이콘을 잠정으로 준다(깜빡임 없음).
+    /// 도장이 `None`(끌기 미리보기)이면 담긴 것을 그대로 쓰고, 없으면 확장자 아이콘으로 확정한다
+    pub fn icon_index(
+        &mut self,
+        ext: &str,
+        is_dir: bool,
+        full_path: Option<(&str, Option<FileStamp>)>,
+    ) -> IconLookup {
         if is_dir {
             return IconLookup {
                 index: self.dir_icon,
@@ -213,17 +229,29 @@ impl IconCache {
             };
         }
         if PER_FILE_ICON_EXTS.contains(&ext)
-            && let Some(path) = full_path
+            && let Some((path, stamp)) = full_path
         {
-            if let Some(&index) = self.icon_by_path.get(path) {
+            let held = self.icon_by_file.get(path).copied();
+            let Some(stamp) = stamp else {
+                // 도장 없는 조회 — 워커에 맡기지 않는다(D7)
+                let index = held.map_or_else(|| self.ext_icon(ext), |(_, index)| index);
+                return IconLookup {
+                    index,
+                    settled: true,
+                };
+            };
+            if let Some((held_stamp, index)) = held
+                && held_stamp == stamp
+            {
                 return IconLookup {
                     index,
                     settled: true,
                 };
             }
-            let index = self.ext_icon(ext);
-            // 워커를 쓸 수 없으면 확장자 아이콘으로 확정한다 — 행이 매 프레임 다시 묻지 않게
-            let settled = !self.request_path_icon(path);
+            // 처음 보거나 내용이 바뀌었다 — 옛 아이콘이 있으면 그것을, 없으면 확장자 아이콘을 잠정으로
+            let index = held.map_or_else(|| self.ext_icon(ext), |(_, index)| index);
+            // 워커를 쓸 수 없으면 잠정 아이콘으로 확정한다 — 행이 매 프레임 다시 묻지 않게
+            let settled = !self.request_path_icon(path, stamp);
             return IconLookup { index, settled };
         }
         IconLookup {
@@ -272,8 +300,8 @@ impl IconCache {
     ///
     /// 워커는 **처음 맡길 때 띄운다** — `IconCache`는 시험·드라이브 워커 등 수십 곳에서
     /// 만들어지는데, 경로별 조회를 하는 것은 앱의 캐시 하나뿐이다
-    fn request_path_icon(&mut self, path: &str) -> bool {
-        if self.pending_paths.contains(path) {
+    fn request_path_icon(&mut self, path: &str, stamp: FileStamp) -> bool {
+        if self.pending_paths.get(path) == Some(&stamp) {
             return true;
         }
         if matches!(self.path_worker, PathWorker::NotStarted) {
@@ -283,7 +311,7 @@ impl IconCache {
         let PathWorker::Running(channels) = &self.path_worker else {
             return false;
         };
-        if channels.requests.send(path.to_string()).is_err() {
+        if channels.requests.send((path.to_string(), stamp)).is_err() {
             self.path_worker = PathWorker::Unavailable;
             return false;
         }
@@ -291,7 +319,8 @@ impl IconCache {
         {
             self.path_requests += 1;
         }
-        self.pending_paths.insert(path.to_string());
+        // 옛 도장으로 기다리던 것은 새 도장으로 바꿔 단다 — 옛 결과는 `pump_path_icons`가 버린다
+        self.pending_paths.insert(path.to_string(), stamp);
         true
     }
 
@@ -307,9 +336,17 @@ impl IconCache {
         let mut lost = false;
         loop {
             match channels.results.try_recv() {
-                Ok((path, index)) => {
+                Ok((path, stamp, index)) => {
+                    // **파일이 또 바뀌어 새 도장으로 기다리는 중이면 옛 결과는 버린다**
+                    if self
+                        .pending_paths
+                        .get(&path)
+                        .is_some_and(|waiting| *waiting != stamp)
+                    {
+                        continue;
+                    }
                     self.pending_paths.remove(&path);
-                    self.icon_by_path.insert(path, index);
+                    self.icon_by_file.insert(path, (stamp, index));
                     arrived = true;
                 }
                 Err(TryRecvError::Empty) => break,
@@ -470,8 +507,8 @@ fn lookup_by_path(path: &str) -> Option<i32> {
 
 /// 경로별 아이콘 워커와 잇는 통로
 struct PathWorkerChannels {
-    requests: Sender<String>,
-    results: Receiver<(String, i32)>,
+    requests: Sender<(String, FileStamp)>,
+    results: Receiver<(String, FileStamp, i32)>,
 }
 
 /// 경로별 아이콘 워커의 상태 — 처음 맡길 때 띄우고, 띄우지 못했거나 사라지면 다시 띄우지 않는다
@@ -487,16 +524,16 @@ enum PathWorker {
 /// (`fs::drives`·`fs::thumbnail` 워커와 같다). 실패한 조회는 `0`(셸 기본 아이콘)을 돌려준다 —
 /// 동기 조회 시절 `SHFILEINFOW::default()`의 `iIcon`이 그대로 쓰이던 것과 같은 값이다
 fn spawn_path_worker() -> Option<PathWorkerChannels> {
-    let (request_tx, request_rx) = channel::<String>();
+    let (request_tx, request_rx) = channel::<(String, FileStamp)>();
     let (result_tx, result_rx) = channel();
     std::thread::Builder::new()
         .name("path-icons".into())
         .spawn(move || {
             // 안전성: 이 스레드에서 열고 루프를 벗어난 뒤 짝을 맞춰 닫는다
             let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
-            for path in request_rx {
+            for (path, stamp) in request_rx {
                 let index = lookup_by_path(&path).unwrap_or(0);
-                if result_tx.send((path, index)).is_err() {
+                if result_tx.send((path, stamp, index)).is_err() {
                     break;
                 }
             }
@@ -699,6 +736,88 @@ mod tests {
         );
     }
 
+    /// 도장을 가리지 않는 시험이 쓰는 한 가지 도장
+    const S: FileStamp = FileStamp {
+        size: 0,
+        modified: 0,
+    };
+
+    /// 워커 결과가 거둬질 때까지 묻는다(최대 10초) — 마지막 조회 결과를 준다
+    fn settle(icons: &mut IconCache, path: &str, stamp: FileStamp) -> IconLookup {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut lookup = icons.icon_index("exe", false, Some((path, Some(stamp))));
+        while !lookup.settled && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            icons.pump_path_icons();
+            lookup = icons.icon_index("exe", false, Some((path, Some(stamp))));
+        }
+        lookup
+    }
+
+    #[test]
+    fn 도장이_바뀌면_옛_아이콘을_잠정으로_두고_다시_묻는다() {
+        let path = exe_path();
+        let mut icons = IconCache::new();
+        let first = settle(&mut icons, &path, S);
+        assert!(first.settled);
+        let before = icons.path_requests();
+
+        let changed = FileStamp {
+            size: 1,
+            modified: 1,
+        };
+        let lookup = icons.icon_index("exe", false, Some((&path, Some(changed))));
+        assert!(!lookup.settled, "내용이 바뀌었는데 옛 아이콘으로 확정했다");
+        assert_eq!(
+            lookup.index, first.index,
+            "잠정 아이콘이 옛 아이콘이 아니다"
+        );
+        assert_eq!(icons.path_requests(), before + 1, "다시 묻지 않았다");
+    }
+
+    #[test]
+    fn 도장_없는_조회는_담긴_것을_쓰고_없으면_확장자로_확정한다() {
+        let path = exe_path();
+        let mut icons = IconCache::new();
+        let ext_only = icons.icon_index("exe", false, None);
+        let blank = icons.icon_index("exe", false, Some((&path, None)));
+        assert_eq!(blank, ext_only);
+        assert_eq!(icons.path_requests(), 0, "도장 없는 조회가 워커에 맡겼다");
+
+        let settled = settle(&mut icons, &path, S);
+        let held = icons.icon_index("exe", false, Some((&path, None)));
+        assert_eq!(held, settled, "담긴 아이콘을 쓰지 않았다");
+    }
+
+    #[test]
+    fn 영바이트_exe를_덮어쓰면_새_아이콘을_받는다() {
+        // 2026-09-29 실측과 같은 형태 — 0바이트 exe는 기본 아이콘(2), 실제 exe로 덮은 뒤
+        // 다시 물으면 그 exe의 아이콘이 온다. 경로만 키로 삼으면 기본 아이콘에 굳는다
+        let dir = std::env::temp_dir().join(format!("fe_icon_stamp_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("임시 폴더");
+        let file = dir.join("덮을것.exe");
+        std::fs::write(&file, b"").expect("0바이트 파일");
+        let path = file.to_string_lossy().into_owned();
+
+        let mut icons = IconCache::new();
+        let empty = settle(&mut icons, &path, S);
+        // 고유 아이콘이 있는 exe로 덮는다 — 시험 하네스 exe는 아이콘 리소스가 없어 0바이트와
+        // 같은 기본 아이콘을 받으므로 이 판정에 쓸 수 없다
+        std::fs::copy(r"C:\Windows\regedit.exe", &file).expect("덮어쓰기");
+        let changed = FileStamp {
+            size: 1,
+            modified: 1,
+        };
+        let real = settle(&mut icons, &path, changed);
+        let expected = IconCache::new().icon_index_for_path(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(empty.settled && real.settled);
+        assert_eq!(real.index, expected, "덮어쓴 exe의 아이콘이 아니다");
+        assert_ne!(real.index, empty.index, "0바이트 때의 아이콘에 굳었다");
+    }
+
     /// 경로별 조회 대상인 실제 파일 — 시험 하네스 exe는 어느 PC에서나 있다
     fn exe_path() -> String {
         std::env::current_exe()
@@ -715,7 +834,7 @@ mod tests {
         let mut icons = IconCache::new();
         let ext_only = icons.icon_index("exe", false, None);
 
-        let first = icons.icon_index("exe", false, Some(&path));
+        let first = icons.icon_index("exe", false, Some((&path, Some(S))));
 
         assert!(
             !first.settled,
@@ -736,11 +855,11 @@ mod tests {
         let mut icons = IconCache::new();
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let mut lookup = icons.icon_index("exe", false, Some(&path));
+        let mut lookup = icons.icon_index("exe", false, Some((&path, Some(S))));
         while !lookup.settled && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(10));
             icons.pump_path_icons();
-            lookup = icons.icon_index("exe", false, Some(&path));
+            lookup = icons.icon_index("exe", false, Some((&path, Some(S))));
         }
 
         assert!(
@@ -760,8 +879,8 @@ mod tests {
         let path = exe_path();
         let mut icons = IconCache::new();
 
-        icons.icon_index("exe", false, Some(&path));
-        icons.icon_index("exe", false, Some(&path));
+        icons.icon_index("exe", false, Some((&path, Some(S))));
+        icons.icon_index("exe", false, Some((&path, Some(S))));
 
         assert!(
             icons.has_pending_paths(),
@@ -775,11 +894,15 @@ mod tests {
         let mut icons = IconCache::new();
 
         assert!(
-            icons.icon_index("", true, Some(r"C:\Windows")).settled,
+            icons
+                .icon_index("", true, Some((r"C:\Windows", Some(S))))
+                .settled,
             "폴더"
         );
         assert!(
-            icons.icon_index("txt", false, Some(r"C:\a.txt")).settled,
+            icons
+                .icon_index("txt", false, Some((r"C:\a.txt", Some(S))))
+                .settled,
             "txt"
         );
         assert!(
