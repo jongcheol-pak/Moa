@@ -78,7 +78,7 @@ pub struct FileListView {
     /// 둘의 합이 줄 수와 다를 수 있다 — 상위 이동(`..`) 줄은 어느 쪽도 아니다
     dir_count: usize,
     file_count: usize,
-    /// 보기 모드 — 패널마다 독립이며 세션에 저장된다 (FR-23)
+    /// 활성 탭의 보기 모드 (FR-23) — 탭마다의 정본과 세션 저장은 `PanelState`가 맡는다
     view_mode: ViewMode,
     /// 이름 뒤 확장자를 보일지 (FR-52) — 앱 설정에서 매 프레임 받는다(패널마다 다르지 않다)
     show_extensions: bool,
