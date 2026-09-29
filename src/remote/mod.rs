@@ -27,6 +27,8 @@ pub mod transfer;
 pub mod tree_cache;
 pub mod types;
 pub mod url;
+/// 임시 FTP 명령 기록 — `MOA_FTP_TRACE=1`일 때만 동작한다 (원인 규명 후 걷어낸다)
+pub mod wire_trace;
 
 use std::io::{Read, Write};
 

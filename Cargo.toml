@@ -99,6 +99,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # 크레이트가 "명시적 TLS를 권한다"는 뜻으로 붙여 둔 이름이며, 사이트 관리자의 암호화 항목이
 # 묵시적 TLS를 선택지로 두는 이상(FR-27) 그 경로가 없으면 고를 수 없는 값이 된다.
 suppaftp = { version = "10.0.1", features = ["native-tls", "deprecated"] }
+# 임시 FTP 명령 기록(`remote::wire_trace`) — suppaftp가 제어 채널 줄을 `log::trace!`로 내보내
+# 그것을 받는 로거를 걸려고 명시로 올린다. suppaftp가 이미 같은 버전을 링크해 패키지 집합은 그대로다.
+# 원인 규명 후 그 모듈과 함께 걷어낸다
+log = "0.4"
 # SFTP. libssh2가 Windows에서 WinCNG 백엔드로 빌드돼 역시 OpenSSL이 필요 없다.
 # 전송이 std::io::Read/Write 스트림이라 진행률·버퍼 크기·취소를 우리가 직접 통제한다.
 ssh2 = "0.9.6"

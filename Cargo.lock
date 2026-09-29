@@ -1329,6 +1329,7 @@ dependencies = [
  "eframe",
  "egui-phosphor",
  "image",
+ "log",
  "raw-window-handle",
  "serde",
  "serde_json",

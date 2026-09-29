@@ -27,6 +27,9 @@ fn main() -> eframe::Result {
     // 부팅할 때마다 창이 튀어나오는 것이 자동 실행을 끄게 만드는 가장 흔한 이유다
     let start_hidden = moa::app::autostart::started_by_autostart();
 
+    // 임시 FTP 명령 기록 — `MOA_FTP_TRACE=1`일 때만 켜진다. 첫 연결보다 먼저 걸어야 한다
+    moa::remote::wire_trace::install();
+
     let com = init_com();
     // 셸 팝업 메뉴를 다크로 만드는 프로세스 전역 정책 — 창을 만들기 전에 켜야 적용된다.
     // 제목 표시줄은 앱이 직접 그리므로(FR-22) 이 정책의 대상이 아니지만,
