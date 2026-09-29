@@ -42,6 +42,7 @@ use crate::ui::theme;
 use crate::ui::tree::{FolderTreeView, TREE_WIDTH, TreeChoice, TreeRequest, TreeSource};
 use crate::ui::view_mode::ViewMode;
 use eframe::egui;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
@@ -270,6 +271,12 @@ pub struct PanelState {
     /// 탭 목록 — 탭마다 커밋된 경로와 독립 히스토리를 갖는다 (FR-3)
     tabs: TabsModel,
     list: FileListView,
+    /// 탭마다 기억하는 보기 모드 (FR-23) — 목록은 패널 하나가 들어 **활성 탭의 것**만 세운다.
+    ///
+    /// `TabState`에 두지 않는 이유: `ViewMode`는 `ui` 계층의 것이고 `panel` 계층은 `ui`를 모른다.
+    /// **모든 탭은 태어날 때 항목을 얻는다**(처음 탭은 `new`, 되살린 탭은 `from_tabs`, 나머지는
+    /// `sync_tab_view_mode`) — 빠진 탭이 있으면 돌아올 때 다른 탭의 모드를 받는다
+    tab_views: HashMap<TabId, ViewMode>,
     address: AddressBar,
     load: DirLoad,
     /// 마지막 목록 요청이 **자동 재조회**였으면 그 일련번호 (FR-67) — 손으로 부른 조회면 `None`.
@@ -383,11 +390,15 @@ pub struct DisplayRules {
 
 impl PanelState {
     pub fn new(start: PathBuf) -> PanelState {
+        let first = TabState::new(start.clone());
+        let list = FileListView::new();
+        let tab_views = HashMap::from([(first.id, list.view_mode())]);
         PanelState {
             quiet_request: None,
             last_input_at: 0.0,
-            tabs: TabsModel::new(TabState::new(start.clone())),
-            list: FileListView::new(),
+            tabs: TabsModel::new(first),
+            list,
+            tab_views,
             address: AddressBar::new(),
             load: DirLoad::new(),
             pending_dir: PathBuf::new(),
@@ -1060,14 +1071,33 @@ impl PanelState {
         self.start_load(dir, PendingNav::None, ctx);
     }
 
-    /// 지금 쓰는 보기 모드 — 메뉴가 현재 표시를 그리는 데 쓴다 (FR-23)
+    /// 활성 탭의 보기 모드 — 상태 줄 보기 버튼이 현재 표시를 그리는 데 쓴다 (FR-23)
     pub fn view_mode(&self) -> ViewMode {
         self.list.view_mode()
     }
 
-    /// 보기 모드를 바꾼다 (FR-23)
+    /// **활성 탭의** 보기 모드를 바꾼다 (FR-23) — 다른 탭은 제 모드를 그대로 든다
     pub fn set_view_mode(&mut self, mode: ViewMode) {
         self.list.set_view_mode(mode);
+        self.tab_views.insert(self.tabs.active_id(), mode);
+    }
+
+    /// 활성 탭이 바뀐 뒤 그 탭의 보기 모드를 목록에 세운다 (FR-23).
+    ///
+    /// 항목이 없는 탭은 방금 `tabs.add`로 만든 탭뿐이라, 목록이 지금 쓰던 모드(= 직전 활성 탭의
+    /// 것)를 받아 적는다 — 새 탭이 보고 있던 탭의 보기를 잇는 규칙이 이것이다.
+    /// 닫힌 탭의 항목도 여기서 걷는다
+    fn sync_tab_view_mode(&mut self) {
+        let current = self.list.view_mode();
+        let mode = *self
+            .tab_views
+            .entry(self.tabs.active_id())
+            .or_insert(current);
+        self.list.set_view_mode(mode);
+        if self.tab_views.len() > self.tabs.len() {
+            let alive: Vec<TabId> = self.tabs.tabs().iter().map(|tab| tab.id).collect();
+            self.tab_views.retain(|id, _| alive.contains(id));
+        }
     }
 
     /// 활성 탭이 원격을 가리키는가 — 로컬에만 있는 일(열거·감시·썸네일·새 파일)이 이것으로 갈린다
@@ -1192,6 +1222,8 @@ impl PanelState {
     /// 그 자리에 탭이 보여야 사용자가 "열리고 있다"는 것을 알기 때문이다
     pub fn open_remote_tab(&mut self, site: SiteId, path: RemotePath) {
         self.tabs.add(TabState::remote(site, path));
+        // `switch_active_tab`을 거치지 않는 길이라 보기 모드는 여기서 세운다
+        self.sync_tab_view_mode();
         // 이 패널이 로컬 폴더를 읽는 중이었으면 그 결과는 갈 곳이 없다 — 활성 탭이 방금
         // 원격이 됐기 때문이다. 접지 않으면 `읽는 중…`이 남고, 도착한 결과가 원격 탭에
         // 커밋되려다 죽는다(개발 빌드) 또는 원격 탭을 로컬 탭으로 둔갑시킨다(배포 빌드)
@@ -1381,6 +1413,8 @@ impl PanelState {
     /// 불러, 폴더가 밖에서 바뀌어도 편집은 유지된다(plan Edge Case 그대로)
     fn switch_active_tab(&mut self, ctx: &egui::Context) {
         self.list.cancel_rename();
+        // 보기 모드는 탭마다 따로다 (FR-23) — 옮겨 간 탭의 것을 세운다
+        self.sync_tab_view_mode();
         // 탭이 바뀌면 필터를 비운다 (D2) — 옮겨 간 탭의 폴더에 옛 필터가 걸린 채로 보이면
         // 그 폴더가 비어 보이고 사용자는 이유를 알 수 없다
         self.list.set_filter("");

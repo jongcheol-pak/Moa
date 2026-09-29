@@ -1072,6 +1072,64 @@ fn 보기_모드는_패널마다_독립이다() {
 }
 
 #[test]
+fn 보기_모드는_탭마다_따로_기억된다() {
+    // 탭을 오갈 때마다 보기가 한쪽으로 쏠리면 "탭마다 따로"가 깨진다
+    let ctx = egui::Context::default();
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\"));
+    panel.set_view_mode(ViewMode::Tiles);
+    panel.handle_tab(TabAction::New, &ctx);
+    panel.set_view_mode(ViewMode::List);
+
+    panel.handle_tab(TabAction::Switch(0), &ctx);
+    assert_eq!(panel.view_mode(), ViewMode::Tiles, "첫 탭의 보기가 아니다");
+    panel.handle_tab(TabAction::Switch(1), &ctx);
+    assert_eq!(panel.view_mode(), ViewMode::List, "둘째 탭의 보기가 아니다");
+}
+
+#[test]
+fn 새_탭은_보고_있던_탭의_보기를_잇는다() {
+    // 아이콘 보기로 보다가 새 탭을 열 때마다 자세히로 돌아가면 매번 다시 바꿔야 한다
+    let ctx = egui::Context::default();
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\"));
+    panel.set_view_mode(ViewMode::LargeIcons);
+    panel.handle_tab(TabAction::New, &ctx);
+    assert_eq!(panel.view_mode(), ViewMode::LargeIcons, "새 탭");
+
+    panel.set_view_mode(ViewMode::Content);
+    panel.open_remote_tab(SiteId(1), RemotePath::root());
+    assert_eq!(panel.view_mode(), ViewMode::Content, "새 원격 탭");
+    // 이은 뒤에는 따로 논다 — 원격 탭에서 바꿔도 앞 탭은 그대로다
+    panel.set_view_mode(ViewMode::SmallIcons);
+    panel.handle_tab(TabAction::Switch(1), &ctx);
+    assert_eq!(panel.view_mode(), ViewMode::Content, "앞 탭까지 바뀌었다");
+}
+
+#[test]
+fn 보던_탭을_닫으면_남은_탭의_보기로_돌아간다() {
+    let ctx = egui::Context::default();
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\"));
+    panel.set_view_mode(ViewMode::Tiles);
+    panel.handle_tab(TabAction::New, &ctx);
+    panel.set_view_mode(ViewMode::List);
+
+    panel.handle_tab(TabAction::Close(1), &ctx);
+    assert_eq!(panel.view_mode(), ViewMode::Tiles);
+}
+
+#[test]
+fn 보기를_바꾼_적_없는_탭도_제_보기로_돌아온다() {
+    // 첫 탭이 등록되지 않으면 돌아올 때 "지금 목록이 쓰는 모드"(= 다른 탭의 것)를 받는다
+    let ctx = egui::Context::default();
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\"));
+    let untouched = panel.view_mode();
+    panel.handle_tab(TabAction::New, &ctx);
+    panel.set_view_mode(ViewMode::List);
+
+    panel.handle_tab(TabAction::Switch(0), &ctx);
+    assert_eq!(panel.view_mode(), untouched);
+}
+
+#[test]
 fn 패널_안에서_같은_위젯_id가_두_번_쓰이지_않는다() {
     // 탭 스트립·폴더 트리·파일 목록이 각자 스크롤 영역을 갖는데, 이들이 같은 id를 쓰면
     // 스크롤 위치가 서로 섞인다(화면에는 빨간 경고로 드러난다)
