@@ -274,15 +274,31 @@ fn draw_once_with(
     favorites: &[FavoriteEntry],
     drives: &[crate::fs::drives::DriveRow],
 ) -> eframe::egui::FullOutput {
+    let ctx = egui::Context::default();
+    let mut textures = crate::ui::icon_tex::IconTextures::inline();
+    draw_frame_with(panel, sites, favorites, drives, &ctx, &mut textures)
+}
+
+/// 이어지는 한 프레임 — **Context와 텍스처를 부르는 쪽이 쥔다.**
+///
+/// 텍스처는 프레임당 개수·시간 예산 안에서만 만들어지므로(`icon_tex`) 여러 프레임에 걸쳐
+/// 채워진다. 프레임마다 새로 만들면 그 전 프레임이 만든 것이 버려져 쌓이지 않고, 한 프레임
+/// 안에 다 만들어져야만 통과하는 시험이 된다 — 병렬 실행으로 변환이 느려지면 간헐 실패한다
+fn draw_frame_with(
+    panel: &mut PanelState,
+    sites: &SiteStore,
+    favorites: &[FavoriteEntry],
+    drives: &[crate::fs::drives::DriveRow],
+    ctx: &egui::Context,
+    textures: &mut crate::ui::icon_tex::IconTextures,
+) -> eframe::egui::FullOutput {
     let tree = crate::remote::tree_cache::TreeCache::new();
     let remote = RemoteView {
         sites,
         connected: &[],
         tree: &tree,
     };
-    let ctx = egui::Context::default();
     let mut icons = crate::fs::icons::IconCache::new();
-    let mut textures = crate::ui::icon_tex::IconTextures::inline();
     ctx.run_ui(Default::default(), |ui| {
         egui::CentralPanel::default().show(ui, |ui| {
             let ctx = ui.ctx().clone();
@@ -293,7 +309,7 @@ fn draw_once_with(
                 ui,
                 &ctx,
                 &mut icons,
-                &mut textures,
+                textures,
                 remote,
                 PanelMenuState::for_panes(1),
                 // 전송 대상이 없는 상태 — 이 시험들은 탭 아이콘이 아니라 배치·상태를 본다
@@ -3909,10 +3925,20 @@ fn 트리_줄에는_셸_아이콘이_붙는다() {
     let 예상 = favorites.len() + 드라이브;
 
     // 텍스처는 프레임당 개수·시간 예산 안에서만 새로 만들어진다(`icon_tex`) — 최악이면
-    // 한 프레임에 하나라, 그려야 할 아이콘 수만큼(+여유) 프레임을 돌려 채운다
+    // 한 프레임에 하나라, 그려야 할 아이콘 수만큼(+여유) 프레임을 돌려 채운다.
+    // **Context와 텍스처를 프레임 사이에 이어 쓴다** — 새로 만들면 쌓이지 않는다
+    let ctx = egui::Context::default();
+    let mut textures = crate::ui::icon_tex::IconTextures::inline();
     let mut 그려진 = 0;
     for _ in 0..예상 + 2 {
-        let output = draw_once_with_favorites(&mut panel, &SiteStore::new(), &favorites);
+        let output = draw_frame_with(
+            &mut panel,
+            &SiteStore::new(),
+            &favorites,
+            drive_rows(),
+            &ctx,
+            &mut textures,
+        );
         그려진 = tree_icon_count(&output);
         if 그려진 >= 예상 {
             break;
@@ -4034,10 +4060,19 @@ fn 끊긴_네트워크_드라이브_줄에만_배지가_붙는다() {
     ];
 
     // 텍스처는 프레임당 개수·시간 예산 안에서만 만들어진다 — 최악이면 한 프레임에 하나라
-    // 드라이브 줄 수만큼(+여유) 프레임을 돌려 아이콘을 채운다
+    // 드라이브 줄 수만큼(+여유) 프레임을 돌려 아이콘을 채운다(Context·텍스처는 이어 쓴다)
+    let ctx = egui::Context::default();
+    let mut textures = crate::ui::icon_tex::IconTextures::inline();
     let mut 배지 = 0;
     for _ in 0..drives.len() + 2 {
-        let output = draw_once_with(&mut panel, &SiteStore::new(), &[], &drives);
+        let output = draw_frame_with(
+            &mut panel,
+            &SiteStore::new(),
+            &[],
+            &drives,
+            &ctx,
+            &mut textures,
+        );
         배지 = offline_badges(&output);
         if 배지 > 0 {
             break;
@@ -4057,8 +4092,18 @@ fn 닿는_드라이브에는_배지가_없다() {
         drive_row(r"Z:\", true, false),
     ];
 
+    // 아이콘이 다 채워진 뒤의 프레임까지 보도록 Context·텍스처를 이어 쓴다
+    let ctx = egui::Context::default();
+    let mut textures = crate::ui::icon_tex::IconTextures::inline();
     for _ in 0..8 {
-        let output = draw_once_with(&mut panel, &SiteStore::new(), &[], &drives);
+        let output = draw_frame_with(
+            &mut panel,
+            &SiteStore::new(),
+            &[],
+            &drives,
+            &ctx,
+            &mut textures,
+        );
         assert_eq!(offline_badges(&output), 0, "배지가 없어야 하는데 그려졌다");
     }
 }
@@ -4075,8 +4120,18 @@ fn 즐겨찾기와_하위_폴더에는_배지가_붙지_않는다() {
     let drives = [drive_row(r"C:\", false, false)];
     let favorites = [user_favorite(r"C:\Users"), user_favorite(r"C:\Windows")];
 
+    // 아이콘이 다 채워진 뒤의 프레임까지 보도록 Context·텍스처를 이어 쓴다
+    let ctx = egui::Context::default();
+    let mut textures = crate::ui::icon_tex::IconTextures::inline();
     for _ in 0..8 {
-        let output = draw_once_with(&mut panel, &SiteStore::new(), &favorites, &drives);
+        let output = draw_frame_with(
+            &mut panel,
+            &SiteStore::new(),
+            &favorites,
+            &drives,
+            &ctx,
+            &mut textures,
+        );
         assert_eq!(
             offline_badges(&output),
             0,
