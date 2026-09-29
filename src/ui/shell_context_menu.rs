@@ -215,6 +215,29 @@ pub enum ShellMenuRow {
     /// `enabled`를 드는 것은 **눌러도 펼칠 것이 없는 묶음**이 있기 때문이다(연결된 원격 탭이
     /// 하나도 없을 때의 `업로드` — 흐린 채로 서고 펼쳐지지 않는다). 지금 셋은 언제나 참이다
     Virtual { kind: VirtualSubmenu, enabled: bool },
+    /// **셸 항목이 오기 전의 자리 표시** — 흐린 한 줄이며 아무것도 고르지 않는다 (2026-09-29).
+    ///
+    /// 셸 메뉴는 워커가 읽어 오므로(`fs::shell_menu_worker`) 메뉴는 이 줄을 단 뼈대로 먼저 뜨고,
+    /// 셸 항목이 도착하면 이 줄이 그것들로 바뀐다
+    Loading,
+}
+
+/// 셸 하위 메뉴를 채우는 동안 그 팝업에 세우는 한 줄 — 흐리고 아무것도 실행하지 않는다.
+///
+/// 하위 팝업은 `ShellMenuItem` 목록을 그리므로(`show_submenu`) 부모 목록의
+/// [`ShellMenuRow::Loading`]을 쓸 수 없다. **비활성이라 누름이 걸러지고**(`MenuRowHit`),
+/// `id`는 0이라 어느 셸 명령도 가리키지 않는다
+pub fn loading_submenu_item() -> ShellMenuItem {
+    ShellMenuItem {
+        id: 0,
+        label: crate::i18n::shell_menu_loading().to_owned(),
+        shortcut: String::new(),
+        icon: None,
+        enabled: false,
+        checked: false,
+        separator: false,
+        submenu: None,
+    }
 }
 
 /// 아이콘 줄의 네 가지 (FR-8·FR-64).
@@ -431,6 +454,18 @@ fn draw_row(
                 ShellMenuPick::ExpandVirtual(*kind),
             )
             .map(|pick| (pick, hit.top))
+        }
+        ShellMenuRow::Loading => {
+            // **얹혀도 아무것도 내지 않는다** — 누를 것도 펼칠 것도 없는 자리 표시다
+            widgets::menu_row_rich(
+                ui,
+                MenuRowIcon::Blank,
+                crate::i18n::shell_menu_loading(),
+                "",
+                false,
+                false,
+            );
+            None
         }
     }
 }
@@ -1085,6 +1120,64 @@ mod tests {
             matches!(펼침, Some(ShellMenuPick::Expand(_))),
             "하위 메뉴가 있는 셸 줄에 마우스를 올렸는데 펼침이 아니라 {펼침:?}가 나왔다"
         );
+    }
+
+    #[test]
+    fn 불러오는_중_줄은_얹혀도_아무것도_고르지_않는다() {
+        // 뼈대 메뉴의 자리 표시 — 얹힘으로 펼쳐 둔 하위 메뉴를 접지도, 실행을 내지도 않는다
+        assert_eq!(얹은_채_그린다(&ShellMenuRow::Loading), None);
+    }
+
+    #[test]
+    fn 불러오는_중_하위_줄은_눌러도_실행하지_않는다() {
+        fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }
+        }
+        let ctx = egui::Context::default();
+        let icons = MenuIcons::for_test();
+        let items = [loading_submenu_item()];
+        let 자리 = std::cell::Cell::new(egui::Pos2::ZERO);
+        let frame = |time: f64, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut 고른것 = None;
+            let _ = ctx.run_ui(input, |ui| {
+                자리.set(ui.cursor().min);
+                고른것 = show_submenu(ui, false, &items, &icons);
+            });
+            고른것
+        };
+        assert_eq!(frame(0.0, Vec::new()), None);
+        let 가운데 = 자리.get() + egui::vec2(20.0, theme::MENU_ITEM_HEIGHT / 2.0);
+        assert_eq!(frame(0.05, vec![press(가운데, true)]), None);
+        assert_eq!(
+            frame(0.10, vec![press(가운데, false)]),
+            None,
+            "자리 표시 줄이 셸 명령(id 0)을 냈다"
+        );
+    }
+
+    #[test]
+    fn 불러오는_중_하위_줄은_한_줄_높이로_센다() {
+        // 폭은 글자를 재므로 글꼴이 선 프레임 안에서 부른다
+        let ctx = egui::Context::default();
+        let mut 크기 = None;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            크기 = Some((
+                submenu_size_at(ui.ctx(), false, &[loading_submenu_item()]),
+                submenu_size_at(ui.ctx(), false, &[줄("열기")]),
+            ));
+        });
+        let (로딩, 한줄) = 크기.expect("한 프레임을 그렸다");
+        assert_eq!(로딩, 한줄);
     }
 
     #[test]

@@ -670,6 +670,11 @@ pub struct ExplorerApp {
     conflict_rx: std::sync::mpsc::Receiver<(u64, Vec<String>)>,
     /// 지금 열려 있는 Win11 모양 컨텍스트 메뉴 (FR-8) — 없으면 메뉴가 떠 있지 않다
     shell_menu: Option<shell_menu::OpenShellMenu>,
+    /// 셸 메뉴 워커 (FR-8) — 우리가 그리는 메뉴의 셸 조회를 전부 맡는다. 창 핸들을 얻지
+    /// 못했거나 워커를 띄우지 못했으면 `None`이고 그때는 메뉴를 열지 않는다
+    menu_worker: Option<crate::fs::shell_menu_worker::ShellMenuWorker>,
+    /// 메뉴 한 판마다 새로 매기는 번호 — 늦게 온 옛 판의 응답을 가려낸다
+    menu_ticket: u64,
     /// 곧 띄울 **종전 표준 메뉴** (`기본 메뉴`가 여는 것) — 그것은 `TrackPopupMenuEx`가
     /// 자체 메시지 루프를 돌려 그리기 도중에 부를 수 없고, **우리 메뉴가 없는 화면이 실제로
     /// 표시된 뒤**에 띄워야 두 메뉴가 겹치지 않는다(`shell_menu::SHOW_MORE_SKIP_FRAMES`)
@@ -744,6 +749,9 @@ impl ExplorerApp {
         theme::apply_dark(&cc.egui_ctx);
         // HWND 획득·서브클래스 설치는 창이 만들어진 이 시점에만 가능하다
         let shell = ShellHost::new(cc);
+        // 셸 메뉴 워커는 **앱을 켤 때 띄운다** — 띄우자마자 확장 DLL을 데우므로(첫 열기 1.8초)
+        // 사용자의 첫 우클릭이 그 값을 치르지 않는다
+        let menu_worker = shell.as_ref().and_then(ShellHost::spawn_menu_worker);
         // 최대화·복원 때 OS가 옛 화면과 새 화면을 겹쳐 페이드하면 글자가 이중으로 보인다 (FR-22)
         if let Some(shell) = &shell {
             crate::app::theme::disable_window_transitions(shell.hwnd());
@@ -852,6 +860,8 @@ impl ExplorerApp {
             pending_conflicts: Vec::new(),
             next_conflict: 0,
             shell_menu: None,
+            menu_worker,
+            menu_ticket: 0,
             file_op_tx,
             file_op_rx,
             pending_show_more: None,
@@ -1579,7 +1589,7 @@ impl ExplorerApp {
     /// 한쪽을 빠뜨려도 아무도 모른다(실제로 그렇게 빠뜨렸다)
     fn hide_window(&mut self, ctx: &egui::Context) {
         self.hidden = true;
-        self.shell_menu = None;
+        self.close_shell_menu();
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
     }
 
@@ -3008,8 +3018,8 @@ impl eframe::App for ExplorerApp {
             ctx.copy_text(text);
         }
 
-        // 우클릭 요청이 왔으면 **이 프레임 안에서** 메뉴를 연다 — `ShellMenu::open`은
-        // 메시지 루프를 돌리지 않아(`TrackPopupMenuEx`와 다르다) 그리기 도중에 불러도 된다
+        // 우클릭 요청이 왔으면 **이 프레임 안에서** 메뉴를 연다 — 셸 조회는 워커에 청하고
+        // 여기서는 뼈대만 세우므로(`fs::shell_menu_worker`) 그리기 도중에 불러도 된다
         self.key_owner = key_owner;
         if let Some(request) = rename {
             self.start_rename(request);

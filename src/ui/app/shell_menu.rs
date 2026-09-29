@@ -532,13 +532,27 @@ struct Arranged {
 
 /// 지금 열려 있는 Win11 모양 컨텍스트 메뉴 한 판 (FR-8).
 ///
-/// **셸 인터페이스와 그 판의 아이콘·항목을 함께 든다** — `ShellMenu`가 살아 있어야 고른 것을
-/// 실행할 수 있고(`invoke`), 아이콘 텍스처는 이 판에서만 쓰는 그림이라 함께 버려야 한다.
+/// **셸 인터페이스는 들지 않는다** — 그것은 셸 메뉴 워커가 쥐고(`fs::shell_menu_worker`),
+/// 이 판은 그 워커가 매긴 **번호**(`ticket`)로 자기 메뉴를 가리킨다. 아이콘 텍스처는 이 판에서만
+/// 쓰는 그림이라 함께 버린다.
+///
+/// **처음에는 뼈대다**(2026-09-29) — 앱이 세우는 줄과 `불러오는 중…` 한 줄로 곧바로 뜨고,
+/// 워커가 셸 항목을 보내오면 그것으로 다시 짠다(`pump_shell_menu`).
 ///
 /// 하위 메뉴는 **펼친 하나만** 든다 — 셸 메뉴는 두 단계를 넘지 않고, 여러 개를 동시에 펼치는
 /// 것은 어느 것이 열려 있는지 화면에서 읽기 어렵다
 pub(super) struct OpenShellMenu {
-    menu: crate::fs::shell_menu::ShellMenu,
+    /// 워커에 이 판을 연 번호 — 응답·펼치기·실행이 이 번호로 이 판을 가리킨다
+    ticket: u64,
+    /// 셸 항목이 어디까지 왔는가
+    shell: ShellState,
+    /// 워커에 열기를 보낸 때 — 시한(D10)과 계측이 쓴다
+    requested_at: std::time::Instant,
+    /// 셸 하위 메뉴를 채우는 중인가 — 그동안 스스로 다시 그린다
+    submenu_loading: bool,
+    /// 셸 항목이 오면 다시 짤 재료 — 열 때 정한 앱 줄·빈 곳 여부·업로드 가능 여부
+    app_rows: Vec<(shell_context_menu::AppMenuItem, bool)>,
+    background: bool,
     /// 상위 목록에 그릴 줄들 — 표준 차례로 세운 셸 항목과 앱이 세운 줄이 섞여 있다
     rows: Vec<crate::ui::shell_context_menu::ShellMenuRow>,
     /// `앱 확장` 하위 메뉴에 모은 줄들과 **셸이 준 원래 자리** — 그 자리로 아이콘을 찾는다
@@ -624,6 +638,66 @@ enum OpenSubmenu {
     /// `id`가 셸 명령 번호인 척해야 하고, 그러면 고른 것이 `InvokeCommand`로 새어 나갈
     /// 길이 생긴다. 줄 자체(`ShellMenuRow::Virtual`)는 넷이 함께 쓴다
     Upload(Vec<String>),
+}
+
+impl OpenShellMenu {
+    /// 워커가 보낸 셸 항목으로 뼈대를 다시 짠다 — 열 때 굳힌 재료를 그대로 쓴다.
+    ///
+    /// 펼쳐 둔 하위 메뉴는 `settle_submenu`가 가른다(D11)
+    fn fill(
+        &mut self,
+        ctx: &egui::Context,
+        items: Vec<crate::fs::shell_menu::ShellMenuItem>,
+        verbs: Vec<Option<String>>,
+    ) {
+        let wait = self.requested_at.elapsed();
+        let t_icons = std::time::Instant::now();
+        // 셸이 준 원래 목록 — **아이콘 캐시가 이것과 1:1로 정렬된다**. 아래에서 줄을
+        // 고르고 재정렬해도 그림은 이 자리(`origin`)로 찾는다
+        let icons = shell_context_menu::MenuIcons::build(ctx, &items);
+        let d_icons = t_icons.elapsed();
+        let t_arrange = std::time::Instant::now();
+        // verb는 워커가 `items`와 1:1로 읽어 왔다 — 명령 번호로 제 짝을 찾는다
+        let verb_of = |id: u32| {
+            items
+                .iter()
+                .position(|item| !item.separator && item.id == id)
+                .and_then(|index| verbs.get(index).cloned().flatten())
+        };
+        let arranged = arrange(
+            &items,
+            verb_of,
+            self.background,
+            &self.app_rows,
+            !self.uploads.is_empty(),
+        );
+        let d_arrange = t_arrange.elapsed();
+        // **경로·파일 이름은 싣지 않는다** — 이 기록은 그대로 밖으로 나갈 수 있다
+        crate::perf::log(|| {
+            let ms = |d: std::time::Duration| d.as_secs_f32() * 1000.0;
+            format!(
+                "menu sel={} rows={} | wait={:.1} icons={:.1} arrange={:.1} (ms)",
+                self.items_paths.len(),
+                items.len(),
+                ms(wait),
+                ms(d_icons),
+                ms(d_arrange),
+            )
+        });
+        self.rows = arranged.rows;
+        self.extensions = arranged.extensions;
+        self.compressions = arranged.compressions;
+        self.extractions = arranged.extractions;
+        self.icons = icons;
+        self.shell = ShellState::Ready;
+        self.submenu = settle_submenu(self.submenu.take());
+    }
+
+    /// 셸이 메뉴를 주지 못했거나 시한이 지났다 — `불러오는 중…` 줄만 걷는다(D2·D10)
+    fn fail(&mut self) {
+        self.rows = without_loading(std::mem::take(&mut self.rows));
+        self.shell = ShellState::Failed;
+    }
 }
 
 impl OpenSubmenu {
@@ -784,6 +858,106 @@ pub(super) fn resolve_frame(
     }
 }
 
+/// 셸 항목을 기다리는 시한 (D10) — 넘기면 `불러오는 중…` 줄만 걷고 앱 줄로 남는다
+const LOADING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 열린 메뉴의 셸 항목이 어디까지 왔는가 (FR-8 — 2026-09-29)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ShellState {
+    /// 워커가 읽는 중 — 뼈대에 `불러오는 중…` 줄이 서 있다
+    Loading,
+    /// 셸 항목이 채워졌다
+    Ready,
+    /// 셸이 메뉴를 주지 못했거나 시한이 지났다 — 앱 줄만 남는다
+    Failed,
+}
+
+/// 워커의 열기 응답이 지금 메뉴에 무엇을 하는가
+#[derive(Debug, PartialEq)]
+enum Arrival {
+    /// 셸 항목으로 채운다
+    Fill {
+        items: Vec<crate::fs::shell_menu::ShellMenuItem>,
+        verbs: Vec<Option<String>>,
+    },
+    /// `불러오는 중…` 줄만 걷는다
+    Fail,
+    /// 이 메뉴의 것이 아니다 — 버린다
+    Ignore,
+}
+
+/// 기다린 시간이 시한을 넘었는가 (D10) — 시각은 부르는 쪽이 잰다
+fn loading_expired(elapsed: std::time::Duration) -> bool {
+    elapsed >= LOADING_TIMEOUT
+}
+
+/// 뼈대 목록 — 앱이 세운 줄 뒤에 `불러오는 중…` 한 줄을 붙인다
+fn skeleton_rows(
+    mut rows: Vec<shell_context_menu::ShellMenuRow>,
+) -> Vec<shell_context_menu::ShellMenuRow> {
+    rows.push(shell_context_menu::ShellMenuRow::Loading);
+    rows
+}
+
+/// 열기 응답을 가른다 — 번호가 다르면 버린다.
+///
+/// **실패·시한 뒤에 온 같은 번호의 `Opened`도 받는다**(D10) — 메뉴가 아직 떠 있으면 셸 줄이
+/// 생기는 편이 앱 줄만 남는 것보다 낫다. 이미 채운 뒤의 응답은 버린다
+fn accept_opened(
+    ticket: u64,
+    state: ShellState,
+    response: crate::fs::shell_menu_worker::Response,
+) -> Arrival {
+    use crate::fs::shell_menu_worker::Response;
+    match response {
+        Response::Opened {
+            ticket: got,
+            items,
+            verbs,
+        } if got == ticket && state != ShellState::Ready => Arrival::Fill { items, verbs },
+        Response::OpenFailed { ticket: got } if got == ticket && state == ShellState::Loading => {
+            Arrival::Fail
+        }
+        _ => Arrival::Ignore,
+    }
+}
+
+/// 실패로 끝난 뼈대 — `불러오는 중…` 줄만 걷는다
+fn without_loading(
+    mut rows: Vec<shell_context_menu::ShellMenuRow>,
+) -> Vec<shell_context_menu::ShellMenuRow> {
+    rows.retain(|row| !matches!(row, shell_context_menu::ShellMenuRow::Loading));
+    rows
+}
+
+/// 셸 항목이 도착했을 때 펼쳐 둔 하위 메뉴 (D11).
+///
+/// **앱이 모은 묶음은 접는다** — 뼈대에서 펼친 `다음으로 압축`은 빈 묶음이고, 도착 뒤에는
+/// 그 줄이 `압축 풀기`로 바뀌기도 한다. `업로드`는 재료가 셸이 아니라 그대로 둔다
+fn settle_submenu(submenu: Option<OpenSubmenu>) -> Option<OpenSubmenu> {
+    submenu.filter(|open| matches!(open, OpenSubmenu::Upload(_)))
+}
+
+/// 펼치기 응답을 받는다 — **지금 펼친 셸 하위 메뉴와 번호·손잡이가 같을 때만** 그 줄을 준다
+fn accept_expanded(
+    ticket: u64,
+    submenu: Option<&OpenSubmenu>,
+    response: crate::fs::shell_menu_worker::Response,
+) -> Option<Vec<crate::fs::shell_menu::ShellMenuItem>> {
+    let crate::fs::shell_menu_worker::Response::Expanded {
+        ticket: got,
+        handle,
+        items,
+    } = response
+    else {
+        return None;
+    };
+    let Some(OpenSubmenu::Shell(open, ..)) = submenu else {
+        return None;
+    };
+    (got == ticket && *open == handle).then_some(items)
+}
+
 /// 그 verb를 목록에서 뺄 것인가 — 아이콘 줄에 이미 있거나 두지 않기로 한 것 (FR-8).
 ///
 /// **`ShellMenu`가 아니라 문자열을 받는다** — 셸 조회(COM)를 떼어 내면 두 목록을 함께 보는
@@ -889,31 +1063,69 @@ impl ExplorerApp {
         }
     }
 
+    /// 워커가 보낸 응답을 열린 메뉴에 반영한다 (FR-8 — 2026-09-29).
+    ///
+    /// **메뉴가 닫혀 있어도 채널은 비운다** — 닫힌 판의 응답은 쓸 곳이 없다. 기다리는 동안에는
+    /// 스스로 다시 그린다: 워커는 egui를 모르고(`fs`) 입력이 없으면 프레임이 돌지 않아,
+    /// 도착한 항목이 마우스를 움직일 때까지 묻힌다
+    fn pump_shell_menu(&mut self, ctx: &egui::Context) {
+        let Some(worker) = self.menu_worker.as_ref() else {
+            return;
+        };
+        while let Some(response) = worker.try_recv() {
+            let Some(open) = self.shell_menu.as_mut() else {
+                continue;
+            };
+            if matches!(
+                response,
+                crate::fs::shell_menu_worker::Response::Expanded { .. }
+            ) {
+                if let Some(items) = accept_expanded(open.ticket, open.submenu.as_ref(), response)
+                    && let Some(OpenSubmenu::Shell(handle, ..)) = open.submenu.take()
+                {
+                    let icons = shell_context_menu::MenuIcons::build(ctx, &items);
+                    open.submenu = Some(OpenSubmenu::Shell(handle, items, icons));
+                    open.submenu_loading = false;
+                }
+                continue;
+            }
+            match accept_opened(open.ticket, open.shell, response) {
+                Arrival::Fill { items, verbs } => open.fill(ctx, items, verbs),
+                Arrival::Fail => open.fail(),
+                Arrival::Ignore => {}
+            }
+        }
+        let Some(open) = self.shell_menu.as_mut() else {
+            return;
+        };
+        if open.shell == ShellState::Loading && loading_expired(open.requested_at.elapsed()) {
+            open.fail();
+        }
+        if open.shell == ShellState::Loading || open.submenu_loading {
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        }
+    }
+
+    /// 메뉴를 닫는다 — 워커에게도 그 판을 놓으라고 알린다(D16 — 놓지 않아도 다음 열기가 놓는다)
+    pub(super) fn close_shell_menu(&mut self) {
+        if let (Some(open), Some(worker)) = (self.shell_menu.take(), self.menu_worker.as_ref()) {
+            worker.close(open.ticket);
+        }
+    }
+
     /// 우클릭 요청을 받아 Win11 모양 메뉴를 연다 (FR-8).
     ///
-    /// 셸이 메뉴를 주지 못하면(COM 실패·다룰 수 없는 경로) **아무것도 열지 않는다** — 종전
-    /// 경로도 그런 경우 조용히 지나갔고, 빈 메뉴를 띄우면 고장으로 보인다
+    /// **곧바로 뼈대로 뜬다**(2026-09-29) — 셸 항목은 워커에 청하고, 오기 전까지는 앱이 세우는
+    /// 줄과 `불러오는 중…` 한 줄만 보인다. 셸이 메뉴를 주지 못하면 그 줄만 걷고 앱 줄은
+    /// 남는다(`pump_shell_menu`). 워커가 없으면(창 핸들을 얻지 못함) 아무것도 열지 않는다
     pub(super) fn open_shell_menu(&mut self, ctx: &egui::Context, request: panel::MenuRequest) {
-        let Some(shell) = self.shell.as_ref() else {
+        let Some(worker) = self.menu_worker.as_ref() else {
             return;
         };
-        // 임시 계측 (`crate::perf`) — 어느 단계가 느린지 가르기 위한 것이며 `MOA_PERF_LOG`를
-        // 켜지 않으면 `Instant` 몇 개를 잡는 것 말고는 아무 일도 하지 않는다
-        let t_open = std::time::Instant::now();
-        let Some(menu) = shell.open_menu(&request.folder, &request.items) else {
-            return;
-        };
-        let d_open = t_open.elapsed();
-        // 셸이 준 원래 목록 — **아이콘 캐시가 이것과 1:1로 정렬된다**. 아래에서 줄을
-        // 고르고 재정렬해도 그림은 이 자리(`origin`)로 찾는다
-        let t_model = std::time::Instant::now();
-        let items = menu.model();
-        let d_model = t_model.elapsed();
-        let t_icons = std::time::Instant::now();
-        let icons = shell_context_menu::MenuIcons::build(ctx, &items);
-        let d_icons = t_icons.elapsed();
+        self.menu_ticket = self.menu_ticket.wrapping_add(1);
+        let ticket = self.menu_ticket;
+        worker.open(ticket, request.folder.clone(), request.items.clone());
         let background = request.items.is_empty();
-        let sel_count = request.items.len();
 
         // 앱이 세우는 줄의 대상과 활성 여부는 **메뉴를 열 때 한 번** 정한다 — 매 프레임
         // 다시 재면 즐겨찾기 목록을 프레임마다 훑게 된다
@@ -932,9 +1144,7 @@ impl ExplorerApp {
             new_tab_target(&request.items, &request.dirs).map(std::path::Path::to_path_buf);
         // **클립보드는 메뉴를 열 때 한 번만 본다**(D8-1) — 매 프레임 재면 COM을 프레임마다
         // 문다. 담긴 것이 파일이 아니면 `None`이라 그 줄이 흐려진다
-        let t_clip = std::time::Instant::now();
         let paste_enabled = crate::fs::clipboard::take().is_some();
-        let d_clip = t_clip.elapsed();
         let mut app_rows = vec![
             (
                 shell_context_menu::AppMenuItem::AddFavorite,
@@ -954,37 +1164,22 @@ impl ExplorerApp {
         } else {
             self.upload_menu_targets()
         };
-        let t_arrange = std::time::Instant::now();
-        let arranged = arrange(
-            &items,
-            |id| menu.verb(id),
-            background,
-            &app_rows,
-            !uploads.is_empty(),
-        );
-        let d_arrange = t_arrange.elapsed();
-        // **경로·파일 이름은 싣지 않는다** — 이 기록은 그대로 밖으로 나갈 수 있다
-        crate::perf::log(|| {
-            let ms = |d: std::time::Duration| d.as_secs_f32() * 1000.0;
-            format!(
-                "menu sel={sel_count} rows={} | open={:.1} model={:.1} icons={:.1} clip={:.1} arrange={:.1} | total={:.1} (ms)",
-                items.len(),
-                ms(d_open),
-                ms(d_model),
-                ms(d_icons),
-                ms(d_clip),
-                ms(d_arrange),
-                ms(d_open + d_model + d_icons + d_clip + d_arrange),
-            )
-        });
+        // 뼈대 — 셸 항목 없이 짜고 `불러오는 중…` 한 줄을 붙인다. 셸 항목이 오면 같은
+        // 재료(`app_rows`·`background`·업로드 여부)로 다시 짠다
+        let arranged = arrange(&[], |_| None, background, &app_rows, !uploads.is_empty());
         self.shell_menu = Some(OpenShellMenu {
-            menu,
+            ticket,
+            shell: ShellState::Loading,
+            requested_at: std::time::Instant::now(),
+            submenu_loading: false,
+            app_rows,
+            background,
             uploads,
-            rows: arranged.rows,
+            rows: skeleton_rows(arranged.rows),
             extensions: arranged.extensions,
             compressions: arranged.compressions,
             extractions: arranged.extractions,
-            icons,
+            icons: shell_context_menu::MenuIcons::build(ctx, &[]),
             submenu: None,
             submenu_top: request.pos.y,
             pos: request.pos,
@@ -1006,6 +1201,7 @@ impl ExplorerApp {
     ///
     /// 바깥을 누르거나 `Esc`면 닫는다 — 메뉴가 화면에 눌어붙지 않게 한다(원격 메뉴와 같은 규칙)
     pub(super) fn show_shell_menu(&mut self, ctx: &egui::Context) {
+        self.pump_shell_menu(ctx);
         let Some(open) = self.shell_menu.as_ref() else {
             return;
         };
@@ -1017,7 +1213,7 @@ impl ExplorerApp {
             .get(&self.workspaces.active().id)
             .and_then(|view| view.active_dir());
         if 보고_있는_폴더.is_some_and(|dir| dir != open.folder) {
-            self.shell_menu = None;
+            self.close_shell_menu();
             return;
         }
         let viewport = ctx.input(|input| input.viewport_rect());
@@ -1123,7 +1319,7 @@ impl ExplorerApp {
             should_close(just_opened, outside, escape),
             pointer_in_submenu,
         ) {
-            FrameOutcome::Close => self.shell_menu = None,
+            FrameOutcome::Close => self.close_shell_menu(),
             FrameOutcome::Apply(pick) => self.apply_shell_menu_pick(ctx, pick, row_top),
             FrameOutcome::Nothing => {}
         }
@@ -1141,6 +1337,21 @@ impl ExplorerApp {
         pick: shell_context_menu::ShellMenuPick,
         row_top: Option<f32>,
     ) {
+        // **셸 명령 말고 메뉴를 닫는 고름이면 워커에게도 그 판을 놓으라고 알린다**(D16) —
+        // 셸 명령은 워커가 실행한 뒤 스스로 놓는다. 알리지 않아도 다음 열기가 놓는다
+        let closes = !matches!(
+            pick,
+            shell_context_menu::ShellMenuPick::Expand(_)
+                | shell_context_menu::ShellMenuPick::ExpandVirtual(_)
+                | shell_context_menu::ShellMenuPick::CollapseSubmenu
+                | shell_context_menu::ShellMenuPick::Command(_)
+        );
+        if closes
+            && let (Some(open), Some(worker)) =
+                (self.shell_menu.as_ref(), self.menu_worker.as_ref())
+        {
+            worker.close(open.ticket);
+        }
         let Some(open) = self.shell_menu.as_mut() else {
             return;
         };
@@ -1149,17 +1360,24 @@ impl ExplorerApp {
         match pick {
             shell_context_menu::ShellMenuPick::Expand(handle) => {
                 // **이미 펼쳐 둔 것이면 아무 일도 하지 않는다** — 마우스가 얹혀 있는 동안
-                // 이 신호가 매 프레임 오는데, 그때마다 `expand`를 부르면 **매 프레임 COM
-                // 호출**이 난다(`WM_INITMENUPOPUP` 전송 + 메뉴 재읽기).
+                // 이 신호가 매 프레임 오는데, 그때마다 워커에 청하면 **매 프레임 셸 호출**이
+                // 난다(`WM_INITMENUPOPUP` 전송 + 메뉴 재읽기). 채우는 중인 것도 펼친 것이다.
                 //
                 // 종전에는 여기서 접었다(토글) — 마우스로 펼치는 지금은 뜻이 없다.
                 // 얹혀 있는 동안 매 프레임 뒤집혀 깜빡인다
                 if already_expanded(open.submenu.as_ref(), ExpandTarget::Shell(handle)) {
                     return;
                 }
-                let rows = open.menu.expand(handle);
+                // **채우는 것은 워커다**(0.1~0.4초 — `연결 프로그램`·`새로 만들기`) — 그동안
+                // `불러오는 중…` 한 줄짜리 팝업을 띄우고, 응답이 오면 갈아 끼운다
+                // (`pump_shell_menu`)
+                if let Some(worker) = self.menu_worker.as_ref() {
+                    worker.expand(open.ticket, handle);
+                }
+                let rows = vec![shell_context_menu::loading_submenu_item()];
                 let icons = shell_context_menu::MenuIcons::build(ctx, &rows);
                 open.submenu = Some(OpenSubmenu::Shell(handle, rows, icons));
+                open.submenu_loading = true;
             }
             shell_context_menu::ShellMenuPick::CollapseSubmenu => {
                 // 하위 메뉴 없는 줄에 마우스가 얹혔다 — 펼쳐 둔 것을 접는다.
@@ -1235,15 +1453,16 @@ impl ExplorerApp {
                 self.apply_app_menu_item(ctx, item, &open);
             }
             shell_context_menu::ShellMenuPick::Command(id) => {
-                let owner = self.owner_hwnd();
-                // **닫고 나서 실행한다** — 셸 확장의 `InvokeCommand`는 새 창을 띄우거나 자기
-                // 메시지 펌프를 돌기도 해서, 그 사이에 다시 그려지면 이미 고른 메뉴가 화면에
-                // 남는다. 나머지 두 분기(`ShowMore`·`Action`)도 같은 순서다.
-                // 메뉴를 지우기 전에 인터페이스를 옮겨 잡는다 — 실행은 그것이 살아 있어야 한다
+                // **닫고 나서 실행한다** — 셸 확장의 `InvokeCommand`는 새 창을 띄우기도 해서,
+                // 그 사이에 다시 그려지면 이미 고른 메뉴가 화면에 남는다. 나머지 두 분기
+                // (`ShowMore`·`Action`)도 같은 순서다. **실행은 워커가 한다** — 인터페이스가
+                // 그 스레드에 있고, 실행 뒤 그 판을 스스로 놓는다
                 let Some(open) = self.shell_menu.take() else {
                     return;
                 };
-                open.menu.invoke(id, owner);
+                if let Some(worker) = self.menu_worker.as_ref() {
+                    worker.invoke(open.ticket, id);
+                }
             }
             shell_context_menu::ShellMenuPick::ShowMore => {
                 // 우리 메뉴를 먼저 닫고, 표준 메뉴는 그리기가 끝난 뒤에 띄운다.
@@ -2600,5 +2819,133 @@ mod tests {
         // **셸의 `붙여넣기`는 숨긴다** — 그 자리는 앱이 세우는 줄이 대신한다(2026-08-26).
         // 아이콘 줄에 붙여넣기 칸이 없다는 사정은 그대로이고, 진입점이 앱 줄로 옮겼을 뿐이다
         assert_eq!(classify(Some("paste"), "붙여넣기(P)", true), Slot::Hidden);
+    }
+
+    // ── 워커로 채우는 메뉴 (2026-09-29) ──
+
+    use crate::fs::shell_menu_worker::Response;
+    use shell_context_menu::ShellMenuRow;
+
+    fn 로딩_줄_수(rows: &[ShellMenuRow]) -> usize {
+        rows.iter()
+            .filter(|row| matches!(row, ShellMenuRow::Loading))
+            .count()
+    }
+
+    /// 뼈대 — 셸 항목 없이 앱이 세우는 줄만으로 짠 선택 메뉴
+    fn 뼈대() -> Vec<ShellMenuRow> {
+        let app_rows = [(shell_context_menu::AppMenuItem::AddFavorite, true)];
+        skeleton_rows(arrange(&[], |_| None, false, &app_rows, false).rows)
+    }
+
+    #[test]
+    fn 뼈대에는_불러오는_중_줄이_하나_서고_앱_줄은_그대로다() {
+        let rows = 뼈대();
+        assert_eq!(로딩_줄_수(&rows), 1);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            ShellMenuRow::App {
+                item: shell_context_menu::AppMenuItem::AddFavorite,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn 실패하면_불러오는_중_줄만_걷힌다() {
+        let rows = 뼈대();
+        let 앞 = rows.len();
+        let rows = without_loading(rows);
+        assert_eq!(로딩_줄_수(&rows), 0);
+        assert_eq!(rows.len(), 앞 - 1, "앱 줄까지 걷혔다");
+    }
+
+    #[test]
+    fn 시한은_10초다() {
+        assert!(!loading_expired(std::time::Duration::from_millis(9_900)));
+        assert!(loading_expired(std::time::Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn 열기_응답은_번호가_같을_때만_받는다() {
+        let opened = |ticket| Response::Opened {
+            ticket,
+            items: vec![줄(1, "열기")],
+            verbs: vec![Some("open".into())],
+        };
+        assert_eq!(
+            accept_opened(2, ShellState::Loading, opened(1)),
+            Arrival::Ignore
+        );
+        assert_eq!(
+            accept_opened(1, ShellState::Loading, opened(1)),
+            Arrival::Fill {
+                items: vec![줄(1, "열기")],
+                verbs: vec![Some("open".into())],
+            }
+        );
+        assert_eq!(
+            accept_opened(1, ShellState::Loading, Response::OpenFailed { ticket: 1 }),
+            Arrival::Fail
+        );
+        // 시한 뒤(`Failed`)에 늦게 온 같은 번호의 항목은 받는다(D10), 채운 뒤에는 버린다
+        assert!(matches!(
+            accept_opened(1, ShellState::Failed, opened(1)),
+            Arrival::Fill { .. }
+        ));
+        assert_eq!(
+            accept_opened(1, ShellState::Ready, opened(1)),
+            Arrival::Ignore
+        );
+    }
+
+    #[test]
+    fn 셸_항목이_오면_펼쳐_둔_묶음은_접힌다() {
+        let 압축 = Some(OpenSubmenu::Virtual(
+            shell_context_menu::VirtualSubmenu::Compress,
+            Vec::new(),
+            shell_context_menu::MenuIcons::for_test(),
+        ));
+        assert!(settle_submenu(압축).is_none());
+        let 업로드 = Some(OpenSubmenu::Upload(vec!["웹서버".into()]));
+        assert!(matches!(
+            settle_submenu(업로드),
+            Some(OpenSubmenu::Upload(_))
+        ));
+    }
+
+    #[test]
+    fn 펼치기_응답은_지금_펼친_손잡이일_때만_받는다() {
+        let 손잡이 = crate::fs::shell_menu::SubmenuHandle::for_test(7, 3);
+        let 다른것 = crate::fs::shell_menu::SubmenuHandle::for_test(8, 4);
+        let 펼침 = OpenSubmenu::Shell(
+            손잡이,
+            vec![shell_context_menu::loading_submenu_item()],
+            shell_context_menu::MenuIcons::for_test(),
+        );
+        let expanded = |ticket, handle| Response::Expanded {
+            ticket,
+            handle,
+            items: vec![줄(5, "텍스트 문서")],
+        };
+        assert_eq!(
+            accept_expanded(1, Some(&펼침), expanded(1, 손잡이)),
+            Some(vec![줄(5, "텍스트 문서")])
+        );
+        assert_eq!(accept_expanded(1, Some(&펼침), expanded(2, 손잡이)), None);
+        assert_eq!(accept_expanded(1, Some(&펼침), expanded(1, 다른것)), None);
+        assert_eq!(accept_expanded(1, None, expanded(1, 손잡이)), None);
+    }
+
+    #[test]
+    fn 불러오는_중인_하위_메뉴도_이미_펼친_것으로_본다() {
+        // 로딩 중에 다시 펼치기를 보내면 워커가 같은 하위 메뉴를 매 프레임 다시 채운다
+        let 손잡이 = crate::fs::shell_menu::SubmenuHandle::for_test(7, 3);
+        let 펼침 = OpenSubmenu::Shell(
+            손잡이,
+            vec![shell_context_menu::loading_submenu_item()],
+            shell_context_menu::MenuIcons::for_test(),
+        );
+        assert!(already_expanded(Some(&펼침), ExpandTarget::Shell(손잡이)));
     }
 }

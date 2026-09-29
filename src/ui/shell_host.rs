@@ -6,7 +6,7 @@
 //! ②가 필요한 이유: 셸 메뉴의 "보내기" 같은 서브메뉴는 `IContextMenu2/3`가
 //! `WM_INITMENUPOPUP` 등을 받아야 채워지는데, winit은 그 메시지를 우리 코드로 넘겨주지 않는다.
 //! 그래서 창을 서브클래싱해 `forward_menu_msg`로 전달한다(서브클래스가 없으면 서브메뉴가 빈다).
-use crate::fs::shell_menu::{ShellMenu, forward_menu_msg, show_context_menu};
+use crate::fs::shell_menu::{forward_menu_msg, show_context_menu};
 use crate::fs::shell_menu_worker::ShellMenuWorker;
 use eframe::egui;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -70,14 +70,6 @@ impl ShellHost {
     /// UI 스레드에서 돌리면 우클릭마다 0.3~1.8초 창이 멈춘다(`fs::shell_menu_worker`)
     pub fn spawn_menu_worker(&self) -> Option<ShellMenuWorker> {
         ShellMenuWorker::spawn(self.hwnd.0 as isize)
-    }
-
-    /// **우리가 그릴 메뉴**를 연다 (FR-8 개정) — 항목은 셸에서 읽고 그리기는 `ui`가 한다.
-    ///
-    /// 돌려준 값이 살아 있는 동안만 그 메뉴의 항목·하위 메뉴·실행이 뜻을 갖는다.
-    /// 열지 못하면 `None`이며 부르는 쪽은 메뉴를 띄우지 않는다
-    pub fn open_menu(&self, folder: &Path, items: &[PathBuf]) -> Option<ShellMenu> {
-        ShellMenu::open(self.hwnd, folder, items)
     }
 
     /// egui가 주는 클라이언트 좌표(물리 픽셀)를 셸 메뉴가 요구하는 화면 좌표로 바꾼다
