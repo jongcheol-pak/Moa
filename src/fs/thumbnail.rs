@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{DeleteObject, HBITMAP};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
@@ -57,6 +58,31 @@ enum Request {
 /// 워커가 돌려주는 결과 — `(세대, 경로, 도장, 그림)`
 type Outcome = (u64, PathBuf, FileStamp, Option<ThumbnailImage>);
 
+/// 한 번에 비운 요청들에서 **경로별 마지막 `Make`만** 남긴다 — `Stop`은 그대로 둔다.
+///
+/// 앞선 요청은 곧 대체될 내용이라 만들어 봐야 `accept`가 버린다. 남는 순서는 각 경로가
+/// 마지막으로 나온 순서다
+fn coalesce_requests(batch: Vec<Request>) -> Vec<Request> {
+    let is_last = |index: usize, path: &Path| {
+        !batch[index + 1..]
+            .iter()
+            .any(|later| matches!(later, Request::Make { path: p, .. } if p == path))
+    };
+    let keep: Vec<bool> = batch
+        .iter()
+        .enumerate()
+        .map(|(index, request)| match request {
+            Request::Make { path, .. } => is_last(index, path),
+            Request::Stop => true,
+        })
+        .collect();
+    batch
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(request, keep)| keep.then_some(request))
+        .collect()
+}
+
 /// 썸네일 캐시 — 요청 큐·결과 수신·LRU 축출을 함께 관리한다.
 ///
 /// 패널마다 하나씩 둔다(NFR-9의 상한이 패널당이다). 폴더를 떠나면 `clear`로 비운다
@@ -78,7 +104,16 @@ pub struct ThumbnailCache {
     /// 폴더를 빠르게 오가면 이전 폴더의 요청이 나중에 도착해 캐시 자리를 차지한다
     /// (`ui::panel`의 `DirLoad`가 쓰는 것과 같은 방식)
     generation: u64,
+    /// **내용이 바뀐 파일의 안정 대기** — `(새 도장, 그 도장을 처음 본 시각)` (2026-09-29).
+    ///
+    /// 내려받는 중인 파일처럼 계속 바뀌는 파일은 감시 갱신(약 0.3초)마다 도장이 달라져,
+    /// 그때마다 다시 만들면 보이는 동안 셸이 파일을 계속 읽는다. 그래서 이미 그림이 있는
+    /// 경로는 도장이 [`SETTLE`] 동안 그대로일 때만 다시 만든다(처음 보는 경로는 곧바로)
+    settling: HashMap<PathBuf, (FileStamp, Instant)>,
 }
+
+/// 내용이 바뀐 파일을 다시 만들기 전에 도장이 그대로여야 하는 시간 (2026-09-29 사용자 선택)
+pub const SETTLE: Duration = Duration::from_secs(2);
 
 impl ThumbnailCache {
     pub fn new() -> ThumbnailCache {
@@ -93,6 +128,7 @@ impl ThumbnailCache {
             pending: Vec::new(),
             folder: PathBuf::new(),
             generation: 0,
+            settling: HashMap::new(),
         }
     }
 
@@ -114,8 +150,14 @@ impl ThumbnailCache {
     ///
     /// **도장이 다르면 다시 만든다**(2026-09-29) — 같은 이름의 파일이 새 내용으로 바뀐 것이다.
     /// 그동안 **옛 그림은 그대로 둔다**: 형식 아이콘으로 떨어졌다 돌아오는 깜빡임이 없고,
-    /// 새 결과가 오면 `accept`가 갈아 끼운다
+    /// 새 결과가 오면 `accept`가 갈아 끼운다. 다시 만드는 것은 도장이 [`SETTLE`] 동안 그대로일
+    /// 때다(`request_at`)
     pub fn request(&mut self, path: &Path, stamp: FileStamp) {
+        self.request_at(path, stamp, Instant::now());
+    }
+
+    /// [`request`]의 판정 — 현재 시각을 바깥에서 받는다(안정 대기를 시험에서 재현한다)
+    pub fn request_at(&mut self, path: &Path, stamp: FileStamp, now: Instant) {
         let held = self.stamp_of(path);
         if held.is_some() {
             // 보이는 것이므로 도장과 무관하게 최근으로 올린다 — 새 그림을 기다리는 동안에도
@@ -123,11 +165,29 @@ impl ThumbnailCache {
             self.touch(path);
         }
         if held == Some(stamp) {
+            // 담긴 그림과 같아졌다 — 기다리던 것이 있었다면 더는 기다릴 일이 없다
+            self.settling.remove(path);
             return;
         }
         if self.pending.iter().any(|(p, s)| p == path && *s == stamp) {
             return;
         }
+        // **이미 그림이 있는데 도장이 다르면 안정 대기** — 도장이 `SETTLE` 동안 그대로일 때만
+        // 청한다. 도장이 또 바뀌면 그 시각부터 다시 잰다
+        if held.is_some() {
+            match self.settling.get(path) {
+                Some((waiting, since)) if *waiting == stamp => {
+                    if now.saturating_duration_since(*since) < SETTLE {
+                        return;
+                    }
+                }
+                _ => {
+                    self.settling.insert(path.to_path_buf(), (stamp, now));
+                    return;
+                }
+            }
+        }
+        self.settling.remove(path);
         // 옛 도장으로 기다리던 것이 있으면 새 도장으로 바꿔 단다 — 옛 결과는 `accept`가 버린다
         self.pending.retain(|(p, _)| p != path);
         self.pending.push((path.to_path_buf(), stamp));
@@ -183,7 +243,22 @@ impl ThumbnailCache {
         self.ready.clear();
         self.order.clear();
         self.pending.clear();
+        self.settling.clear();
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// 안정 대기 중 **만기가 아직 오지 않은** 것 가운데 가장 가까운 만기까지 남은 시간.
+    ///
+    /// 화면은 이 시간 뒤에 다시 그려야 재요청 시점이 온다 — 파일이 멈춘 뒤에는 감시 통지도
+    /// 입력도 없어 프레임이 돌지 않는다. **만기가 지난 항목은 세지 않는다**: 만기 시각에 한 번
+    /// 깨웠으면 그 몫은 끝났고, 그 뒤에도 남은 것은 화면에서 빠진 경로라 세면 매 프레임
+    /// 다시 그리게 된다
+    pub fn settle_due(&self, now: Instant) -> Option<Duration> {
+        self.settling
+            .values()
+            .map(|(_, since)| (*since + SETTLE).saturating_duration_since(now))
+            .filter(|left| !left.is_zero())
+            .min()
     }
 
     /// 캐시에 든 항목 수 (실패로 기억한 것 포함) — 상한 검증용
@@ -304,6 +379,8 @@ impl ThumbnailCache {
         {
             let oldest = self.order.remove(0);
             self.ready.remove(&oldest);
+            // 축출된 경로는 다음에 「처음 보는 경로」로 곧바로 청해진다 — 기다림은 뜻을 잃었다
+            self.settling.remove(&oldest);
         }
     }
 }
@@ -330,19 +407,25 @@ fn worker(rx: Receiver<Request>, tx: Sender<Outcome>) {
     // 실패한 초기화를 짝지어 해제하면 COM 참조 수가 어긋난다.
     // 실패해도 셸 호출이 동작하는 경우가 있어 작업 자체는 계속 시도한다
     let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
-    while let Ok(request) = rx.recv() {
-        match request {
-            Request::Make {
-                generation,
-                path,
-                stamp,
-            } => {
-                let image = make_thumbnail(&path);
-                if tx.send((generation, path, stamp, image)).is_err() {
-                    break; // 수신부가 사라졌다 — 패널이 닫혔거나 앱이 끝났다
+    'outer: while let Ok(first) = rx.recv() {
+        // 기다리는 동안 쌓인 것을 함께 비워 **경로별 마지막 요청만** 만든다 — 곧 대체될
+        // 내용을 만들어 봐야 `accept`가 버린다
+        let mut batch = vec![first];
+        batch.extend(rx.try_iter());
+        for request in coalesce_requests(batch) {
+            match request {
+                Request::Make {
+                    generation,
+                    path,
+                    stamp,
+                } => {
+                    let image = make_thumbnail(&path);
+                    if tx.send((generation, path, stamp, image)).is_err() {
+                        break 'outer; // 수신부가 사라졌다 — 패널이 닫혔거나 앱이 끝났다
+                    }
                 }
+                Request::Stop => break 'outer,
             }
-            Request::Stop => break,
         }
     }
     if initialized {
@@ -618,7 +701,10 @@ mod tests {
         timeout_ms: u64,
     ) -> bool {
         let start = std::time::Instant::now();
-        cache.request(path, stamp);
+        // 내용이 바뀐 경로는 도장이 `SETTLE` 동안 그대로여야 다시 청한다 — 지금 한 번 보이고
+        // `SETTLE` 뒤에 한 번 더 보인 것으로 흉내 낸다(처음 보는 경로는 첫 호출에서 청한다)
+        cache.request_at(path, stamp, start);
+        cache.request_at(path, stamp, start + SETTLE);
         while start.elapsed().as_millis() < timeout_ms as u128 {
             cache.poll();
             if cache.stamp_of(path) == Some(stamp) {
@@ -639,7 +725,9 @@ mod tests {
         let mut cache = cache();
         let path = PathBuf::from("사진.png");
         cache.insert(path.clone(), 도장(0, 1), Some(image(1)));
-        cache.request(&path, 도장(100, 2));
+        let t0 = Instant::now();
+        cache.request_at(&path, 도장(100, 2), t0);
+        cache.request_at(&path, 도장(100, 2), t0 + SETTLE);
         assert!(cache.is_pending(), "도장이 바뀌었는데 다시 청하지 않았다");
         assert_eq!(
             cache.peek(&path).map(|img| img.width),
@@ -655,6 +743,94 @@ mod tests {
         assert_eq!(cache.peek(&path).map(|img| img.width), Some(2));
         assert_eq!(cache.stamp_of(&path), Some(도장(100, 2)));
         assert!(!cache.is_pending());
+    }
+
+    fn ms(value: u64) -> Duration {
+        Duration::from_millis(value)
+    }
+
+    #[test]
+    fn 바뀐_내용은_도장이_2초_그대로여야_다시_청한다() {
+        // 내려받는 중인 파일은 감시 갱신마다 도장이 바뀐다 — 그때마다 다시 만들면
+        // 보이는 동안 셸이 파일을 계속 읽는다
+        let mut cache = cache();
+        let path = PathBuf::from("받는중.mp4");
+        cache.insert(path.clone(), 도장(1, 1), Some(image(1)));
+        let t0 = Instant::now();
+        cache.request_at(&path, 도장(2, 2), t0);
+        assert!(!cache.is_pending(), "바뀌자마자 다시 청했다");
+        cache.request_at(&path, 도장(2, 2), t0 + ms(1_900));
+        assert!(!cache.is_pending(), "2초가 되기 전에 청했다");
+        assert_eq!(cache.settle_due(t0 + ms(500)), Some(ms(1_500)));
+        cache.request_at(&path, 도장(2, 2), t0 + SETTLE);
+        assert!(cache.is_pending(), "2초 동안 그대로인데 청하지 않았다");
+        assert_eq!(
+            cache.settle_due(t0 + SETTLE),
+            None,
+            "청한 뒤에도 기다림이 남았다"
+        );
+    }
+
+    #[test]
+    fn 도장이_또_바뀌면_기다림을_새로_시작한다() {
+        let mut cache = cache();
+        let path = PathBuf::from("받는중.mp4");
+        cache.insert(path.clone(), 도장(1, 1), Some(image(1)));
+        let t0 = Instant::now();
+        cache.request_at(&path, 도장(2, 2), t0);
+        cache.request_at(&path, 도장(3, 3), t0 + ms(1_000));
+        cache.request_at(&path, 도장(3, 3), t0 + SETTLE);
+        assert!(!cache.is_pending(), "새 도장의 2초가 차기 전에 청했다");
+        cache.request_at(&path, 도장(3, 3), t0 + ms(3_000));
+        assert!(cache.is_pending());
+    }
+
+    #[test]
+    fn 처음_보는_경로는_곧바로_청한다() {
+        let mut cache = cache();
+        cache.request_at(Path::new("새것.jpg"), 도장(1, 1), Instant::now());
+        assert!(cache.is_pending());
+        assert_eq!(cache.settle_due(Instant::now()), None);
+    }
+
+    #[test]
+    fn 만기가_지나고_다시_보이지_않은_기다림은_깨우지_않는다() {
+        // 스크롤로 빠지거나 이름이 바뀐 경로의 기다림을 세면 `Some(ZERO)`가 이어져
+        // 폴더를 떠날 때까지 매 프레임 다시 그린다
+        let mut cache = cache();
+        let path = PathBuf::from("사라짐.mp4");
+        cache.insert(path.clone(), 도장(1, 1), Some(image(1)));
+        let t0 = Instant::now();
+        cache.request_at(&path, 도장(2, 2), t0);
+        assert_eq!(cache.settle_due(t0 + ms(5_000)), None);
+    }
+
+    #[test]
+    fn 쌓인_요청은_경로별_마지막_것만_남는다() {
+        let make = |path: &str, modified| Request::Make {
+            generation: 0,
+            path: PathBuf::from(path),
+            stamp: 도장(1, modified),
+        };
+        let kept = coalesce_requests(vec![
+            make("a", 1),
+            make("b", 1),
+            make("a", 2),
+            Request::Stop,
+        ]);
+        let shape: Vec<(String, u64)> = kept
+            .iter()
+            .map(|request| match request {
+                Request::Make { path, stamp, .. } => {
+                    (path.to_string_lossy().into_owned(), stamp.modified)
+                }
+                Request::Stop => ("STOP".into(), 0),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![("b".into(), 1), ("a".into(), 2), ("STOP".into(), 0)]
+        );
     }
 
     #[test]

@@ -946,6 +946,50 @@ fn 썸네일을_기다리는_동안은_스스로_깨어난다() {
 }
 
 #[test]
+fn 내용이_바뀐_썸네일을_기다리는_동안은_만기에_깨어난다() {
+    // 파일이 멈춘 뒤에는 감시 통지도 입력도 없다 — 만기에 깨지 않으면 재요청 시점이 오지 않아
+    // 새 그림이 사용자가 마우스를 움직일 때까지 안 나온다
+    use crate::fs::enumerate::FileStamp;
+    let ctx = egui::Context::default();
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\Users"));
+    let path = std::path::PathBuf::from(r"C:\Users\받는중.jpg");
+    let old = FileStamp {
+        size: 1,
+        modified: 1,
+    };
+    panel
+        .thumbs
+        .accept_for_test_stamped(path.clone(), old, Some(sample_thumb()));
+    // 첫 호출은 텍스처를 올린 프레임이라 `ZERO`다 — 판정은 두 번째 호출로 한다
+    assert_eq!(panel.poll_thumbnails(&ctx), Some(Duration::ZERO));
+    let changed = FileStamp {
+        size: 2,
+        modified: 2,
+    };
+    panel
+        .thumbs
+        .request_at(&path, changed, std::time::Instant::now());
+    let due = panel.poll_thumbnails(&ctx);
+    assert!(
+        due.is_some_and(|d| !d.is_zero() && d <= crate::fs::thumbnail::SETTLE),
+        "안정 대기 중인데 만기에 깨어날 시점을 알리지 않았다: {due:?}"
+    );
+}
+
+#[test]
+fn 썸네일을_청한_프레임은_결과를_거둘_다음_프레임을_잡는다() {
+    // 같은 프레임의 `poll_thumbnails`는 그리기보다 먼저 돌아 방금 나간 요청을 모른다
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\Users"));
+    assert_eq!(panel.thumb_wakeup(), None, "청한 것이 없는데 깨운다");
+    panel.thumbs.request_at(
+        std::path::Path::new(r"C:\Users\새것.jpg"),
+        crate::fs::enumerate::FileStamp::default(),
+        std::time::Instant::now(),
+    );
+    assert_eq!(panel.thumb_wakeup(), Some(THUMB_POLL_INTERVAL));
+}
+
+#[test]
 fn 열_차례가_세션을_왕복한다() {
     // FR-4 — 이 왕복이 끊기면 재시작할 때마다 기본 차례로 돌아간다
     let saved = crate::ui::session::PanelTabs {

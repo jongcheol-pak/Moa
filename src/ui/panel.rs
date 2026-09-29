@@ -1028,6 +1028,20 @@ impl PanelState {
         if !arrived.is_empty() || self.thumb_textures.len() != before {
             return Some(Duration::ZERO);
         }
+        if self.thumbs.is_pending() {
+            return Some(THUMB_POLL_INTERVAL);
+        }
+        // 내용이 바뀐 파일의 안정 대기 — 만기에 깨어나야 재요청 시점이 온다(파일이 멈춘 뒤에는
+        // 감시 통지도 입력도 없다)
+        self.thumbs.settle_due(std::time::Instant::now())
+    }
+
+    /// 방금 썸네일을 청했으면 결과를 거둘 다음 프레임까지의 시간 — `show_list`가 요청 뒤에 건다.
+    ///
+    /// **같은 프레임의 `poll_thumbnails`는 `show_list`보다 먼저 돈다**(logic → ui) — 그 프레임에
+    /// 나간 요청(안정 대기의 만기 재요청·처음 보는 경로)을 모르므로 여기서 따로 예약한다.
+    /// ctx 신호가 아니라 값으로 돌려주는 이유는 `poll_thumbnails`와 같다(시험이 가를 수 있게)
+    fn thumb_wakeup(&self) -> Option<Duration> {
         self.thumbs.is_pending().then_some(THUMB_POLL_INTERVAL)
     }
 
@@ -2300,6 +2314,9 @@ impl PanelState {
         // 도장이 바뀐 파일(같은 이름의 새 내용)은 `request`가 다시 만든다
         for (path, stamp) in visible {
             self.thumbs.request(&path, stamp);
+        }
+        if let Some(delay) = self.thumb_wakeup() {
+            ui.ctx().request_repaint_after(delay);
         }
         // 다 읽었는데 아무것도 없으면 그 사실을 적는다 (2026-08-16 검토).
         // **목록을 대신 그리지 않고 그 위에 얹는다** — 목록 자리가 그대로 있어야
