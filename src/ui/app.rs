@@ -751,8 +751,8 @@ impl ExplorerApp {
         theme::apply_dark(&cc.egui_ctx);
         // HWND 획득·서브클래스 설치는 창이 만들어진 이 시점에만 가능하다
         let shell = ShellHost::new(cc);
-        // 셸 메뉴 워커는 **앱을 켤 때 띄운다** — 띄우자마자 확장 DLL을 데우므로(첫 열기 1.8초)
-        // 사용자의 첫 우클릭이 그 값을 치르지 않는다
+        // 셸 메뉴 워커는 앱을 켤 때 띄우되 **확장은 첫 우클릭이 싣는다** — 미리 실으면 우클릭하지
+        // 않는 세션도 +42MB·CPU 1.8초를 치른다(`fs::shell_menu_worker`). 스레드만으로는 비용이 없다
         let menu_worker = shell.as_ref().and_then(ShellHost::spawn_menu_worker);
         // 최대화·복원 때 OS가 옛 화면과 새 화면을 겹쳐 페이드하면 글자가 이중으로 보인다 (FR-22)
         if let Some(shell) = &shell {

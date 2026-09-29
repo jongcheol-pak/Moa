@@ -13,8 +13,12 @@
 //! 이 스레드가 `InvokeCommand`가 띄운 모달 대화 안에 있으면 스레드 메시지가 버려진다. 이벤트는
 //! 세워진 채 남아 신호를 잃지 않는다.
 //!
+//! **첫 열기가 확장을 싣는다**(첫 회 최대 1.8초 — 그동안 메뉴는 뼈대로 떠 있다). 앱 시작 때
+//! 미리 싣지 않는 것은 우클릭하지 않는 세션이 +42MB·CPU 1.8초를 치르지 않게 하려는 것이다
+//! (2026-09-29 자원 검토 뒤 사용자 선택).
+//!
 //! 이 모듈은 UI를 모른다 — 결과는 채널로만 내보낸다(`fs` 계층 규칙).
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
@@ -218,7 +222,6 @@ fn run(owner: isize, requests: &Receiver<Request>, responses: &Sender<Response>,
     // 초기화를 짝지어 해제하면 COM 참조 수가 어긋난다
     let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
     let owner = HWND(owner as *mut core::ffi::c_void);
-    warm_up(owner);
     let mut current: Option<(u64, ShellMenu)> = None;
     'outer: loop {
         pump_messages();
@@ -309,20 +312,6 @@ fn handle(
     // 받는 쪽이 사라졌어도(앱 종료 중) 다음 바퀴에서 요청 채널 끊김으로 끝난다
     let _ = responses.send(response);
     true
-}
-
-/// 셸 확장 DLL을 미리 싣는다 — 실행 파일 자신으로 메뉴를 한 번 열고 버린다.
-///
-/// 실측(2026-09-29): 프로세스 첫 열기 1818ms → 둘째 811ms → 이후 267~303ms. 사용자의 첫
-/// 우클릭이 그 첫 값을 치르지 않게 한다. 실패해도 할 일이 없다 — 첫 열기가 조금 늦을 뿐이다
-fn warm_up(owner: HWND) {
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let Some(folder) = exe.parent().map(Path::to_path_buf) else {
-        return;
-    };
-    drop(ShellMenu::open(owner, &folder, &[exe]));
 }
 
 /// 쌓인 창 메시지를 모두 처리한다 — 셸 확장이 이 스레드에 만든 창이 그것을 받는다
@@ -469,31 +458,6 @@ mod tests {
         };
         worker.expand(2, handle);
         assert!(wait(&worker, Duration::from_secs(1)).is_none());
-    }
-
-    #[test]
-    fn 데우는_동안_쌓인_열기는_마지막_것만_답한다() {
-        let dir = temp_dir("coalesce");
-        let file = dir.join("셋.txt");
-        let _ = std::fs::write(&file, b"worker");
-        let worker = ShellMenuWorker::spawn(0).expect("워커를 띄운다");
-        // 띄운 직후라 워커는 아직 데우는 중이다 — 셋이 한 번에 쌓인다
-        for ticket in 1..=3 {
-            worker.open(ticket, dir.clone(), vec![file.clone()]);
-        }
-        let mut tickets = Vec::new();
-        while let Some(response) = wait(&worker, Duration::from_secs(10)) {
-            match response {
-                Response::Opened { ticket, .. } | Response::OpenFailed { ticket } => {
-                    tickets.push(ticket)
-                }
-                Response::Expanded { .. } => {}
-            }
-            if tickets.contains(&3) {
-                break;
-            }
-        }
-        assert_eq!(tickets, vec![3]);
     }
 
     #[test]
