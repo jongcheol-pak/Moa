@@ -213,15 +213,7 @@ fn show_tabs(
                         }
                         TabSource::Local(_) => None,
                     };
-                    let hit = show_tab(
-                        ui,
-                        index,
-                        &title,
-                        source,
-                        badge,
-                        active,
-                        tab_icon(tab.id, targets),
-                    );
+                    let hit = show_tab(ui, index, &title, badge, active, tab_icon(tab.id, targets));
                     if hit.close {
                         *action = Some(TabAction::Close(index));
                     } else if hit.switch {
@@ -367,13 +359,10 @@ fn show_site_row(ui: &mut egui::Ui, name: &str, protocol: &str, connected: bool)
 ///
 /// 내부 요소는 위젯이 아니라 painter로 그린다. `icon_button` 같은 위젯을 쓰면
 /// 자기 자리를 새로 잡아 탭 밖에 배치되고, 그 자리에서 탭 클릭도 삼켜진다
-// 인자가 일곱인 이유: 탭 하나를 그리는 데 실제로 그만큼이 필요하다.
-// 묶어 넘기면 호출부에서 다시 풀어야 해 오히려 길어진다
 fn show_tab(
     ui: &mut egui::Ui,
     index: usize,
     title: &str,
-    source: &TabSource,
     badge: Option<(&TabPhase, Protocol)>,
     active: bool,
     icon: (&'static str, egui::Color32),
@@ -456,12 +445,8 @@ fn show_tab(
     let switch = response.clicked() && !clicked_on_close;
     // 가운데 버튼 클릭으로도 닫는다 (브라우저 관례)
     let middle_close = response.middle_clicked();
-    // 마우스를 올리면 어디를 가리키는지 보인다 — 로컬은 전체 경로, 원격은 원격 경로다
-    let hover = match source {
-        TabSource::Local(path) => path.to_string_lossy().into_owned(),
-        TabSource::Remote { path, .. } => path.as_str().to_owned(),
-    };
-    response.on_hover_text(hover);
+    // 마우스를 올리면 줄임표 없는 탭 이름 전체가 보인다 (경로는 주소창이 보여 준다)
+    response.on_hover_text(title);
 
     TabHit {
         switch,
