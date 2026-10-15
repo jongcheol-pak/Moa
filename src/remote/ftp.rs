@@ -510,16 +510,54 @@ fn entries_from_mlsd(lines: &[String]) -> Vec<RemoteEntry> {
 ///
 /// **MLSD 파서로는 넘기지 않는다** — 그쪽은 `=`가 없는 토큰을 조용히 건너뛰어 아무 문자열이나
 /// 받아들이므로, 깨진 줄이 이름만 있는 가짜 항목으로 살아남는다.
+///
+/// **LIST의 시각은 서버의 벽시계다**(시간대 표시 없음) — 파서는 그것을 UTC로 읽으므로, 이 PC의
+/// 시간대로 적힌 시각으로 보고 UTC로 되돌린다. 그래야 화면이 다시 현지 시각으로 풀 때 서버가 적은
+/// 시각이 그대로 보인다(종전에는 KST에서 9시간 밀렸다). 서버와 이 PC의 시간대가 다르면 그만큼 어긋나지만,
+/// 시간대를 알려 주지 않는 응답에서 그 이상은 알 길이 없다. MLSD의 `modify`는 규격상 UTC라 손대지 않는다
 fn parse_list_line(line: &str) -> Option<RemoteEntry> {
-    if let Ok(file) = ListParser::parse_posix(line) {
+    let mut entry = if let Ok(file) = ListParser::parse_posix(line) {
         let mut entry = entry_from_file(&file);
         entry.mode = Some(mode_bits(&file));
         entry.owner = posix_owner(line).or_else(|| file.uid().map(|uid| uid.to_string()));
-        return Some(entry);
+        entry
+    } else {
+        // DOS 방언에는 권한·소유자가 아예 없다 — 권한 열·소유자 열이 빈칸이 된다
+        entry_from_file(&ListParser::parse_dos(line).ok()?)
+    };
+    entry.modified = entry.modified.and_then(wall_clock_to_utc);
+    Some(entry)
+}
+
+/// 벽시계 시각(UTC인 양 읽힌 유닉스 초) → 이 PC의 시간대로 본 실제 UTC 유닉스 초.
+/// 서머타임은 그 날짜의 규칙으로 `TzSpecificLocalTimeToSystemTime`이 가른다
+fn wall_clock_to_utc(naive_seconds: i64) -> Option<i64> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Time::{
+        FileTimeToSystemTime, SystemTimeToFileTime, TzSpecificLocalTimeToSystemTime,
+    };
+    const EPOCH_DIFFERENCE_SECONDS: i64 = 11_644_473_600;
+    const TICKS_PER_SECOND: i64 = 10_000_000;
+    let ticks = naive_seconds
+        .checked_add(EPOCH_DIFFERENCE_SECONDS)?
+        .checked_mul(TICKS_PER_SECOND)?;
+    let ticks = u64::try_from(ticks).ok()?;
+    let wall = FILETIME {
+        dwLowDateTime: (ticks & 0xffff_ffff) as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    let mut wall_st = Default::default();
+    let mut utc_st = Default::default();
+    let mut utc = FILETIME::default();
+    // 안전성: 모든 인자가 스택 소유다 — 실패하면 `None`(시각을 모르는 항목이 된다)
+    unsafe {
+        FileTimeToSystemTime(&wall, &mut wall_st).ok()?;
+        TzSpecificLocalTimeToSystemTime(None, &wall_st, &mut utc_st).ok()?;
+        SystemTimeToFileTime(&utc_st, &mut utc).ok()?;
     }
-    // DOS 방언에는 권한·소유자가 아예 없다 — 권한 열·소유자 열이 빈칸이 된다
-    let file = ListParser::parse_dos(line).ok()?;
-    Some(entry_from_file(&file))
+    let ticks =
+        i64::try_from(u64::from(utc.dwLowDateTime) | (u64::from(utc.dwHighDateTime) << 32)).ok()?;
+    Some(ticks / TICKS_PER_SECOND - EPOCH_DIFFERENCE_SECONDS)
 }
 
 /// MLSD 한 줄 → 항목.
@@ -891,6 +929,25 @@ mod tests {
 
         let dir = parse_list_line("10-19-20  03:19PM       <DIR> pub").expect("DOS 폴더");
         assert!(dir.is_dir);
+    }
+
+    /// LIST 시각은 서버의 벽시계다 — 화면에 그 시각이 그대로 보여야 한다.
+    /// 종전에는 그것을 UTC로 읽어 화면이 다시 현지 시각으로 바꾸는 바람에 KST에서 9시간 밀렸다
+    #[test]
+    fn list_시각은_서버_벽시계_그대로_보인다() {
+        use crate::panel::file_list::{format_filetime, unix_seconds_to_filetime};
+        let shown = |line: &str| {
+            let entry = parse_list_line(line).expect("LIST 줄");
+            format_filetime(unix_seconds_to_filetime(entry.modified.expect("시각")))
+        };
+        assert_eq!(
+            shown("10-15-26  10:29AM                 3010 Web.config"),
+            "2026-10-15 10:29"
+        );
+        assert_eq!(
+            shown("-rw-r--r-- 1 deploy staff 1234 Jan 10 2024 example.txt"),
+            "2024-01-10 00:00"
+        );
     }
 
     #[test]
