@@ -31,6 +31,8 @@ windows = { version = "0.62.2", features = [
     # RegisterClipboardFormatW — 클립보드의 "Preferred DropEffect" 형식 등록 (FR-64).
     # 그 형식이 복사와 잘라내기를 가르며, 이름이 문자열이라 등록을 거쳐야 번호를 얻는다
     "Win32_System_DataExchange",
+    # OutputDebugStringW — 셸 메뉴 실행 실패를 디버거에 남긴다 (`fs::shell_menu`). GUI 앱이라 println!을 쓰지 않는다
+    "Win32_System_Diagnostics_Debug",
     # GlobalAlloc/GlobalLock — 위 형식에 실을 4바이트를 담을 전역 메모리 (FR-64).
     # 셸이 만든 데이터 객체에 얹는 값이라 HGLOBAL 말고 다른 매체를 쓸 수 없다
     "Win32_System_Memory",

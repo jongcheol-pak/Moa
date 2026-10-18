@@ -79,9 +79,8 @@ pub struct LayoutOutcome {
     pub rename: Option<RenameRequest>,
     /// 패널 메뉴에서 고른 명령과 그 패널. **활성 패널이 아니라 메뉴를 연 패널**이다.
     ///
-    /// 활성 판정은 포인터가 눌린 위치로만 이뤄지는데, 메뉴 팝업은 자기 패널 밖으로 뻗을 수
-    /// 있어 그 위에서 고르면 아래 깔린 패널이 활성이 된다 — 그대로 활성 패널에 적용하면
-    /// 닫기·새 파일이 엉뚱한 패널에 간다 (plan D16)
+    /// 메뉴는 그 패널에 묶인 것이라 대상도 그 패널이어야 한다 — 활성 패널에 적용하면 메뉴를
+    /// 연 뒤 활성이 옮겨 갔을 때 닫기·새 파일이 엉뚱한 패널에 간다 (plan D16)
     pub command: Option<(PanelId, Command)>,
     /// 원격 단계 화면에서 고른 조치와 그 패널 (T10) — 대상 판정은 `command`와 같은 이유다
     pub remote: Option<(PanelId, RemoteAction)>,
@@ -109,11 +108,8 @@ pub struct LayoutOutcome {
     pub tree_requests: Vec<(PanelId, TreeRequest)>,
     /// 이번 프레임에 **내용이 직접 눌린** 패널 — 전송 대상 탭을 정하는 신호다 (FR-54).
     ///
-    /// 위 `command`가 쓰는 활성 판정(`active`)을 그대로 쓰지 않는 이유가 그 필드 설명에 있다:
-    /// 메뉴 팝업이 자기 패널 밖으로 뻗으면 그 위를 눌러도 **아래 깔린 패널**이 활성이 된다.
-    /// 활성 테두리가 잠깐 옮겨 가는 것과 달리 전송 대상은 파일이 어디로 갈지를 정하므로,
-    /// 팝업에 가린 클릭까지 대상으로 세면 사용자가 누른 적 없는 폴더로 파일이 간다.
-    /// 그래서 여기서는 **레이어 가림을 존중하는** `rect_contains_pointer`로 따로 판정한다
+    /// 팝업에 가린 누름은 세지 않는다(`pressed_in_pane`) — 세면 사용자가 누른 적 없는 폴더로
+    /// 파일이 간다. 활성 패널도 같은 판정으로 옮겨 간다
     pub pressed_panel: Option<PanelId>,
     /// 이번 프레임에 패널들이 차지한 자리 (FR-61) — OS에서 끌어온 파일이 **어느 패널에**
     /// 놓였는지 판정하는 데 쓴다.
@@ -236,7 +232,7 @@ pub fn show_layout(
 
     // 클릭이 일어난 패널을 활성으로 삼는다.
     // 패널 rect에 `interact`를 걸면 그 위젯이 목록·버튼 클릭을 가로채므로
-    // (겹치는 위젯은 나중에 등록된 쪽이 이긴다) 포인터 위치로만 판정한다
+    // (겹치는 위젯은 나중에 등록된 쪽이 이긴다) 포인터 위치와 레이어 가림으로만 판정한다
     let pressed_at = ctx
         .input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()))
         .flatten();
@@ -246,14 +242,8 @@ pub fn show_layout(
         if pane.width() <= 0.0 || pane.height() <= 0.0 {
             continue;
         }
-        if let Some(pos) = pressed_at
-            && pane.contains(pos)
-        {
+        if pressed_in_pane(ui, pressed_at, pane) {
             *active = *id;
-        }
-        // 전송 대상은 **가려지지 않은 클릭**만 센다 (FR-54) — 위 `active`와 달리 이 판정은
-        // `rect_contains_pointer`를 거쳐 팝업·모달에 덮인 자리를 걸러 낸다
-        if pressed_at.is_some() && ui.rect_contains_pointer(pane) {
             outcome.pressed_panel = Some(*id);
         }
         let Some(panel) = panels.get_mut(id) else {
@@ -338,9 +328,99 @@ pub fn show_layout(
     outcome
 }
 
+/// 이번 프레임의 누름이 그 패널을 **직접** 누른 것인가 — 활성 패널과 전송 대상(FR-54)이 함께 쓴다.
+///
+/// **좌표만 보지 않고 레이어 가림을 존중한다**(`rect_contains_pointer`). 좌표만 보면 셸 메뉴가
+/// 옆 패널 위로 뻗은 줄을 누를 때 아래 패널이 활성이 되고, `show_shell_menu`가 「보고 있는
+/// 폴더가 바뀌었다」며 떼기 전에 메뉴를 닫아 그 줄이 실행되지 않는다(2026-10-19 사용자 보고)
+fn pressed_in_pane(ui: &egui::Ui, pressed_at: Option<egui::Pos2>, pane: egui::Rect) -> bool {
+    pressed_at.is_some() && ui.rect_contains_pointer(pane)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 패널 자리(배경 레이어)를 그리고, `덮개`가 있으면 그 위에 팝업 레이어를 띄운 뒤
+    /// `pressed_in_pane`의 판정을 돌려준다
+    fn 패널_눌림(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        덮개: Option<egui::Rect>,
+        pressed_at: Option<egui::Pos2>,
+    ) -> bool {
+        let 화면 = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 400.0));
+        let pane = egui::Rect::from_min_size(egui::pos2(400.0, 0.0), egui::vec2(400.0, 400.0));
+        let mut 눌림 = false;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(화면),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    눌림 = pressed_in_pane(ui, pressed_at, pane);
+                });
+                if let Some(rect) = 덮개 {
+                    egui::Area::new(egui::Id::new("덮개"))
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(rect.min)
+                        .show(ui.ctx(), |ui| {
+                            ui.allocate_exact_size(rect.size(), egui::Sense::click());
+                        });
+                }
+            },
+        );
+        눌림
+    }
+
+    #[test]
+    fn 팝업에_가린_누름은_아래_패널을_활성으로_만들지_않는다() {
+        // 2026-10-19 사용자 보고: 분할 화면에서 셸 메뉴가 옆 패널 위로 뻗은 줄(`앱 확장` 하위
+        // 항목·`열기`)을 누르면 아무 일도 없었다. 누른 프레임에 아래 패널이 활성이 되자
+        // `show_shell_menu`가 「보고 있는 폴더가 바뀌었다」며 메뉴를 닫아, 떼는 프레임의
+        // 클릭이 갈 곳이 없었다
+        let ctx = egui::Context::default();
+        let 덮개 = egui::Rect::from_min_size(egui::pos2(380.0, 50.0), egui::vec2(200.0, 200.0));
+        let at = egui::pos2(500.0, 100.0);
+        // 앞의 두 프레임 — 팝업을 띄워 누르는 프레임의 가림 판정이 그 레이어를 알게 한다.
+        // **두 번인 것은 egui `Area`의 첫 프레임이 크기만 재고 보이지 않아서다**
+        for _ in 0..2 {
+            let _ = 패널_눌림(&ctx, vec![egui::Event::PointerMoved(at)], Some(덮개), None);
+        }
+        let 눌림 = 패널_눌림(
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            Some(덮개),
+            Some(at),
+        );
+        assert!(!눌림, "팝업 위의 누름이 아래 패널의 누름으로 세어졌다");
+    }
+
+    #[test]
+    fn 가리지_않은_누름은_그_패널을_활성으로_만든다() {
+        let ctx = egui::Context::default();
+        let at = egui::pos2(500.0, 100.0);
+        let _ = 패널_눌림(&ctx, vec![egui::Event::PointerMoved(at)], None, None);
+        let 눌림 = 패널_눌림(
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            None,
+            Some(at),
+        );
+        assert!(눌림, "패널을 직접 눌렀는데 세어지지 않았다");
+    }
 
     #[test]
     fn 사각형_변환은_왕복해도_같다() {

@@ -13,6 +13,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     CMF_NORMAL, CMINVOKECOMMANDINFO, GCS_VERBW, IContextMenu, IContextMenu2, IContextMenu3,
@@ -207,7 +208,10 @@ impl ShellMenu {
         }
     }
 
-    /// 고른 항목을 실행한다 — 실패는 셸이 자기 UI로 알린다
+    /// 고른 항목을 실행한다 — 실패는 셸이 자기 UI로 알린다.
+    ///
+    /// **실패를 디버거에도 남긴다** — 셸이 알리지 않고 실패하는 확장이 있어, 눌러도 아무 일이
+    /// 없을 때 그 원인을 가를 흔적이 이것뿐이다(2026-10-19 사용자 보고). 경로는 담지 않는다
     pub fn invoke(&self, id: u32, owner: HWND) {
         if id < ID_FIRST {
             return;
@@ -222,7 +226,13 @@ impl ShellMenu {
                 nShow: SW_SHOWNORMAL.0,
                 ..Default::default()
             };
-            let _ = self.context_menu.InvokeCommand(&info);
+            if let Err(error) = self.context_menu.InvokeCommand(&info) {
+                debug_log(&format!(
+                    "[MOA] shell menu InvokeCommand failed: offset {} hr 0x{:08X}\n",
+                    id - ID_FIRST,
+                    error.code().0
+                ));
+            }
         }
     }
 
@@ -233,6 +243,12 @@ impl ShellMenu {
         // 안전성: 이 메뉴를 채운 인터페이스가 아직 살아 있다(같은 구조체가 쥐고 있다)
         unsafe { verb_of(&self.context_menu, id) }
     }
+}
+
+/// 디버거 출력에 한 줄 남긴다 — GUI 앱이라 콘솔이 없다(`println!` 금지)
+fn debug_log(text: &str) {
+    // 안전성: 호출 동안 살아 있는 널 종료 UTF-16 문자열을 넘긴다
+    unsafe { OutputDebugStringW(&HSTRING::from(text)) };
 }
 
 impl Drop for ShellMenu {
