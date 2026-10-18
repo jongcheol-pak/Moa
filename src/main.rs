@@ -72,10 +72,12 @@ fn main() -> eframe::Result {
         }
         None => viewport = viewport.with_inner_size([1100.0, 700.0]),
     }
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport,
         ..Default::default()
     };
+    // 고주사율 마우스로 움직이는 동안에도 hover가 커서를 따라오게 한다 (`ui::paint_guard`)
+    moa::ui::paint_guard::install(&mut options);
     let result = eframe::run_native(
         "moa",
         options,

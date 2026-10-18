@@ -1337,6 +1337,7 @@ dependencies = [
  "suppaftp",
  "windows",
  "windows-core",
+ "winit",
 ]
 
 [[package]]

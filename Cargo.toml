@@ -56,6 +56,8 @@ windows = { version = "0.62.2", features = [
     # GetDpiForMonitor — 창을 만들기 전 그 모니터의 배율을 알아야 작업 영역(물리 픽셀)을
     # 논리 픽셀로 옮길 수 있다 (`ui::window_start`)
     "Win32_UI_HiDpi",
+    # RegisterRawInputDevices — 쓰지 않는 raw 마우스 입력 등록을 걷는다 (`ui::paint_guard`)
+    "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     # ITEMIDLIST(PIDL) 정의 — 셸 컨텍스트 메뉴(IContextMenu)가 요구
@@ -77,6 +79,11 @@ eframe = { version = "0.35", default-features = false, features = ["glow"] }
 egui-phosphor = "0.13"
 # eframe이 재수출하지 않아 직접 의존 — 창 HWND 추출(셸 컨텍스트 메뉴)에 필요
 raw-window-handle = "0.6"
+# 메시지 훅(`EventLoopBuilderExtWindows::with_msg_hook`)에 닿으려고 직접 의존 — eframe이
+# 재수출하지 않는다(`ui::paint_guard`). eframe이 이미 같은 버전을 링크하고 기능도 더 켜지 않아
+# 패키지 집합은 그대로다. **버전을 eframe이 쓰는 0.30에 맞춘다** — 어긋나면 훅이 받는
+# 빌더 타입이 달라 컴파일되지 않는다
+winit = { version = "0.30", default-features = false }
 
 # 정보 화면의 앱 아이콘 (FR-58) — `assets/app_icon_256.png`를 읽어 **표시할 물리 크기로
 # CPU에서 줄인 뒤** 텍스처로 올린다. GPU 선형 필터는 인접 네 텍셀만 보므로 크게 줄이면
