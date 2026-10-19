@@ -391,6 +391,45 @@ fn 폴더를_읽으면_종류_문자열은_워커가_미리_묻고_화면은_셸
     );
 }
 
+#[test]
+fn 같은_열거기로_다시_읽으면_이미_물은_확장자는_다시_묻지_않는다() {
+    // 감시 갱신·F5마다 확장자마다 셸을 다시 물으면 첫 조각이 그만큼 늦고 그동안 전역 셸
+    // 잠금을 쥔다 — 앞 열거가 이미 받아 온 확장자는 건너뛴다
+    let dir = std::env::temp_dir().join(format!("moa-ext-again-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("임시 폴더");
+    std::fs::write(dir.join("a.zzqc"), b"").expect("파일");
+    std::fs::write(dir.join("b.zzqd"), b"").expect("파일");
+    let ctx = egui::Context::default();
+    let mut load = DirLoad::new();
+
+    let drain = |load: &mut DirLoad| -> Vec<String> {
+        load.start(dir.clone(), &ctx);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while load.is_loading() && std::time::Instant::now() < deadline {
+            if load.poll().is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        assert!(!load.is_loading(), "5초 안에 열거가 끝나지 않았다");
+        let mut exts: Vec<String> = load
+            .take_ext_infos()
+            .into_iter()
+            .map(|info| info.ext)
+            .collect();
+        exts.sort();
+        exts
+    };
+    let first = drain(&mut load);
+    let second = drain(&mut load);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(first, vec!["zzqc".to_owned(), "zzqd".to_owned()]);
+    assert!(
+        second.is_empty(),
+        "이미 받은 확장자를 다시 물었다: {second:?}"
+    );
+}
+
 /// 배치 하나를 만든다 — 이름만 다른 파일 항목
 fn batch(names: &[&str]) -> Vec<crate::fs::enumerate::FileEntry> {
     names
