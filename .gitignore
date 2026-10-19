@@ -10,3 +10,9 @@
 /plan.md
 /notes.md
 /notes-archive/
+# 검증 스킬(verify-moa)만 추적한다 — 전역 ignore 가 .claude/ 를 무시해도 PR worktree 에서 보이게
+!.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/verify-moa/

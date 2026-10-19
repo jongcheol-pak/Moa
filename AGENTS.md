@@ -17,6 +17,7 @@
 - **Lint**: `cargo clippy --all-targets -- -D warnings`
 - **Format check**: `cargo fmt --check`
 - **Format**: `cargo fmt`
+- **Verify (앱 조작)**: `.claude/skills/verify-moa/` — 레포 빌드를 임시 폴더 사본으로 띄워 Karina CLI 로 조작·증거를 남긴다. 다른 MOA(설치본 포함)가 떠 있으면 띄우지 못한다(중복 실행 방지)
 - **라이선스 고지 재생성**: `cargo run --example gen_licenses` — 의존성을 더하거나 버전을 올린 뒤 반드시 돌린다. **산출물이 둘이다**: 앱이 읽는 `assets/licenses.json`과 저장소에서 보는 `THIRD-PARTY-NOTICES.md`(레포 루트). 앞의 것이 낡으면 `Cargo.lock` 지문 대조 시험이 실패한다
 - **아이콘 자산 재생성**: `cargo run --example gen_app_icon` — `docs/AppIcon.png`를 바꾼 뒤에만 돌린다. `assets/app_icon_256.png`를 덮어쓰며, 그 자산은 정보 화면(FR-58)이 읽는다
 - **설치 파일 생성**: `cargo build --release` → `cargo run --example gen_installer` — `installer/moa.nsi`를 makensis에 넘겨 `target/installer/MOA-Setup-<버전>.exe`를 만든다. **NSIS가 선행 설치돼 있어야 한다**(`winget install NSIS.NSIS`) — 없으면 그 안내와 함께 실패로 끝난다(아무것도 만들지 않고 성공으로 끝나지 않는다). **릴리즈 빌드를 건너뛰어도 같은 방식으로 멈춘다** — `target/release/moa.exe`가 `src`·`assets`·`Cargo.toml`·`Cargo.lock`·`build.rs`·`app.manifest`보다 낡으면 안내와 함께 실패한다(2026-08-21에 낡은 exe가 담긴 설치 파일이 나가 설정이 옛 자리에 생긴 적이 있다)
