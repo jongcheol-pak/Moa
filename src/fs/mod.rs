@@ -1,4 +1,5 @@
 //! 파일시스템 연동 — 열거·생성·복사·이름 바꾸기·삭제·클립보드·아이콘·썸네일·감시·셸·드래그
+pub mod atomic_write;
 pub mod bitmap;
 pub mod clipboard;
 pub mod create;

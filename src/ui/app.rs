@@ -8,7 +8,7 @@ use crate::app::layout::TreeShape;
 use crate::app::layout::{LayoutTree, PanelId, Rect as LayoutRect, SplitDir, SplitPlace};
 use crate::app::settings::{
     AppSettings, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, Session,
-    SidebarSession, WindowState, remote_refresh_secs, save_session,
+    SidebarSession, WindowState, remote_refresh_secs,
 };
 use crate::app::workspace::{WorkspaceId, WorkspaceList};
 use crate::fs::icons::IconCache;
@@ -727,6 +727,8 @@ pub struct ExplorerApp {
     update_confirm: Option<usize>,
     /// 세션이 바뀌었는지 지켜보다 곧 적는 관측기 (`app::autosave`)
     autosave: autosave::AutoSave<Session>,
+    /// 세션을 디스크에 적는 워커 (`app::session_saver`) — 저장이 UI 스레드를 기다리게 하지 않는다
+    saver: crate::app::session_saver::SessionSaver,
 }
 
 impl ExplorerApp {
@@ -885,6 +887,9 @@ impl ExplorerApp {
             update_asked_by_hand: false,
             update_confirm: None,
             autosave: autosave::AutoSave::default(),
+            saver: crate::app::session_saver::SessionSaver::spawn(
+                crate::app::settings::write_session_file,
+            ),
         };
         if let Some(session) = session {
             app.apply_session(session);
@@ -2427,7 +2432,7 @@ impl ExplorerApp {
     /// 파일이 작고 사이트 등록은 드문 일이라 그때마다 적어도 부담이 없다
     fn persist_session(&mut self) {
         let session = self.collect_session();
-        save_session(&session);
+        self.saver.save(&session);
         // 방금 적은 것을 기준으로 삼는다 — 알리지 않으면 자동 저장이 같은 내용을 한 번 더 적는다
         self.autosave.mark(session);
     }
@@ -2530,7 +2535,7 @@ impl ExplorerApp {
         if self.autosave.due(now) {
             let snapshot = self.collect_session();
             if let Some(session) = self.autosave.observe(now, snapshot) {
-                save_session(session);
+                self.saver.save(session);
             }
         }
         // 아직 적지 못한 변화가 있으면 화면을 깨워 둔다 — egui는 할 일이 없으면 프레임을
@@ -2633,7 +2638,9 @@ impl eframe::App for ExplorerApp {
         // 진행 중이던 전송을 대기로 되돌린다 — 저장된 큐가 "전송 중"이라 주장하면
         // 다음 실행의 화면이 실제로는 아무것도 돌지 않는데 진행 중으로 보인다 (T18)
         self.runner.shutdown(&mut self.queue);
-        save_session(&self.collect_session());
+        self.saver.save(&self.collect_session());
+        // 넘긴 것이 디스크에 닿을 때까지 기다린다 — 기다리지 않으면 프로세스가 먼저 끝난다
+        self.saver.finish();
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {

@@ -59,7 +59,7 @@ pub struct Session {
     /// 폴더 트리 즐겨찾기 (FR-56) — 더한 차례 그대로의 로컬 폴더 경로들.
     ///
     /// **경로가 아니라 문자열로 담는다** — `PathBuf`는 UTF-8이 아닌 경로에서 직렬화 자체가
-    /// 실패하는데 `save_session`은 그 실패를 조용히 삼켜 **세션 저장이 통째로 무산**된다.
+    /// 실패하는데 저장(`session_json`)은 그 실패를 조용히 삼켜 **세션 저장이 통째로 무산**된다.
     /// 즐겨찾기 하나 때문에 창 위치·탭까지 잃지 않으려는 것이며, 탭 경로(`TabSession.path`)도
     /// 같은 이유로 문자열이다 (plan D9).
     /// `settings`와 같이 스키마 버전을 올리지 않고 더한다 (D2)
@@ -595,19 +595,27 @@ fn settings_path() -> Option<PathBuf> {
     Some(exe.parent()?.join(FILE_NAME))
 }
 
-/// 종료 시 저장 — 디렉터리가 없으면 생성. 실패는 조용히 생략 (T4 Edge: 디스크 풀 등 —
-/// 다음 실행은 이전/기본값으로 뜬다)
-pub fn save_session(session: &Session) {
-    let Some(path) = settings_path() else {
-        return;
-    };
-    let Ok(json) = serde_json::to_string_pretty(session) else {
-        return;
-    };
+/// 세션을 파일에 적을 문자열로 바꾼다 — 사람이 열어 볼 수 있게 들여쓴 JSON이다
+pub fn session_json(session: &Session) -> Option<String> {
+    serde_json::to_string_pretty(session).ok()
+}
+
+/// 직렬화한 세션을 그 경로에 적는다 — 폴더가 없으면 만들고, **다 쓴 뒤에만** 바꿔 끼운다
+/// (`fs::atomic_write`). 쓰는 도중 끊겨도 옛 파일이 온전히 남는다
+pub fn write_session_json(path: &std::path::Path, json: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir)?;
     }
-    let _ = std::fs::write(path, json);
+    crate::fs::atomic_write::write(path, json.as_bytes())
+}
+
+/// 실행 파일 옆의 `settings.json`에 적는다 — 저장 워커(`app::session_saver`)가 부른다.
+/// 실행 파일 위치를 모르면 아무것도 하지 않는다
+pub fn write_session_file(json: &str) -> std::io::Result<()> {
+    match settings_path() {
+        Some(path) => write_session_json(&path, json),
+        None => Ok(()),
+    }
 }
 
 /// 시작 시 로드 — 없음/손상/버전 불일치/무결성 위반은 전부 None (기본 레이아웃 폴백)
@@ -828,6 +836,24 @@ mod tests {
         let json = serde_json::to_string_pretty(&s).unwrap();
         let back = parse_session(&json).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn 세션을_적으면_없는_폴더를_만들고_그대로_되읽힌다() {
+        // 저장 워커(`app::session_saver`)가 쓰는 경로 — 다 쓴 뒤에만 바꿔 끼우고 임시 파일을 남기지 않는다
+        let dir = std::env::temp_dir().join(format!("moa-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("sub").join(FILE_NAME);
+        let s = sample();
+        let json = session_json(&s).expect("직렬화");
+        write_session_json(&path, &json).expect("쓰기");
+        let text = std::fs::read_to_string(&path).expect("읽기");
+        assert_eq!(parse_session(&text), Some(s));
+        assert!(
+            !path.with_file_name("settings.json.tmp").exists(),
+            "임시 파일이 남았다"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
