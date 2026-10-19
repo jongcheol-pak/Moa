@@ -5,6 +5,7 @@
 # `build.rs`·`src/ui/app_icon.rs`·`installer/moa.nsi`가 `AppIcon.ico`를,
 # `examples/gen_app_icon.rs`가 `AppIcon.png`를 쓴다.
 /docs/*
+!/docs/conventions.md
 !/docs/AppIcon.ico
 !/docs/AppIcon.png
 /plan.md
