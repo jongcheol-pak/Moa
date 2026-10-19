@@ -190,7 +190,7 @@ impl ListRow for FileEntry {
 
     /// 널 종단 UTF-16 `..`과 곧바로 견준다 — 표시용 문자열을 만들지 않는다
     fn is_parent(&self) -> bool {
-        self.name == [b'.' as u16, b'.' as u16, 0]
+        *self.name == [b'.' as u16, b'.' as u16, 0]
     }
 
     fn is_dir(&self) -> bool {
@@ -474,7 +474,7 @@ mod tests {
         let mut v: Vec<u16> = name.encode_utf16().collect();
         v.push(0);
         FileEntry {
-            name: v,
+            name: v.into(),
             is_dir,
             size,
             modified,

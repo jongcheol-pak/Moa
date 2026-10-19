@@ -399,7 +399,7 @@ fn batch(names: &[&str]) -> Vec<crate::fs::enumerate::FileEntry> {
             let mut wide: Vec<u16> = name.encode_utf16().collect();
             wide.push(0);
             crate::fs::enumerate::FileEntry {
-                name: wide,
+                name: wide.into(),
                 is_dir: false,
                 size: 0,
                 modified: 0,

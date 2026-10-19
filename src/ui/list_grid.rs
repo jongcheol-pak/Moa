@@ -642,7 +642,7 @@ mod tests {
         let mut wide: Vec<u16> = name.encode_utf16().collect();
         wide.push(0);
         FileEntry {
-            name: wide,
+            name: wide.into(),
             is_dir,
             size: 10,
             modified: 0,

@@ -112,6 +112,12 @@ pub struct FileListView {
     all_entries: ListModel,
     /// 원본과 같은 인덱스의 종류 열 문자열 — 다시 거를 때 셸에 다시 묻지 않으려고 함께 든다
     all_type_names: Vec<String>,
+    /// 원본의 자리 번호를 **지금 정렬 기준의 차례로** 늘어놓은 순열 (`rebuild_order`가 만든다).
+    ///
+    /// 원본은 받은 순서 그대로 둔다 — 원격 목록은 서버 응답과 원본을 순서까지 견줘 「바뀐 것 없음」을
+    /// 가린다(`set_remote_entries`). 대신 이 순열을 따라 걸러 내면 필터·숨김 규칙을 바꿀 때
+    /// 다시 정렬하지 않는다(10만 항목이면 정렬이 그 비용의 대부분이다)
+    order: Vec<u32>,
 }
 
 impl Default for FileListView {
@@ -145,6 +151,7 @@ impl FileListView {
             filter: String::new(),
             all_entries: ListModel::Local(Vec::new()),
             all_type_names: Vec::new(),
+            order: Vec::new(),
         }
     }
 
@@ -218,22 +225,33 @@ impl FileListView {
         true
     }
 
-    /// 원본에서 보일 항목만 골라 목록·종류 문자열·아이콘 색인을 다시 만든다 (D1).
+    /// 원본에서 보일 항목만 **정렬 순열의 차례로** 골라 목록·종류 문자열·아이콘 색인을 다시
+    /// 만든다 (D1). 다시 정렬하지 않는다 — 차례는 순열(`order`)이 이미 쥐고 있다.
     ///
     /// 셋은 인덱스로 짝지어져 있어 **같은 순서로 함께** 만들어야 어긋나지 않는다
     fn rebuild_visible(&mut self) {
+        debug_assert_eq!(
+            self.order.len(),
+            self.all_entries.len(),
+            "order must be rebuilt whenever all_entries changes"
+        );
         // 필터는 순회 도중 바뀌지 않는다 — 소문자 접기를 여기서 한 번만 한다
         let needle = self.filter.to_lowercase();
-        fn keep_indices<R: ListRow>(rows: &[R], view: &FileListView, needle: &str) -> Vec<usize> {
-            rows.iter()
-                .enumerate()
-                .filter(|(_, row)| view.shows(*row, needle))
-                .map(|(index, _)| index)
+        fn keep_indices<R: ListRow>(
+            rows: &[R],
+            order: &[u32],
+            view: &FileListView,
+            needle: &str,
+        ) -> Vec<usize> {
+            order
+                .iter()
+                .map(|&index| index as usize)
+                .filter(|&index| rows.get(index).is_some_and(|row| view.shows(row, needle)))
                 .collect()
         }
         let keep = match &self.all_entries {
-            ListModel::Local(rows) => keep_indices(rows, self, &needle),
-            ListModel::Remote(rows) => keep_indices(rows, self, &needle),
+            ListModel::Local(rows) => keep_indices(rows, &self.order, self, &needle),
+            ListModel::Remote(rows) => keep_indices(rows, &self.order, self, &needle),
         };
         self.type_names = keep
             .iter()
@@ -248,10 +266,22 @@ impl FileListView {
                 ListModel::Remote(keep.iter().map(|&index| rows[index].clone()).collect())
             }
         };
+        (self.dir_count, self.file_count) = match &self.model {
+            ListModel::Local(rows) => count_kinds(rows),
+            ListModel::Remote(rows) => count_kinds(rows),
+        };
         self.selection.clear();
         self.anchor = None;
-        self.resort();
         self.relocate_rename();
+    }
+
+    /// 원본의 정렬 순열을 지금 정렬 기준으로 다시 만든다 — 원본이 바뀌거나 정렬 기준이 바뀔 때만 부른다
+    fn rebuild_order(&mut self) {
+        let (key, asc) = (self.sort_key, self.ascending);
+        self.order = match &self.all_entries {
+            ListModel::Local(rows) => sorted_order(rows, &self.all_type_names, key, asc),
+            ListModel::Remote(rows) => sorted_order(rows, &self.all_type_names, key, asc),
+        };
     }
 
     /// 지금 쓰는 보기 모드 — 메뉴의 현재 표시와 세션 저장에 쓴다
@@ -315,6 +345,7 @@ impl FileListView {
             .map(|e| icons.type_name(&e.extension(), e.is_dir))
             .collect();
         self.all_entries = ListModel::Local(entries);
+        self.rebuild_order();
         // 숨김·시스템·이름 필터를 여기서 한 번에 건다 (FR-13·FR-65)
         self.rebuild_visible();
         if let Some(keep) = keep {
@@ -348,6 +379,7 @@ impl FileListView {
         if let ListModel::Local(rows) = &mut self.all_entries {
             rows.extend(entries);
         }
+        self.rebuild_order();
         self.rebuild_visible();
         self.selection = self.matching_selection(&keep);
     }
@@ -389,6 +421,7 @@ impl FileListView {
         // 원본도 함께 비운다 — 두면 다음 필터 변경이 옛 폴더의 항목을 되살린다
         self.all_type_names.clear();
         self.all_entries = ListModel::Remote(Vec::new());
+        self.order.clear();
         self.selection.clear();
         self.anchor = None;
     }
@@ -424,6 +457,7 @@ impl FileListView {
             .map(|e| icons.type_name(&e.extension(), e.is_dir))
             .collect();
         self.all_entries = ListModel::Remote(entries);
+        self.rebuild_order();
         self.rebuild_visible();
         if let Some(keep) = keep {
             // 기준점(anchor)은 되살리지 않는다 — 로컬과 같은 이유다
@@ -508,23 +542,13 @@ impl FileListView {
         }
     }
 
-    /// 현재 정렬 기준으로 항목을 다시 배열한다.
+    /// 현재 정렬 기준으로 항목을 다시 배열한다 — 순열을 다시 만들고 그 차례로 다시 거른다.
     ///
-    /// 폴더/파일 판정을 먼저 하고 **같은 종류끼리만** 방향을 뒤집는다 —
-    /// `compare_rows` 반환값 전체를 뒤집으면 폴더 우선까지 뒤집힌다 (part1 D13)
+    /// 정렬로 자리가 통째로 바뀌므로 선택·기준점은 비우고, 보이는 행의 아이콘 색인도 비운다
+    /// (그리는 자리가 캐시에서 다시 채운다 — 사용자가 머리글을 누른 드문 순간의 비용이다)
     fn resort(&mut self) {
-        let (key, asc) = (self.sort_key, self.ascending);
-        let (type_names, icon_indices) = (&mut self.type_names, &mut self.icon_indices);
-        // 폴더 수는 여기서 센다 — 항목이 바뀌는 경로(`set_entries`)가 반드시 이 함수를 지나므로
-        // 집계가 목록과 어긋날 수 없다. 정렬 때마다 다시 세지만 정렬은 사용자 클릭 시에만
-        // 일어나고 비용도 이미 정렬(O(n log n))에 묻힌다
-        (self.dir_count, self.file_count) = match &mut self.model {
-            ListModel::Local(rows) => sort_rows(rows, type_names, icon_indices, key, asc),
-            ListModel::Remote(rows) => sort_rows(rows, type_names, icon_indices, key, asc),
-        };
-        // 정렬로 인덱스가 바뀌므로 선택·기준점을 유지할 수 없다
-        self.selection.clear();
-        self.anchor = None;
+        self.rebuild_order();
+        self.rebuild_visible();
     }
 
     /// 헤더 클릭 처리 — 같은 열이면 방향 토글, 다른 열이면 그 열 오름차순
@@ -860,52 +884,67 @@ fn restore_selection<R: ListRow>(rows: &[R], keep: &HashSet<Vec<u16>>) -> BTreeS
         .collect()
 }
 
-/// 정렬 — 항목·종류 문자열·아이콘 인덱스를 함께 옮겨 인덱스 짝이 어긋나지 않게 한다.
-/// 돌려주는 값은 (폴더 수, 파일 수)이며 상위 이동(`..`) 줄은 어느 쪽에도 세지 않는다
-fn sort_rows<R: ListRow>(
-    rows: &mut Vec<R>,
-    type_names: &mut Vec<String>,
-    icon_indices: &mut Vec<Option<i32>>,
+/// 두 행의 목록 차례.
+///
+/// 상위 이동(`..`)은 **어느 열로 어느 방향으로 정렬하든 맨 위**다 — 정렬 대상이 아니라
+/// 목록 밖으로 나가는 문이라, 내림차순에서 바닥으로 밀려나면 매번 찾아 내려가야 한다.
+/// 폴더 우선보다도 앞에 둔다(그것도 방향과 무관한 규칙이다 — part1 D13). 폴더/파일 판정을
+/// 먼저 하고 **같은 종류끼리만** 방향을 뒤집는다 — `compare_rows` 반환값 전체를 뒤집으면
+/// 폴더 우선까지 뒤집힌다
+fn row_order<R: ListRow>(
+    a: &R,
+    type_a: &str,
+    b: &R,
+    type_b: &str,
     key: SortKey,
     ascending: bool,
-) -> (usize, usize) {
-    let mut zipped: Vec<(R, String, Option<i32>)> = rows
-        .drain(..)
-        .zip(type_names.drain(..))
-        .zip(icon_indices.drain(..))
-        .map(|((row, type_name), icon)| (row, type_name, icon))
-        .collect();
-    zipped.sort_by(|(a, ta, _), (b, tb, _)| {
-        // 상위 이동(`..`)은 **어느 열로 어느 방향으로 정렬하든 맨 위**다 — 정렬 대상이 아니라
-        // 목록 밖으로 나가는 문이라, 내림차순에서 바닥으로 밀려나면 매번 찾아 내려가야 한다.
-        // 폴더 우선보다도 앞에 둔다(그것도 방향과 무관한 규칙이다 — part1 D13)
-        match (a.is_parent(), b.is_parent()) {
-            (true, false) => return std::cmp::Ordering::Less,
-            (false, true) => return std::cmp::Ordering::Greater,
-            _ => {}
+) -> std::cmp::Ordering {
+    match (a.is_parent(), b.is_parent()) {
+        (true, false) => return std::cmp::Ordering::Less,
+        (false, true) => return std::cmp::Ordering::Greater,
+        _ => {}
+    }
+    match (a.is_dir(), b.is_dir()) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => {
+            let ord = compare_rows(a, type_a, b, type_b, key);
+            if ascending { ord } else { ord.reverse() }
         }
-        match (a.is_dir(), b.is_dir()) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => {
-                let ord = compare_rows(a, ta, b, tb, key);
-                if ascending { ord } else { ord.reverse() }
-            }
-        }
+    }
+}
+
+/// 원본 자리 번호를 정렬 차례로 늘어놓는다 — 안정 정렬이라 같은 차례끼리는 받은 순서를 지킨다
+fn sorted_order<R: ListRow>(
+    rows: &[R],
+    type_names: &[String],
+    key: SortKey,
+    ascending: bool,
+) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..rows.len() as u32).collect();
+    order.sort_by(|&a, &b| {
+        let (a, b) = (a as usize, b as usize);
+        row_order(
+            &rows[a],
+            &type_names[a],
+            &rows[b],
+            &type_names[b],
+            key,
+            ascending,
+        )
     });
+    order
+}
+
+/// (폴더 수, 파일 수) — 상위 이동(`..`) 줄은 이 폴더에 든 것이 아니라 어느 쪽에도 세지 않는다
+fn count_kinds<R: ListRow>(rows: &[R]) -> (usize, usize) {
     let (mut dir_count, mut file_count) = (0, 0);
-    for (row, type_name, icon) in zipped {
-        // 상위 이동 줄은 세지 않는다 — 이 폴더에 실제로 든 것이 아니다
-        if !row.is_parent() {
-            if row.is_dir() {
-                dir_count += 1;
-            } else {
-                file_count += 1;
-            }
+    for row in rows.iter().filter(|row| !row.is_parent()) {
+        if row.is_dir() {
+            dir_count += 1;
+        } else {
+            file_count += 1;
         }
-        rows.push(row);
-        type_names.push(type_name);
-        icon_indices.push(icon);
     }
     (dir_count, file_count)
 }
@@ -1029,7 +1068,7 @@ mod tests {
         let mut wide: Vec<u16> = name.encode_utf16().collect();
         wide.push(0);
         FileEntry {
-            name: wide,
+            name: wide.into(),
             is_dir,
             size,
             modified,
@@ -1049,6 +1088,7 @@ mod tests {
             v.all_type_names.push(t.to_owned());
         }
         v.all_entries = ListModel::Local(entries);
+        v.rebuild_order();
         v.rebuild_visible();
         v
     }
@@ -1074,7 +1114,44 @@ mod tests {
     fn replace_rows(v: &mut FileListView, rows: Vec<FileEntry>) {
         v.all_type_names = vec![String::new(); rows.len()];
         v.all_entries = ListModel::Local(rows);
+        v.rebuild_order();
         v.rebuild_visible();
+    }
+
+    #[test]
+    fn 정렬을_바꾼_뒤_필터를_걸고_풀어도_그_정렬_순서와_개수가_맞다() {
+        // 필터는 정렬된 차례에서 걸러 내기만 한다 — 다시 정렬하지 않아도 차례와 개수가 맞아야 한다
+        let mut v = view(vec![
+            (entry("..", true, 0, 0), "폴더"),
+            (entry("b.txt", false, 30, 3), "텍스트"),
+            (entry("a.log", false, 10, 1), "로그"),
+            (entry("dir1", true, 0, 2), "폴더"),
+            (entry("c.txt", false, 20, 2), "텍스트"),
+        ]);
+        for (key, ascending, expected, filtered) in [
+            (
+                SortKey::Size,
+                false,
+                vec!["..", "dir1", "b.txt", "c.txt", "a.log"],
+                vec!["..", "b.txt", "c.txt"],
+            ),
+            (
+                SortKey::Modified,
+                true,
+                vec!["..", "dir1", "a.log", "c.txt", "b.txt"],
+                vec!["..", "c.txt", "b.txt"],
+            ),
+        ] {
+            v.set_sort(key, ascending);
+            assert_eq!(names(&v), expected, "{key:?} 정렬 차례가 다르다");
+            assert_eq!(v.counts(), (1, 3));
+            v.set_filter("txt");
+            assert_eq!(names(&v), filtered, "{key:?} 필터 뒤 차례가 다르다");
+            assert_eq!(v.counts(), (0, 2), "{key:?} 필터 뒤 개수가 낡았다");
+            v.set_filter("");
+            assert_eq!(names(&v), expected, "{key:?} 필터를 풀자 차례가 달라졌다");
+            assert_eq!(v.counts(), (1, 3), "{key:?} 필터를 푼 뒤 개수가 낡았다");
+        }
     }
 
     #[test]
@@ -1561,6 +1638,7 @@ mod tests {
             v.all_type_names.push(type_name.to_owned());
         }
         v.all_entries = ListModel::Remote(entries);
+        v.rebuild_order();
         v.rebuild_visible();
         v
     }

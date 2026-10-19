@@ -15,8 +15,11 @@ use windows::core::HSTRING;
 /// 목록 항목 — 이름은 UTF-16(널 종단) 원본 유지 (정렬 API·표시 공용, 변환 손실 없음)
 #[derive(Clone, Debug)]
 pub struct FileEntry {
-    /// 널 종단 포함 UTF-16 이름
-    pub name: Vec<u16>,
+    /// 널 종단 포함 UTF-16 이름.
+    ///
+    /// **공유 버퍼다** — 목록은 원본·보이는 목록·폴더 캐시에 같은 항목을 함께 들어, 복제가
+    /// 이름을 새로 할당하지 않고 참조 수만 올리게 한다(10만 항목 폴더의 필터 한 번이 그만큼 복제다)
+    pub name: std::sync::Arc<[u16]>,
     pub is_dir: bool,
     pub size: u64,
     /// FILETIME 원시값 (100ns 단위) — 정렬·표시 시 변환
@@ -223,7 +226,7 @@ fn push_entry(data: &WIN32_FIND_DATAW, out: &mut Vec<FileEntry>) {
     let mut name = name_slice.to_vec();
     name.push(0);
     out.push(FileEntry {
-        name,
+        name: name.into(),
         is_dir: (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0) != 0,
         size: ((data.nFileSizeHigh as u64) << 32) | data.nFileSizeLow as u64,
         modified: ((data.ftLastWriteTime.dwHighDateTime as u64) << 32)
@@ -463,7 +466,7 @@ mod tests {
             let mut v: Vec<u16> = name.encode_utf16().collect();
             v.push(0);
             FileEntry {
-                name: v,
+                name: v.into(),
                 is_dir,
                 size: 0,
                 modified: 0,

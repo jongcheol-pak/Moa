@@ -1238,7 +1238,7 @@ mod tests {
         let mut n: Vec<u16> = name.encode_utf16().collect();
         n.push(0);
         FileEntry {
-            name: n,
+            name: n.into(),
             is_dir,
             size: 0,
             modified: 0,
