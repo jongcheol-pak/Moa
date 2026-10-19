@@ -247,6 +247,11 @@ impl ListRow for crate::remote::types::RemoteEntry {
         std::borrow::Cow::Owned(wide)
     }
 
+    /// 이름과 곧바로 견준다 — 기본 구현은 이름을 복제해 견줘, 정렬 비교마다 할당이 붙는다
+    fn is_parent(&self) -> bool {
+        self.name == PARENT_ENTRY
+    }
+
     fn is_dir(&self) -> bool {
         self.is_dir
     }
@@ -303,13 +308,38 @@ pub fn compare_rows<R: ListRow + ?Sized>(
     type_b: &str,
     key: SortKey,
 ) -> std::cmp::Ordering {
+    compare_rows_keyed(
+        a,
+        &a.name_sort_key(),
+        type_a,
+        b,
+        &b.name_sort_key(),
+        type_b,
+        key,
+    )
+}
+
+/// `compare_rows`와 같은 규칙이되 **이름 키를 부르는 쪽이 미리 만들어 넘긴다**.
+///
+/// 원격 항목의 이름 키(널 종단 UTF-16)는 부를 때마다 새로 만들어진다 — 1만 항목을 정렬하면
+/// 비교 약 13만 번에 할당이 두 번씩 붙는다. 정렬하는 쪽이 행마다 한 번 만들어 두고 이것을 부른다
+#[allow(clippy::too_many_arguments)]
+pub fn compare_rows_keyed<R: ListRow + ?Sized>(
+    a: &R,
+    name_a: &[u16],
+    type_a: &str,
+    b: &R,
+    name_b: &[u16],
+    type_b: &str,
+    key: SortKey,
+) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (a.is_dir(), b.is_dir()) {
         (true, false) => return Ordering::Less,
         (false, true) => return Ordering::Greater,
         _ => {}
     }
-    let by_name = || logical_name_cmp(&a.name_sort_key(), &b.name_sort_key());
+    let by_name = || logical_name_cmp(name_a, name_b);
     match key {
         SortKey::Name => by_name(),
         SortKey::Size => a.size().cmp(&b.size()).then_with(by_name),
@@ -576,6 +606,23 @@ mod tests {
             mode: None,
             owner: None,
         }
+    }
+
+    #[test]
+    fn 원격_상위_줄은_점_둘_하나뿐이다() {
+        // `..`만 상위 이동 줄이다 — 점으로 시작하는 실제 이름은 숨김 항목일 뿐 상위 줄이 아니다
+        assert!(remote("..", true, 0, None).is_parent());
+        for name in [".git", "..a", ".", "...", "a.."] {
+            assert!(
+                !remote(name, true, 0, None).is_parent(),
+                "{name}이 상위 줄로 읽혔다"
+            );
+        }
+        assert!(
+            !remote("..", true, 0, None).is_hidden(),
+            "상위 줄이 숨김으로 걸러진다"
+        );
+        assert!(remote(".git", true, 0, None).is_hidden());
     }
 
     #[test]

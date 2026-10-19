@@ -5,7 +5,7 @@
 //! `ui::list_details`) 이 파일은 상태를 들고 그 모듈에 넘긴 뒤, 돌아온 조작을 상태에 반영한다.
 use crate::fs::enumerate::{FileEntry, FileStamp};
 use crate::fs::icons::IconCache;
-use crate::panel::file_list::{ListRow, SortKey, compare_rows};
+use crate::panel::file_list::{ListRow, SortKey, compare_rows_keyed};
 use crate::remote::types::RemoteEntry;
 use crate::ui::icon_tex::{IconTextures, ThumbnailTextures};
 use crate::ui::list_details::{self, ColumnFlags, ColumnKind, Columns, DetailsInput};
@@ -989,6 +989,21 @@ fn row_order<R: ListRow>(
     key: SortKey,
     ascending: bool,
 ) -> std::cmp::Ordering {
+    row_order_keyed(
+        (a, &a.name_sort_key(), type_a),
+        (b, &b.name_sort_key(), type_b),
+        key,
+        ascending,
+    )
+}
+
+/// `row_order`와 같은 규칙이되 이름 키를 부르는 쪽이 미리 만들어 넘긴다 — (행, 이름 키, 종류)
+fn row_order_keyed<R: ListRow>(
+    (a, name_a, type_a): (&R, &[u16], &str),
+    (b, name_b, type_b): (&R, &[u16], &str),
+    key: SortKey,
+    ascending: bool,
+) -> std::cmp::Ordering {
     match (a.is_parent(), b.is_parent()) {
         (true, false) => return std::cmp::Ordering::Less,
         (false, true) => return std::cmp::Ordering::Greater,
@@ -998,27 +1013,29 @@ fn row_order<R: ListRow>(
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
         _ => {
-            let ord = compare_rows(a, type_a, b, type_b, key);
+            let ord = compare_rows_keyed(a, name_a, type_a, b, name_b, type_b, key);
             if ascending { ord } else { ord.reverse() }
         }
     }
 }
 
-/// 원본 자리 번호를 정렬 차례로 늘어놓는다 — 안정 정렬이라 같은 차례끼리는 받은 순서를 지킨다
+/// 원본 자리 번호를 정렬 차례로 늘어놓는다 — 안정 정렬이라 같은 차례끼리는 받은 순서를 지킨다.
+///
+/// 이름 키는 행마다 **한 번만** 만든다 — 원격 항목은 키를 부를 때마다 새로 만들어, 비교마다
+/// 부르면 1만 항목 정렬에 할당이 수십만 번 붙는다(로컬은 빌려 주므로 비용이 없다)
 fn sorted_order<R: ListRow>(
     rows: &[R],
     type_names: &[String],
     key: SortKey,
     ascending: bool,
 ) -> Vec<u32> {
+    let names: Vec<std::borrow::Cow<'_, [u16]>> = rows.iter().map(ListRow::name_sort_key).collect();
     let mut order: Vec<u32> = (0..rows.len() as u32).collect();
     order.sort_by(|&a, &b| {
         let (a, b) = (a as usize, b as usize);
-        row_order(
-            &rows[a],
-            &type_names[a],
-            &rows[b],
-            &type_names[b],
+        row_order_keyed(
+            (&rows[a], &names[a], &type_names[a]),
+            (&rows[b], &names[b], &type_names[b]),
             key,
             ascending,
         )

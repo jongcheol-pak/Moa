@@ -1164,10 +1164,18 @@ pub(super) fn list_target(
 
 /// 트리에 보일 차례로 줄을 세운다 — **목록과 같은 규칙**이라야 화면이 두 벌로 갈리지 않는다.
 /// (`remote::tree_cache`는 `panel`을 모르므로 정렬은 이쪽에서 맞춰 넘긴다)
-pub(super) fn sort_tree_children(entries: &mut [crate::remote::types::RemoteEntry]) {
-    entries.sort_by(|a, b| {
-        crate::panel::file_list::compare_rows(a, "", b, "", crate::panel::file_list::SortKey::Name)
+///
+/// 이름 키는 줄마다 한 번만 만든다 — 원격 이름은 키를 부를 때마다 새로 변환된다
+pub(super) fn sort_tree_children(entries: &mut Vec<crate::remote::types::RemoteEntry>) {
+    use crate::panel::file_list::{ListRow, SortKey, compare_rows_keyed};
+    let mut keyed: Vec<(Vec<u16>, crate::remote::types::RemoteEntry)> = std::mem::take(entries)
+        .into_iter()
+        .map(|entry| (entry.name_sort_key().into_owned(), entry))
+        .collect();
+    keyed.sort_by(|(name_a, a), (name_b, b)| {
+        compare_rows_keyed(a, name_a, "", b, name_b, "", SortKey::Name)
     });
+    entries.extend(keyed.into_iter().map(|(_, entry)| entry));
 }
 
 /// 상태 줄에 남길 실패 문장 — 사용자가 시키지 않은 작업(`Cwd`·`Disconnect`)은 알리지 않는다
