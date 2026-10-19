@@ -25,6 +25,9 @@ use crate::remote::types::SiteId;
 /// 받는 중인 파일에 붙는 꼬리 (Acceptance ⑤)
 const PART_SUFFIX: &str = ".part";
 
+/// 못 지운 `.part`를 다시 지워 볼 간격(초) — `start_ready`의 재시도에만 건다
+const SWEEP_RETRY_SECS: f64 = 2.0;
+
 /// 이 단계의 연결에 전송을 맡겨도 되는가 (사용자 보고 2026-09-17).
 ///
 /// **막는 것은 둘뿐이다** — 끊기거나 실패한 연결(`Failed`)과 접힌 연결(`Closed`). 그 둘은
@@ -186,8 +189,13 @@ pub struct TransferRunner {
     /// 지운다(연결이 사라졌다는 것은 파일도 이미 놓였다는 뜻이다)
     cancelling: HashMap<TransferId, (ConnectionId, PathBuf)>,
     /// 지울 차례가 됐지만 아직 못 지운 `.part`들 — 백신 검사·핸들 지연으로 한 번에 실패할 수 있어
-    /// 매 `start_ready`마다 다시 시도한다. 조용히 삼키면 받다 만 파일이 영영 남는다
+    /// `start_ready`가 간격을 두고 다시 시도한다. 조용히 삼키면 받다 만 파일이 영영 남는다
     pending_delete: Vec<PathBuf>,
+    /// `start_ready`가 못 지운 `.part`를 다시 지워 볼 시각(초) — 그 전에는 건드리지 않는다.
+    ///
+    /// `start_ready`는 매 프레임 불려, 간격이 없으면 남은 파일 하나 때문에 UI 스레드가 프레임마다
+    /// 파일시스템을 묻는다(네트워크 드라이브면 그때마다 멎는다)
+    next_sweep_at: f64,
     /// 전송이 실패했을 때 자동으로 다시 걸어 볼 횟수 (FR-37) — 설정이 정본이며 앱이 민다.
     ///
     /// **인자가 아니라 필드로 드는 이유**: 이 값이 필요한 자리는 `on_done` 하나인데 그것을
@@ -229,10 +237,11 @@ impl TransferRunner {
         sites: &SiteStore,
         now: f64,
     ) {
-        // 지우지 못한 `.part`가 있을 때만 다시 시도한다 — 이 자리는 매 프레임 불리므로
-        // 목록이 비었으면 파일시스템을 건드리지 않는다 (AGENTS: UI 스레드 블로킹 I/O)
-        if !self.pending_delete.is_empty() {
+        // 지우지 못한 `.part`가 있을 때만, 간격을 두고 다시 시도한다 — 이 자리는 매 프레임
+        // 불리므로 그 밖에는 파일시스템을 건드리지 않는다 (AGENTS: UI 스레드 블로킹 I/O)
+        if !self.pending_delete.is_empty() && now >= self.next_sweep_at {
             self.sweep_pending_delete();
+            self.next_sweep_at = now + SWEEP_RETRY_SECS;
         }
         if queue.is_paused() {
             return;
@@ -1450,8 +1459,42 @@ mod tests {
         }
         drop(handle);
 
-        runner.start_ready(&mut queue, &manager, &sites, 1.0);
+        // 재시도는 간격(`SWEEP_RETRY_SECS`)을 둔다 — 그 뒤의 기회에 치워져야 한다
+        runner.start_ready(&mut queue, &manager, &sites, 3.0);
         assert!(!part.exists(), "놓아준 뒤에도 치우지 못했다");
+        assert_eq!(runner.pending_cleanup(), 0);
+    }
+
+    #[test]
+    fn 지우지_못한_조각은_매_프레임이_아니라_간격을_두고_다시_치운다() {
+        // `start_ready`는 매 프레임 불린다 — 못 지운 것이 남을 때마다 UI 스레드가 프레임마다
+        // 파일시스템을 다시 묻지 않게 한다(네트워크 드라이브면 그때마다 멎는다)
+        use std::os::windows::fs::OpenOptionsExt;
+        let mut runner = TransferRunner::new();
+        let mut queue = TransferQueue::new();
+        let sites = SiteStore::new();
+        let manager = ConnectionManager::new(Arc::new(|| {}));
+        let local = temp_file("retry_interval");
+        let part = part_path(&local);
+        std::fs::write(&part, vec![0u8; 16]).expect("부분 파일");
+
+        // 공유를 하나도 허용하지 않고 열어 두면 지우기가 반드시 실패한다
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&part)
+            .expect("독점 열기");
+        runner.pending_delete.push(part.clone());
+        runner.start_ready(&mut queue, &manager, &sites, 0.0);
+        assert!(part.exists(), "독점으로 연 파일이 지워졌다");
+        drop(handle);
+
+        runner.start_ready(&mut queue, &manager, &sites, 1.0);
+        assert!(part.exists(), "간격 안에서 다시 지우려 했다");
+        assert_eq!(runner.pending_cleanup(), 1);
+
+        runner.start_ready(&mut queue, &manager, &sites, 2.5);
+        assert!(!part.exists(), "간격이 지났는데 다시 치우지 않았다");
         assert_eq!(runner.pending_cleanup(), 0);
     }
 
