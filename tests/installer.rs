@@ -143,6 +143,15 @@ fn 제거는_자동_실행과_설정_처리를_모두_담는다() {
         (r#"Delete "$INSTDIR\uninstall.exe""#, "언인스톨러 삭제"),
         (r#"Delete "$INSTDIR\settings.json""#, "설정 파일 삭제"),
         (r#"Delete "$INSTDIR\known_hosts.json""#, "지문 파일 삭제"),
+        // 저장 도중 끊기면 남는 임시 파일(`fs::atomic_write`) — 남으면 비재귀 RMDir이 실패한다
+        (
+            r#"Delete "$INSTDIR\settings.json.tmp""#,
+            "설정 임시 파일 삭제",
+        ),
+        (
+            r#"Delete "$INSTDIR\known_hosts.json.tmp""#,
+            "지문 임시 파일 삭제",
+        ),
     ] {
         assert_has(제거, needle, 요구);
     }

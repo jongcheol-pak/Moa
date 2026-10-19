@@ -251,6 +251,9 @@ Section "Uninstall"
   Delete "$INSTDIR\THIRD-PARTY-NOTICES.md"
   Delete "$INSTDIR\settings.json"
   Delete "$INSTDIR\known_hosts.json"
+  ; 저장 도중 끊기면 남는 임시 파일 — 둘은 다 쓴 뒤에만 바꿔 끼워 저장된다(fs::atomic_write)
+  Delete "$INSTDIR\settings.json.tmp"
+  Delete "$INSTDIR\known_hosts.json.tmp"
   Delete "$INSTDIR\uninstall.exe"
   ; 자동 업데이트가 받아 둔 것 (FR-62) — 앱이 뜰 때마다 치우지만 받는 도중에 제거하면
   ; 남아 있을 수 있다. **이 폴더가 남으면 아래 비재귀 RMDir이 실패해 설치 폴더가 통째로

@@ -94,7 +94,8 @@ impl KnownHosts {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(path, json);
+        // 다 쓴 뒤에만 바꿔 끼운다 — 쓰다 끊겨 잘리면 받아들인 지문이 전부 사라진다
+        let _ = crate::fs::atomic_write::write(&path, json.as_bytes());
     }
 
     #[cfg(test)]

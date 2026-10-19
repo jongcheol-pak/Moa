@@ -352,35 +352,29 @@ fn hidden_label(label: &str) -> bool {
         .any(|(ko, en)| same_label(label, ko) || same_label(label, en))
 }
 
-/// 셸이 준 목록을 **탐색기 모양의 상위 목록과 세 묶음**으로 가른다 (FR-8 재개정).
-///
-/// 돌려주는 것은 [`Arranged`]다 — 상위 목록과 `앱 확장`·`다음으로 압축`·`압축 풀기` 셋이다.
-/// **확장 묶음만 셸이 준 원래 자리를 함께 든다** — 그 자리로 아이콘을 찾기 때문이다
-/// (`MenuIcons::subset`). 압축·해제 묶음은 그 묶음만으로 캐시를 다시 올린다(D14).
-///
-/// 구분선은 여기서 새로 세운다 — 셸이 준 자리는 원래 구성에 맞춰진 것이라 재정렬 뒤에는
-/// 뜻이 없다. 탐색기처럼 **표준 묶음 / `앱 확장` / 마지막 줄** 사이에만 긋는다.
-///
-/// **`ShellMenu`가 아니라 verb 조회 함수를 받는다** — 그 타입은 COM 핸들이라 시험에서
-/// 세울 수 없고, 그러면 이 함수의 본체(자리 계산·재정렬·확장 0건 분기)를 검증할 길이
-/// 사라진다. 조회만 떼어 내면 나머지는 순수 셈이라 그대로 시험할 수 있다
 /// 업로드 하위 메뉴에서 고른 것을 **전송 요청으로 바꾼다** (FR-8·FR-38).
 ///
 /// 조립만 하고 보내지는 않는다 — `ExplorerApp`(COM에 매여 시험에서 세울 수 없다) 없이도
 /// 「어느 탭의 어느 폴더로, 무엇을」이 맞는지 확인할 수 있어야 하기 때문이다
 /// (`upload_target_of`를 뽑은 것과 같은 이유).
 ///
+/// 폴더 여부는 `items_dirs`(목록이 열거할 때 쥔 값 — `MenuRequest::dirs`)를 쓴다. 여기서
+/// 디스크에 물으면 UI 스레드가 항목 수만큼 파일시스템을 기다린다(느린 네트워크 드라이브).
+/// 값이 모자란 항목은 파일로 본다.
+///
 /// 대상이 없거나(그 사이 탭이 닫혔다) 올릴 것이 없으면 `None` — 부르는 쪽은 아무 일도 하지 않는다
 fn upload_drop_outcome(
     target: Option<&super::UploadTarget>,
     items_paths: &[std::path::PathBuf],
+    items_dirs: &[bool],
 ) -> Option<DropOutcome> {
     let target = target?;
     let items: Vec<DragItem> = items_paths
         .iter()
-        .map(|path| DragItem::Local {
+        .enumerate()
+        .map(|(index, path)| DragItem::Local {
             path: path.clone(),
-            is_dir: path.is_dir(),
+            is_dir: items_dirs.get(index).copied().unwrap_or(false),
         })
         .collect();
     if items.is_empty() {
@@ -396,6 +390,18 @@ fn upload_drop_outcome(
     })
 }
 
+/// 셸이 준 목록을 **탐색기 모양의 상위 목록과 세 묶음**으로 가른다 (FR-8 재개정).
+///
+/// 돌려주는 것은 [`Arranged`]다 — 상위 목록과 `앱 확장`·`다음으로 압축`·`압축 풀기` 셋이다.
+/// **확장 묶음만 셸이 준 원래 자리를 함께 든다** — 그 자리로 아이콘을 찾기 때문이다
+/// (`MenuIcons::subset`). 압축·해제 묶음은 그 묶음만으로 캐시를 다시 올린다(D14).
+///
+/// 구분선은 여기서 새로 세운다 — 셸이 준 자리는 원래 구성에 맞춰진 것이라 재정렬 뒤에는
+/// 뜻이 없다. 탐색기처럼 **표준 묶음 / `앱 확장` / 마지막 줄** 사이에만 긋는다.
+///
+/// **`ShellMenu`가 아니라 verb 조회 함수를 받는다** — 그 타입은 COM 핸들이라 시험에서
+/// 세울 수 없고, 그러면 이 함수의 본체(자리 계산·재정렬·확장 0건 분기)를 검증할 길이
+/// 사라진다. 조회만 떼어 내면 나머지는 순수 셈이라 그대로 시험할 수 있다
 fn arrange(
     items: &[crate::fs::shell_menu::ShellMenuItem],
     verb_of: impl Fn(u32) -> Option<String>,
@@ -579,6 +585,8 @@ pub(super) struct OpenShellMenu {
     /// 이 메뉴가 대상으로 삼은 폴더와 항목들 — 마지막 줄이 그대로 다시 쓴다
     folder: std::path::PathBuf,
     items_paths: Vec<std::path::PathBuf>,
+    /// `items_paths`와 같은 차례로 그 항목이 폴더인가 — `업로드`가 디스크에 묻지 않고 쓴다
+    items_dirs: Vec<bool>,
     /// 업로드 하위 메뉴에 세울 원격 탭들 (2026-08-28).
     ///
     /// **메뉴를 열 때 한 번 굳힌다** — 매 프레임 다시 모으면 탭 목록을 프레임마다 훑고,
@@ -1200,6 +1208,7 @@ impl ExplorerApp {
                 can_rename: true,
             },
             items_paths: request.items,
+            items_dirs: request.dirs,
             favorite,
             just_opened: true,
         });
@@ -1437,8 +1446,11 @@ impl ExplorerApp {
                 let Some(open) = self.shell_menu.take() else {
                     return;
                 };
-                let Some(drop) = upload_drop_outcome(open.uploads.get(index), &open.items_paths)
-                else {
+                let Some(drop) = upload_drop_outcome(
+                    open.uploads.get(index),
+                    &open.items_paths,
+                    &open.items_dirs,
+                ) else {
                     return;
                 };
                 // **끌어다 놓기와 같은 앞문으로 보낸다** (FR-38) — 폴더를 훑는 것도, 같은 이름
@@ -2143,10 +2155,22 @@ mod tests {
             dir: RemotePath::new("/pub/htdocs"),
             label: "웹서버 › htdocs".to_owned(),
         };
-        let 고른것 = vec![PathBuf::from(r"C:\보고서.txt"), PathBuf::from(r"C:\자료")];
+        // 실재하지 않는 경로다 — 폴더 여부는 디스크에 묻지 않고 목록이 준 값을 그대로 써야 한다
+        let 고른것 = vec![
+            PathBuf::from(r"C:\없는곳-moa\보고서.txt"),
+            PathBuf::from(r"C:\없는곳-moa\자료"),
+        ];
+        let 폴더인가 = [false, true];
 
-        let drop = upload_drop_outcome(Some(&target), &고른것).expect("요청이 만들어져야 한다");
+        let drop =
+            upload_drop_outcome(Some(&target), &고른것, &폴더인가).expect("요청이 만들어져야 한다");
         assert_eq!(drop.items.len(), 2, "고른 것이 모두 담겨야 한다");
+        let dirs: Vec<bool> = drop
+            .items
+            .iter()
+            .map(|item| matches!(item, DragItem::Local { is_dir: true, .. }))
+            .collect();
+        assert_eq!(dirs, vec![false, true], "목록이 준 폴더 여부를 쓰지 않았다");
         assert_eq!(drop.source_site, None, "로컬에서 나가는 전송이다");
         match drop.target {
             DropTarget::Remote { site, dir } => {
@@ -2167,9 +2191,9 @@ mod tests {
         );
 
         // 대상이 없으면(그 사이 탭이 닫혔다) 아무 일도 하지 않는다
-        assert_eq!(upload_drop_outcome(None, &고른것), None);
+        assert_eq!(upload_drop_outcome(None, &고른것, &폴더인가), None);
         // 올릴 것이 없어도 마찬가지다
-        assert_eq!(upload_drop_outcome(Some(&target), &[]), None);
+        assert_eq!(upload_drop_outcome(Some(&target), &[], &[]), None);
     }
 
     #[test]

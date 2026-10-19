@@ -28,6 +28,12 @@ pub(super) struct DirLoad {
     pending: Option<Receiver<(u64, EnumChunk, Vec<ExtInfo>)>>,
     /// 워커가 조각과 함께 보낸 확장자 정보 — 반영 전에 UI 캐시로 옮긴다(`take_ext_infos`)
     ext_infos: Vec<ExtInfo>,
+    /// 지금까지 **실제로 받은** 확장자 — 다음 워커가 이것을 다시 셸에 묻지 않는다.
+    ///
+    /// 워커 안에서 물은 것이 아니라 채널로 받은 것만 센다 — 받기 전에 버려진 몫(폴더를 연달아
+    /// 옮김)까지 세면 그 확장자가 UI 캐시에 영영 들어가지 않아 화면 쪽 동기 조회로 떨어진다.
+    /// 앱의 `IconCache`는 확장자 항목을 지우지 않으므로 받은 것은 계속 캐시에 있다
+    known_exts: HashSet<String>,
 }
 
 impl DirLoad {
@@ -36,6 +42,7 @@ impl DirLoad {
             generation: 0,
             pending: None,
             ext_infos: Vec::new(),
+            known_exts: HashSet::new(),
         }
     }
 
@@ -58,11 +65,12 @@ impl DirLoad {
         let (tx, rx) = channel();
         self.pending = Some(rx);
         let ctx = ctx.clone();
+        let known = self.known_exts.clone();
         std::thread::spawn(move || {
             // 셸 조회(`lookup_ext`)는 COM을 쓴다 — `fs::drives` 워커와 같은 이유로 초기화한다.
             // 안전성: 이 스레드에서 열고 열거가 끝난 뒤 짝을 맞춰 닫는다
             let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
-            let mut seen: HashSet<String> = HashSet::new();
+            let mut seen: HashSet<String> = known;
             // 임시 계측 (`crate::perf`) — **경로는 싣지 않고 개수와 소요만** 남긴다.
             // 배치로 나뉘므로 **합계와 배치 횟수를 함께** 적는다(첫 화면이 언제 섰는지 읽히도록)
             let t_enum = std::time::Instant::now();
@@ -118,6 +126,8 @@ impl DirLoad {
             Ok((generation, chunk, infos)) => {
                 // 확장자 정보는 세대와 무관하게 받는다 — 폴더가 아니라 확장자에 매인 값이라
                 // 늦게 온 이전 폴더의 것도 틀리지 않는다
+                self.known_exts
+                    .extend(infos.iter().map(|info| info.ext.clone()));
                 self.ext_infos.extend(infos);
                 if matches!(chunk, EnumChunk::Done(_)) {
                     self.pending = None;

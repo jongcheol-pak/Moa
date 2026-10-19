@@ -304,6 +304,13 @@ pub struct PanelState {
     /// 참이면 완료 조각(`Done`)은 목록을 갈아 끼우지 않고 **잔여분만 이어 붙이고**,
     /// 실패로 끝나도 이미 그린 것을 지우지 않는다. 커밋 시점도 첫 조각으로 앞당겨진다
     streamed: bool,
+    /// **그려 둔 폴더를 다시 읽는 동안** 모은 중간 조각 — 그 열거가 아니면 `None`.
+    ///
+    /// 감시 갱신·F5로 같은 폴더를 다시 읽을 때 첫 조각으로 갈아 끼우면 목록이 조각 크기로
+    /// 줄었다가 다시 늘고, 선택은 첫 조각 안에서만 되살아나 뒤쪽 항목의 선택이 사라진다.
+    /// 그래서 다 읽을 때까지 그려 둔 것을 두고 완료 조각에서 한 번에 갈아 끼운다
+    /// (`set_entries`가 같은 폴더면 이름으로 선택을 되살린다)
+    reload_buffer: Option<Vec<FileEntry>>,
     /// 캐시로 먼저 옮겨 둔 상태 — 되돌릴 것이 없으면 `None` (FR-68)
     optimistic: Option<OptimisticNav>,
     /// 열거 실패 사유 — 성공 시 빈 문자열
@@ -410,6 +417,7 @@ impl PanelState {
             pending_dir: PathBuf::new(),
             pending_nav: PendingNav::None,
             streamed: false,
+            reload_buffer: None,
             optimistic: None,
             status: String::new(),
             observed_drive: None,
@@ -621,6 +629,7 @@ impl PanelState {
         self.pending_dir = path.clone();
         self.pending_nav = nav;
         self.streamed = false;
+        self.reload_buffer = None;
         // 새 요청이 서므로 앞선 낙관적 이동은 되돌릴 대상이 아니다 (FR-68 — 해제 3지점 중 하나)
         self.optimistic = None;
         self.status.clear();
@@ -780,6 +789,14 @@ impl PanelState {
             optimistic.buffered.extend(entries);
             return;
         }
+        if let Some(buffer) = self.reload_buffer.as_mut() {
+            buffer.extend(entries);
+            return;
+        }
+        if !self.streamed && self.list.entries().is_some() && self.list.dir() == self.pending_dir {
+            self.reload_buffer = Some(entries);
+            return;
+        }
         if self.streamed {
             self.list.append_entries(entries, icons);
             return;
@@ -870,6 +887,12 @@ impl PanelState {
                         let entries = with_local_parent_first(&dir, all);
                         self.list.set_entries(dir.clone(), entries, icons);
                     }
+                    _ if self.reload_buffer.is_some() => {
+                        let mut all = self.reload_buffer.take().unwrap_or_default();
+                        all.extend(entries);
+                        let entries = with_local_parent_first(&dir, all);
+                        self.list.set_entries(dir.clone(), entries, icons);
+                    }
                     _ if self.streamed => {
                         // 배치로 그린 목록에 **잔여분만** 이어 붙인다 — `..` 줄은 첫 조각이 이미 세웠다
                         self.list.append_entries(entries, icons);
@@ -922,6 +945,7 @@ impl PanelState {
         // 남겨 두면 다음 탐색이 시작되기 전까지 참으로 남아, 그 사이에 이 값을 보는 코드가
         // 생기면 「아직 흘리는 중」으로 오판한다
         self.streamed = false;
+        self.reload_buffer = None;
         // 낙관적 이동도 이 결과로 매듭지어졌다 — 남겨 두면 **무관한 폴더의** `NotFound`가
         // 옛 스냅샷으로 히스토리를 되감는다 (해제 3지점 중 마지막)
         self.optimistic = None;
@@ -1310,6 +1334,7 @@ impl PanelState {
         self.pending_dir = PathBuf::new();
         self.pending_nav = PendingNav::None;
         self.streamed = false;
+        self.reload_buffer = None;
         self.optimistic = None;
         self.status.clear();
     }
