@@ -433,10 +433,14 @@ impl TransferQueue {
 
     /// 필터에 걸리는 항목들 — 화면이 그대로 그린다
     pub fn filter(&self, filter: QueueFilter) -> Vec<&TransferItem> {
+        self.iter_filter(filter).collect()
+    }
+
+    /// 필터에 걸리는 항목들을 모으지 않고 차례로 준다 — 다른 조건을 더 걸어 한 번에 모으는 쪽이 쓴다
+    pub fn iter_filter(&self, filter: QueueFilter) -> impl Iterator<Item = &TransferItem> {
         self.items
             .iter()
-            .filter(|item| filter.matches(&item.state))
-            .collect()
+            .filter(move |item| filter.matches(&item.state))
     }
 
     /// 그 사이트의 항목들 — 등록 순서 그대로다.

@@ -463,9 +463,10 @@ pub fn visible_items(
     filter: QueueFilter,
     site: Option<SiteId>,
 ) -> Vec<&TransferItem> {
+    // 큐를 한 번만 훑어 모은다 — 매 프레임 불리는 자리라 상태로 한 번 모은 뒤 사이트로 다시
+    // 모으면 1만 건 큐에서 벡터 둘을 프레임마다 만든다
     queue
-        .filter(filter)
-        .into_iter()
+        .iter_filter(filter)
         .filter(|item| site.is_none_or(|site| item.site == site))
         .collect()
 }
@@ -514,15 +515,24 @@ pub fn select_rows(
 /// 보이는 목록에 없는 번호를 걷어낸다 — 지워지거나 걸러진 항목이 선택에 남지 않게 한다.
 ///
 /// **되살리지 않는다** — 파일 목록은 갱신 뒤 이름으로 선택을 복원하지만(`matching_selection`),
-/// 큐는 번호가 안정적이라 사라진 것은 정말 사라진 것이다
+/// 큐는 번호가 안정적이라 사라진 것은 정말 사라진 것이다.
+///
+/// 매 프레임 불린다 — 고른 것이 없으면 아무것도 만들지 않고, 있으면 보이는 항목을 한 번 훑어
+/// **고른 것만** 남긴다(보이는 번호 전부로 집합을 만들면 1만 건 큐에서 프레임마다 그만큼 할당한다)
 pub fn prune_selection(
     selection: &HashSet<TransferId>,
     anchor: Option<TransferId>,
     items: &[&TransferItem],
 ) -> (HashSet<TransferId>, Option<TransferId>) {
-    let alive: HashSet<TransferId> = items.iter().map(|item| item.id).collect();
-    let kept = selection.intersection(&alive).copied().collect();
-    let anchor = anchor.filter(|id| alive.contains(id));
+    if selection.is_empty() && anchor.is_none() {
+        return (HashSet::new(), None);
+    }
+    let kept: HashSet<TransferId> = items
+        .iter()
+        .map(|item| item.id)
+        .filter(|id| selection.contains(id))
+        .collect();
+    let anchor = anchor.filter(|id| items.iter().any(|item| item.id == *id));
     (kept, anchor)
 }
 
