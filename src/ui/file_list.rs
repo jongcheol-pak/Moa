@@ -692,6 +692,13 @@ impl FileListView {
         self.rename.is_some()
     }
 
+    /// 그 자리의 행을 Ctrl+클릭처럼 고른다 — **시험 전용**이다(위 `is_renaming`과 같은 관례).
+    /// 패널 시험이 「갱신 뒤에도 선택이 남는가」를 재려면 목록 밖에서 선택을 세울 창구가 필요하다
+    #[cfg(test)]
+    pub(crate) fn toggle_select(&mut self, index: usize) {
+        self.select(index, egui::Modifiers::CTRL);
+    }
+
     /// 편집을 접는다 — 고친 글자는 버린다 (탭·패널 전환 등)
     pub fn cancel_rename(&mut self) {
         self.rename = None;

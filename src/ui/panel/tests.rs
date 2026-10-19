@@ -484,6 +484,75 @@ fn 조각이_없었으면_완료_조각이_종전대로_목록을_갈아_끼운�
     assert_eq!(panel.list.len(), 3, "`..` + 항목 둘이어야 한다");
 }
 
+/// `C:\Docs`를 `a.txt`·`b.txt`·`z.txt`로 다 읽어 그려 둔 패널 — 같은 폴더 재열거 시험의 출발점
+fn docs_panel(icons: &mut IconCache) -> PanelState {
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\Users"));
+    panel.pending_dir = std::path::PathBuf::from(r"C:\Docs");
+    panel.pending_nav = PendingNav::None;
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["a.txt", "b.txt", "z.txt"])),
+        icons,
+        &mut crate::panel::dir_cache::DirCache::new(),
+        &egui::Context::default(),
+    );
+    assert_eq!(panel.list.len(), 4, "`..` + 항목 셋이어야 한다");
+    panel
+}
+
+#[test]
+fn 같은_폴더를_다시_읽으면_첫_조각이_목록을_줄이지_않는다() {
+    // 감시 갱신·F5로 같은 폴더를 다시 읽을 때 첫 조각으로 갈아 끼우면 목록이 2000개로
+    // 줄었다가 다시 늘고 스크롤이 위로 튄다 — 다 읽을 때까지 그려 둔 것을 지킨다
+    let mut icons = IconCache::new();
+    let mut panel = docs_panel(&mut icons);
+    panel.pending_dir = std::path::PathBuf::from(r"C:\Docs");
+
+    panel.apply_partial(batch(&["a.txt"]), &mut icons);
+    assert_eq!(panel.list.len(), 4, "첫 조각이 그려 둔 목록을 줄였다");
+}
+
+#[test]
+fn 같은_폴더를_다시_읽어도_뒤쪽_조각의_선택이_남는다() {
+    // 첫 조각만으로 선택을 되살리면 그 조각에 없는 항목의 선택이 영영 풀린다
+    let mut icons = IconCache::new();
+    let mut panel = docs_panel(&mut icons);
+    // 정렬 뒤 차례는 `..`, a, b, z — z는 3번이다
+    panel.list.toggle_select(3);
+    assert_eq!(
+        panel.list.selected_paths(),
+        vec![std::path::PathBuf::from(r"C:\Docs\z.txt")]
+    );
+
+    panel.pending_dir = std::path::PathBuf::from(r"C:\Docs");
+    panel.apply_partial(batch(&["a.txt"]), &mut icons);
+    panel.apply_partial(batch(&["b.txt"]), &mut icons);
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["z.txt"])),
+        &mut icons,
+        &mut crate::panel::dir_cache::DirCache::new(),
+        &egui::Context::default(),
+    );
+    assert_eq!(panel.list.len(), 4, "다 읽은 뒤 항목이 모자라거나 겹쳤다");
+    assert_eq!(
+        panel.list.selected_paths(),
+        vec![std::path::PathBuf::from(r"C:\Docs\z.txt")],
+        "뒤쪽 조각에 든 항목의 선택이 사라졌다"
+    );
+}
+
+#[test]
+fn 다른_폴더로_가는_열거는_첫_조각부터_그린다() {
+    // 음성 짝 — 버퍼링은 같은 폴더 재열거에만 건다. 새 폴더는 종전대로 점진 표시다(FR-69)
+    let mut icons = IconCache::new();
+    let mut panel = docs_panel(&mut icons);
+    panel.pending_dir = std::path::PathBuf::from(r"C:\Other");
+    panel.pending_nav = PendingNav::Push;
+
+    panel.apply_partial(batch(&["x.txt"]), &mut icons);
+    assert_eq!(panel.dir(), std::path::Path::new(r"C:\Other"));
+    assert_eq!(panel.list.len(), 2, "새 폴더의 첫 조각이 그려지지 않았다");
+}
+
 /// 캐시 적중 시험 한 벌 — 목록 캐시·아이콘 캐시·컨텍스트를 함께 세운다
 fn cache_fixture() -> (egui::Context, IconCache, crate::panel::dir_cache::DirCache) {
     (
