@@ -1315,20 +1315,26 @@ mod tests {
             entry("Epsilon.md", false, 20, 3),
             entry("eta.txt", false, 30, 6),
             entry("omega", false, 0, 5),
+            // 숨김 속성 — 숨김을 끄면 빠져야 한다
+            FileEntry {
+                attributes: 2,
+                ..entry("hidden.txt", false, 7, 5)
+            },
         ]
     }
 
-    /// 앞 셋을 `set_entries`로, 나머지를 둘·셋씩 `append_entries`로 넣은 목록
+    /// 앞 셋을 `set_entries`로, 나머지를 둘씩 `append_entries`로 넣은 목록
     fn appended(
         icons: &mut IconCache,
         key: SortKey,
         ascending: bool,
-        filter: &str,
+        (filter, show_hidden): (&str, bool),
     ) -> FileListView {
         let mut all = mixed_entries();
         let rest = all.split_off(3);
         let mut v = FileListView::new();
         v.set_sort(key, ascending);
+        v.set_hidden_rules(show_hidden, false);
         v.set_filter(filter);
         v.set_entries(PathBuf::from(r"C:\섞임"), all, icons);
         let mut rest = rest.into_iter().peekable();
@@ -1340,9 +1346,15 @@ mod tests {
     }
 
     /// 같은 항목을 한 번에 넣은 목록
-    fn at_once(icons: &mut IconCache, key: SortKey, ascending: bool, filter: &str) -> FileListView {
+    fn at_once(
+        icons: &mut IconCache,
+        key: SortKey,
+        ascending: bool,
+        (filter, show_hidden): (&str, bool),
+    ) -> FileListView {
         let mut v = FileListView::new();
         v.set_sort(key, ascending);
+        v.set_hidden_rules(show_hidden, false);
         v.set_filter(filter);
         v.set_entries(PathBuf::from(r"C:\섞임"), mixed_entries(), icons);
         v
@@ -1360,9 +1372,14 @@ mod tests {
         let mut icons = IconCache::new();
         for key in ALL_SORTS {
             for ascending in [true, false] {
-                for filter in ["", "a"] {
-                    let a = appended(&mut icons, key, ascending, filter);
-                    let b = at_once(&mut icons, key, ascending, filter);
+                for (filter, hidden) in [("", true), ("a", true), ("", false), ("t", false)] {
+                    let a = appended(&mut icons, key, ascending, (filter, hidden));
+                    let b = at_once(&mut icons, key, ascending, (filter, hidden));
+                    assert_eq!(
+                        names(&a).iter().any(|name| name == "hidden.txt"),
+                        hidden && filter.is_empty(),
+                        "숨김 규칙이 이어 붙인 몫에 걸리지 않았다"
+                    );
                     assert_eq!(
                         names(&a),
                         names(&b),
@@ -1382,8 +1399,8 @@ mod tests {
     fn 이어_붙인_뒤_필터를_걸고_풀어도_한_번에_넣은_목록과_같다() {
         let mut icons = IconCache::new();
         for key in ALL_SORTS {
-            let mut a = appended(&mut icons, key, true, "");
-            let mut b = at_once(&mut icons, key, true, "");
+            let mut a = appended(&mut icons, key, true, ("", true));
+            let mut b = at_once(&mut icons, key, true, ("", true));
             for filter in ["t", "alpha", ""] {
                 a.set_filter(filter);
                 b.set_filter(filter);
