@@ -369,6 +369,8 @@ strings! {
     /// 끌어다 놓은 것을 하나도 복사에 걸지 못했을 때 (FR-60) — 원본이 그 사이 전부
     /// 사라졌거나 셸이 그 경로를 다루지 못하는 경우다
     copy_no_source => "복사할 파일을 찾지 못했습니다" / "Could not find the files to copy";
+    /// 이름을 바꿀 항목을 하나도 셸에 걸지 못했을 때 (FR-73) — 그 사이 전부 사라진 경우다
+    rename_no_source => "이름을 바꿀 파일을 찾지 못했습니다" / "Could not find the files to rename";
     /// 같은 이름이 이미 여럿이라 번호를 붙일 자리를 다 써 버렸을 때 —
     /// "무엇을 하다 실패했는지"가 없으면 사용자는 이 말을 알아들을 수 없다
     create_no_name
@@ -960,6 +962,16 @@ pub mod dynamic {
         match current() {
             Language::Korean => format!("폴더를 열지 못했습니다 — {detail}"),
             Language::English => format!("Could not open the folder — {detail}"),
+        }
+    }
+
+    /// 일괄 이름 바꾸기가 도중에 멈춰 **임시 이름으로 남은 항목**이 있을 때 (FR-73).
+    ///
+    /// 원래 이름으로 되돌리지 못한 것이라 사용자가 찾아 고칠 수 있게 경로를 그대로 싣는다
+    pub fn rename_temp_left(paths: &str) -> String {
+        match current() {
+            Language::Korean => format!("임시 이름으로 남은 항목이 있습니다: {paths}"),
+            Language::English => format!("Some items were left with a temporary name: {paths}"),
         }
     }
 

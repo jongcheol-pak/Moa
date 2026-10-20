@@ -509,15 +509,38 @@ pub fn rename_item(
     done: Sender<FileOpOutcome>,
     wake: Wake,
 ) -> bool {
-    let same_name = path
-        .file_name()
-        .is_some_and(|current| current == std::ffi::OsStr::new(&new_name));
-    if new_name.is_empty() || same_name {
+    rename_many(vec![(path, new_name)], owner, done, wake)
+}
+
+/// 여러 항목의 이름을 한 번에 바꾼다 — 곧바로 돌아오고 결과는 `done`으로 온다 (FR-73).
+///
+/// `rename_item`과 같은 계약이다: 빈 이름·지금과 같은 이름은 빼고, 남는 것이 없으면 `false`.
+/// 쓸 수 없는 글자가 **하나라도** 있으면 아무것도 걸지 않고 사유만 보낸다 — 일부만 바뀐
+/// 묶음은 사용자가 예상한 결과가 아니다.
+///
+/// 서로의 지금 이름을 노리는 항목(`a`↔`b` 맞바꿈)은 임시 이름을 거쳐 두 번에 바꾼다 (plan D12)
+pub fn rename_many(
+    pairs: Vec<(PathBuf, String)>,
+    owner: HWND,
+    done: Sender<FileOpOutcome>,
+    wake: Wake,
+) -> bool {
+    let pairs: Vec<(PathBuf, String)> = pairs
+        .into_iter()
+        .filter(|(path, name)| {
+            !name.is_empty()
+                && path
+                    .file_name()
+                    .is_none_or(|current| current != std::ffi::OsStr::new(name))
+        })
+        .collect();
+    if pairs.is_empty() {
         return false;
     }
-    if let Some(reason) = invalid_name_reason(&new_name) {
+    let requested = pairs.len();
+    if let Some(reason) = pairs.iter().find_map(|(_, name)| invalid_name_reason(name)) {
         let outcome = FileOpOutcome {
-            requested: 1,
+            requested,
             cancelled: false,
             error: Some(reason),
             applied: Vec::new(),
@@ -529,9 +552,9 @@ pub fn rename_item(
     }
     let owner = HwndSend(owner.0 as isize);
     spawn_shell_op(done, wake, move || {
-        let ran = perform_rename(&path, &new_name, &owner, FOF_ALLOWUNDO);
+        let ran = perform_rename_many(&pairs, &owner, FOF_ALLOWUNDO);
         FileOpOutcome {
-            requested: 1,
+            requested,
             cancelled: ran.cancelled,
             error: ran.error,
             applied: ran.applied,
@@ -612,34 +635,197 @@ fn outcome_of(requested: usize, result: Result<bool, String>) -> FileOpOutcome {
     }
 }
 
-/// 이름 바꾸기 COM 호출.
+/// 여러 이름 바꾸기 — 필요하면 임시 이름을 거쳐 두 번에 한다 (plan D12).
 ///
-/// 새 이름 자리가 **자기 자신이 아닌 것으로** 차 있었으면 `preexisting`이다 — 대소문자만
-/// 바꾸는 이름(`a.txt` → `A.txt`)은 그 자리가 자기라 해당하지 않는다
-fn perform_rename(
-    path: &Path,
-    new_name: &str,
+/// 1단계는 **묶음 안 다른 항목의 지금 자리를 노리는 것**만 임시 이름으로 비켜 둔다. 2단계는
+/// 노리지 않는 것을 먼저 걸고 임시 이름인 것을 뒤에 건다 — 셸은 건 차례대로 하므로 그때는
+/// 노리던 자리가 모두 비어 있다. 어느 단계든 실패·취소되면 **임시 이름으로 남은 것을 원래
+/// 이름으로 되돌리고**(최선 시도), 되돌리지 못한 것은 오류 사유에 적는다.
+///
+/// `preexisting`은 새 자리가 묶음 밖의 것으로 차 있었는가다 — 묶음 항목이 비워 줄 자리와
+/// 대소문자만 바꾸는 자기 자리는 해당하지 않는다
+fn perform_rename_many(
+    pairs: &[(PathBuf, String)],
     owner: &HwndSend,
     flags: FILEOPERATION_FLAGS,
 ) -> Performed {
-    let target = path.with_file_name(new_name);
-    let occupied = !same_path(path, &target) && std::fs::symlink_metadata(&target).is_ok();
-    let wide = HSTRING::from(new_name);
-    // 안전성: COM이 STA로 초기화된 워커 스레드에서만 부른다. 얻은 인터페이스는 이 함수 안에서만
-    // 살다 `Drop`으로 해제되고, 이름 문자열은 호출이 끝날 때까지 지역 소유다
-    let ran = unsafe {
-        run_operation(
-            flags,
-            owner,
-            std::slice::from_ref(&path.to_path_buf()),
-            |op| {
-                let item = shell_item(path)?;
-                op.RenameItem(&item, PCWSTR(wide.as_ptr()), None)
-                    .map_err(|err| err.message())
-            },
-        )
+    let current: Vec<&Path> = pairs.iter().map(|(path, _)| path.as_path()).collect();
+    let targets: Vec<PathBuf> = pairs
+        .iter()
+        .map(|(path, name)| path.with_file_name(name))
+        .collect();
+    let in_batch = |target: &Path| current.iter().any(|path| same_path(path, target));
+    let occupied: Vec<PathBuf> = targets
+        .iter()
+        .filter(|target| !in_batch(target) && std::fs::symlink_metadata(target).is_ok())
+        .cloned()
+        .collect();
+    let blocked: Vec<bool> = targets
+        .iter()
+        .enumerate()
+        .map(|(index, target)| {
+            current
+                .iter()
+                .enumerate()
+                .any(|(other, path)| other != index && same_path(path, target))
+        })
+        .collect();
+
+    // 1단계 — 노리는 자리를 가진 것만 임시 이름으로
+    let parked: Vec<(PathBuf, String)> = pairs
+        .iter()
+        .zip(&blocked)
+        .enumerate()
+        .filter(|(_, (_, blocked))| **blocked)
+        .map(|(index, ((path, _), _))| (path.clone(), temp_name(path, index)))
+        .collect();
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    if !parked.is_empty() {
+        match rename_batch(&parked, owner, flags) {
+            Err(error) => return Performed::failed(error),
+            Ok(ran) => {
+                moved = ran.pairs;
+                if ran.cancelled || ran.error.is_some() {
+                    let left = restore_parked(&moved, &[], owner, flags);
+                    return Performed {
+                        cancelled: ran.cancelled,
+                        error: with_left(ran.error, &left),
+                        applied: Vec::new(),
+                    };
+                }
+            }
+        }
+    }
+
+    // 2단계 — 노리지 않는 것 먼저, 임시 이름인 것 뒤에
+    let parked_at = |original: &Path| {
+        moved
+            .iter()
+            .find(|(from, _)| same_path(from, original))
+            .map(|(_, temp)| temp.clone())
     };
-    finish(ran, |to| occupied && same_path(to, &target))
+    let mut second: Vec<(PathBuf, String)> = pairs
+        .iter()
+        .zip(&blocked)
+        .filter(|(_, blocked)| !**blocked)
+        .map(|(pair, _)| pair.clone())
+        .collect();
+    second.extend(
+        pairs
+            .iter()
+            .zip(&blocked)
+            .filter(|(_, blocked)| **blocked)
+            .filter_map(|((path, name), _)| parked_at(path).map(|temp| (temp, name.clone()))),
+    );
+    let ran = rename_batch(&second, owner, flags);
+    let (cancelled, error, finals) = match ran {
+        Err(error) => (false, Some(error), Vec::new()),
+        Ok(ran) => (ran.cancelled, ran.error, ran.pairs),
+    };
+    let left = restore_parked(&moved, &finals, owner, flags);
+    // 임시 이름에서 간 것은 원래 자리를 되찾아 싣는다 — 되돌리기는 원래 이름으로 돌린다
+    let original_of = |from: &Path| {
+        moved
+            .iter()
+            .find(|(_, temp)| same_path(temp, from))
+            .map(|(original, _)| original.clone())
+            .unwrap_or_else(|| from.to_path_buf())
+    };
+    Performed {
+        cancelled,
+        error: with_left(error, &left),
+        applied: finals
+            .into_iter()
+            .map(|(from, to)| Applied {
+                from: original_of(&from),
+                stamp: stamp_of(&to),
+                preexisting: occupied.iter().any(|seen| same_path(seen, &to)),
+                to,
+            })
+            .collect(),
+    }
+}
+
+/// 이름 바꾸기 한 묶음을 작업 하나로 건다 — 셸 항목으로 못 만든 것은 그것만 건너뛴다
+fn rename_batch(
+    list: &[(PathBuf, String)],
+    owner: &HwndSend,
+    flags: FILEOPERATION_FLAGS,
+) -> Result<Ran, String> {
+    let sources: Vec<PathBuf> = list.iter().map(|(path, _)| path.clone()).collect();
+    let names: Vec<HSTRING> = list.iter().map(|(_, name)| HSTRING::from(name)).collect();
+    // 안전성: COM이 STA로 초기화된 워커 스레드에서만 부른다. 이름 문자열은 `names`가
+    // 호출이 끝날 때까지 쥔다
+    unsafe {
+        run_operation(flags, owner, &sources, |op| {
+            let mut queued = 0usize;
+            for ((path, _), name) in list.iter().zip(&names) {
+                let Ok(item) = shell_item(path) else {
+                    continue;
+                };
+                if op.RenameItem(&item, PCWSTR(name.as_ptr()), None).is_ok() {
+                    queued += 1;
+                }
+            }
+            if queued == 0 {
+                return Err(crate::i18n::rename_no_source().to_owned());
+            }
+            Ok(())
+        })
+    }
+}
+
+/// 임시 이름으로 비켜 둔 것 중 최종 이름까지 가지 못한 것을 원래 이름으로 되돌린다.
+///
+/// 돌려주는 값은 **되돌리지 못한 임시 자리**다 — 사용자가 찾아 고칠 수 있게 사유에 적는다
+fn restore_parked(
+    moved: &[(PathBuf, PathBuf)],
+    finals: &[(PathBuf, PathBuf)],
+    owner: &HwndSend,
+    flags: FILEOPERATION_FLAGS,
+) -> Vec<PathBuf> {
+    let stuck: Vec<(PathBuf, String)> = moved
+        .iter()
+        .filter(|(_, temp)| !finals.iter().any(|(from, _)| same_path(from, temp)))
+        .filter_map(|(original, temp)| {
+            original
+                .file_name()
+                .map(|name| (temp.clone(), name.to_string_lossy().into_owned()))
+        })
+        .collect();
+    if stuck.is_empty() {
+        return Vec::new();
+    }
+    let back = rename_batch(&stuck, owner, flags)
+        .map(|ran| ran.pairs)
+        .unwrap_or_default();
+    stuck
+        .into_iter()
+        .map(|(temp, _)| temp)
+        .filter(|temp| !back.iter().any(|(from, _)| same_path(from, temp)))
+        .collect()
+}
+
+/// 임시 이름 — 같은 폴더 안, 원래 이름을 끝에 남겨 남았을 때 무엇이었는지 보이게 한다
+fn temp_name(path: &Path, index: usize) -> String {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!("~moa-{}-{index}-{name}", std::process::id())
+}
+
+/// 실패 사유에 되돌리지 못한 임시 자리를 덧붙인다
+fn with_left(error: Option<String>, left: &[PathBuf]) -> Option<String> {
+    if left.is_empty() {
+        return error;
+    }
+    let names: Vec<String> = left.iter().map(|path| path.display().to_string()).collect();
+    let note = crate::i18n::dynamic::rename_temp_left(&names.join(", "));
+    Some(match error {
+        Some(error) => format!("{error} — {note}"),
+        None => note,
+    })
 }
 
 /// 삭제 COM 호출 — 성공하면 `사용자가 그만뒀는가`를 돌려준다.
@@ -1024,7 +1210,11 @@ mod tests {
                 Transfer::Move,
                 조용히,
             );
-            let 이름 = perform_rename(&폴더2.join("r.txt"), "s.txt", &없는_창(), 조용히);
+            let 이름 = perform_rename_many(
+                &[(폴더2.join("r.txt"), "s.txt".to_owned())],
+                &없는_창(),
+                조용히,
+            );
             (이동, 이름)
         });
         assert_eq!(이동.applied.len(), 1, "{:?}", 이동.applied);
@@ -1032,5 +1222,125 @@ mod tests {
         assert_eq!(이름.applied.len(), 1, "{:?}", 이름.applied);
         assert!(same_path(&이름.applied[0].to, &폴더.join("s.txt")));
         assert!(!이름.applied[0].preexisting);
+    }
+
+    /// 폴더 안 이름들을 정렬해 돌려준다 — 결과 대조용
+    fn 이름들(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("읽기")
+            .map(|entry| {
+                entry
+                    .expect("항목")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn 이름_바꾸기(pairs: Vec<(PathBuf, &str)>) -> Performed {
+        let pairs: Vec<(PathBuf, String)> = pairs
+            .into_iter()
+            .map(|(path, name)| (path, name.to_owned()))
+            .collect();
+        셸_스레드에서(move || perform_rename_many(&pairs, &없는_창(), 조용히))
+    }
+
+    #[test]
+    fn 여러_이름을_한_번에_바꾼다() {
+        let 폴더 = 임시_폴더("rename_many");
+        for 이름 in ["a.txt", "b.txt"] {
+            std::fs::write(폴더.join(이름), 이름).expect("파일");
+        }
+        let 결과 = 이름_바꾸기(vec![
+            (폴더.join("a.txt"), "x.txt"),
+            (폴더.join("b.txt"), "y.txt"),
+        ]);
+        assert_eq!(결과.error, None);
+        assert_eq!(이름들(&폴더), ["x.txt", "y.txt"]);
+        assert_eq!(결과.applied.len(), 2);
+    }
+
+    #[test]
+    fn 서로_맞바꾸는_이름도_된다() {
+        let 폴더 = 임시_폴더("rename_swap");
+        std::fs::write(폴더.join("a.txt"), b"A").expect("파일");
+        std::fs::write(폴더.join("b.txt"), b"B").expect("파일");
+        let 결과 = 이름_바꾸기(vec![
+            (폴더.join("a.txt"), "b.txt"),
+            (폴더.join("b.txt"), "a.txt"),
+        ]);
+        assert_eq!(결과.error, None);
+        assert_eq!(이름들(&폴더), ["a.txt", "b.txt"], "임시 이름이 남지 않는다");
+        assert_eq!(std::fs::read(폴더.join("a.txt")).expect("읽기"), b"B");
+        assert_eq!(std::fs::read(폴더.join("b.txt")).expect("읽기"), b"A");
+        // 기록은 원래 자리 → 최종 자리다 — 임시 이름이 끼지 않는다
+        for 한건 in &결과.applied {
+            assert!(!한건.from.to_string_lossy().contains("~moa-"), "{:?}", 한건);
+            assert!(!한건.preexisting, "묶음이 비워 준 자리는 있던 것이 아니다");
+        }
+        assert_eq!(결과.applied.len(), 2);
+    }
+
+    #[test]
+    fn 대소문자만_바꾸는_이름도_된다() {
+        let 폴더 = 임시_폴더("rename_case");
+        std::fs::write(폴더.join("a.txt"), b"A").expect("파일");
+        let 결과 = 이름_바꾸기(vec![(폴더.join("a.txt"), "A.txt")]);
+        assert_eq!(결과.error, None);
+        assert_eq!(이름들(&폴더), ["A.txt"]);
+        assert_eq!(결과.applied.len(), 1);
+        assert!(!결과.applied[0].preexisting, "자기 자리는 있던 것이 아니다");
+    }
+
+    #[test]
+    fn 잘못된_글자가_하나라도_있으면_사유만_보낸다() {
+        let _guard =
+            crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+        let (tx, rx) = channel();
+        let started = rename_many(
+            vec![
+                (PathBuf::from(r"C:\work\a.txt"), "ok.txt".to_owned()),
+                (PathBuf::from(r"C:\work\b.txt"), "a?b.txt".to_owned()),
+            ],
+            HWND(std::ptr::null_mut()),
+            tx,
+            가짜_깨우기(),
+        );
+        assert!(started);
+        let outcome = rx.try_recv().expect("사유가 곧바로 온다");
+        assert_eq!(outcome.requested, 2);
+        assert!(outcome.error.is_some());
+        assert!(outcome.applied.is_empty(), "하나도 걸지 않는다");
+    }
+
+    #[test]
+    fn 둘째_단계가_실패하면_임시_이름을_되돌린다() {
+        use std::os::windows::fs::OpenOptionsExt;
+        // a→b, b→c 사슬 — a 는 b 의 지금 자리를 노려 임시 이름으로 비켜 간다. b 를 공유 없이
+        // 열어 두면 2단계의 b→c 가 실패하고, 그 뒤의 임시→b 도 자리가 차 실패한다
+        let 폴더 = 임시_폴더("rename_restore");
+        std::fs::write(폴더.join("a.txt"), b"A").expect("파일");
+        std::fs::write(폴더.join("b.txt"), b"B").expect("파일");
+        let 잠금 = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(폴더.join("b.txt"))
+            .expect("잠금");
+        let 결과 = 이름_바꾸기(vec![
+            (폴더.join("a.txt"), "b.txt"),
+            (폴더.join("b.txt"), "c.txt"),
+        ]);
+        drop(잠금);
+        assert_eq!(
+            이름들(&폴더),
+            ["a.txt", "b.txt"],
+            "임시 이름이 원래대로 돌아온다"
+        );
+        assert_eq!(std::fs::read(폴더.join("a.txt")).expect("읽기"), b"A");
+        assert!(결과.applied.is_empty(), "{:?}", 결과.applied);
+        assert!(결과.error.is_some() || 결과.cancelled);
     }
 }
