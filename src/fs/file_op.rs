@@ -24,7 +24,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::core::{HRESULT, HSTRING, PCWSTR, Ref, implement};
 
-use crate::fs::undo::{Stamp, stamp_of};
+use crate::fs::undo::{Disk, Stamp, UndoEntry, UndoStep, stamp_of};
 
 /// 셸 작업 하나가 실제로 해낸 것 — 원래 자리와 그 뒤의 자리 (FR-74).
 ///
@@ -582,6 +582,131 @@ pub fn delete_items(
     spawn_shell_op(done, wake, move || {
         outcome_of(requested, perform_delete(&paths, permanent, &owner))
     })
+}
+
+/// 되돌리기 한 번의 결과 (FR-74)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndoOutcome {
+    /// 되돌린 항목 수
+    pub done: usize,
+    /// 직전 대조에서 상태가 바뀌어 건너뛴 수 (사용자 답 Q6)
+    pub skipped: usize,
+    /// 사용자가 셸 대화에서 그만뒀는가
+    pub cancelled: bool,
+    /// 셸이 준 실패 사유
+    pub error: Option<String>,
+    /// 손댄 자리들(지금 자리·돌아갈 자리) — 폴더 크기 값을 잊는 데 쓴다 (plan D14)
+    pub affected: Vec<PathBuf>,
+}
+
+/// 기록 한 건을 되돌린다 — 곧바로 돌아오고 결과는 `done`으로 온다 (FR-74).
+///
+/// 대조(`undo::check`)는 워커가 실제 파일시스템으로 한다 — UI 스레드에서 묻지 않는다.
+/// 단계가 없으면 워커를 띄우지 않고 `false`다
+pub fn undo(entry: UndoEntry, owner: HWND, done: Sender<UndoOutcome>, wake: Wake) -> bool {
+    if entry.steps.is_empty() {
+        return false;
+    }
+    let owner = HwndSend(owner.0 as isize);
+    spawn_shell_op(done, wake, move || {
+        perform_undo(&entry.steps, &owner, TRANSFER_FLAGS)
+    })
+}
+
+/// 되돌리기 COM 호출 — 휴지통·옮기기는 작업 하나에, 이름은 `perform_rename_many`로 (plan D12).
+///
+/// 휴지통 단계는 `flags`에 `FOF_ALLOWUNDO`가 있어야 휴지통으로 간다 — 운영 경로는
+/// `TRANSFER_FLAGS`를 준다
+fn perform_undo(steps: &[UndoStep], owner: &HwndSend, flags: FILEOPERATION_FLAGS) -> UndoOutcome {
+    let checked = crate::fs::undo::check(steps, &Disk);
+    let mut affected: Vec<PathBuf> = Vec::new();
+    let mut renames: Vec<(PathBuf, String)> = Vec::new();
+    let mut shell_steps: Vec<&UndoStep> = Vec::new();
+    for step in &checked.steps {
+        affected.push(step.current().to_path_buf());
+        match step {
+            UndoStep::RenameBack { path, name } => {
+                affected.push(path.with_file_name(name));
+                renames.push((path.clone(), name.clone()));
+            }
+            UndoStep::MoveBack { to, .. } => {
+                affected.push(to.clone());
+                shell_steps.push(step);
+            }
+            UndoStep::Recycle { .. } => shell_steps.push(step),
+        }
+    }
+    let mut outcome = UndoOutcome {
+        done: 0,
+        skipped: checked.skipped,
+        cancelled: false,
+        error: None,
+        affected,
+    };
+    if !shell_steps.is_empty() {
+        let sources: Vec<PathBuf> = shell_steps
+            .iter()
+            .map(|step| step.current().to_path_buf())
+            .collect();
+        // 안전성: COM이 STA로 초기화된 워커 스레드에서만 부른다. 이름 문자열은 `names`가
+        // 호출이 끝날 때까지 쥔다
+        let ran = unsafe {
+            run_operation(flags, owner, &sources, |op| {
+                let mut queued = 0usize;
+                for step in &shell_steps {
+                    let Ok(item) = shell_item(step.current()) else {
+                        continue;
+                    };
+                    let queued_one = match step {
+                        UndoStep::Recycle { .. } => op.DeleteItem(&item, None),
+                        UndoStep::MoveBack { to, .. } => {
+                            let (Some(parent), Some(name)) = (to.parent(), to.file_name()) else {
+                                continue;
+                            };
+                            let Ok(folder) = shell_item(parent) else {
+                                continue;
+                            };
+                            let name = HSTRING::from(name);
+                            op.MoveItem(&item, &folder, PCWSTR(name.as_ptr()), None)
+                        }
+                        UndoStep::RenameBack { .. } => continue,
+                    };
+                    if queued_one.is_ok() {
+                        queued += 1;
+                    }
+                }
+                if queued == 0 {
+                    return Err(crate::i18n::undo_no_source().to_owned());
+                }
+                Ok(())
+            })
+        };
+        match ran {
+            Err(error) => outcome.error = Some(error),
+            Ok(ran) => {
+                // 옮기기는 셸이 알려 준 것을, 휴지통은 작업 뒤 사라졌는가를 센다
+                let recycled = shell_steps
+                    .iter()
+                    .filter(|step| {
+                        matches!(step, UndoStep::Recycle { .. })
+                            && std::fs::symlink_metadata(step.current()).is_err()
+                    })
+                    .count();
+                outcome.done += ran.pairs.len() + recycled;
+                outcome.cancelled = ran.cancelled;
+                outcome.error = ran.error;
+            }
+        }
+    }
+    if !renames.is_empty() {
+        let ran = perform_rename_many(&renames, owner, flags);
+        outcome.done += ran.applied.len();
+        outcome.cancelled |= ran.cancelled;
+        if outcome.error.is_none() {
+            outcome.error = ran.error;
+        }
+    }
+    outcome
 }
 
 /// 셸 작업 하나를 COM이 잡힌 워커에서 돌리고 결과를 채널로 보낸다.
@@ -1342,5 +1467,81 @@ mod tests {
         assert_eq!(std::fs::read(폴더.join("a.txt")).expect("읽기"), b"A");
         assert!(결과.applied.is_empty(), "{:?}", 결과.applied);
         assert!(결과.error.is_some() || 결과.cancelled);
+    }
+
+    fn 되돌리기(steps: Vec<UndoStep>) -> UndoOutcome {
+        셸_스레드에서(move || perform_undo(&steps, &없는_창(), 조용히))
+    }
+
+    #[test]
+    fn 이동을_원래_자리로_되돌린다() {
+        let 폴더 = 임시_폴더("undo_move");
+        std::fs::create_dir_all(폴더.join("dst")).expect("폴더");
+        std::fs::write(폴더.join("m.txt"), b"m").expect("파일");
+        let 폴더2 = 폴더.clone();
+        let 이동 = 셸_스레드에서(move || {
+            perform(
+                &폴더2.join("dst"),
+                &[폴더2.join("m.txt")],
+                &없는_창(),
+                Transfer::Move,
+                조용히,
+            )
+        });
+        let 기록 =
+            crate::fs::undo::entry_for(crate::fs::undo::Done::Moved, &이동.applied).expect("기록");
+        let 결과 = 되돌리기(기록.steps);
+        assert_eq!((결과.done, 결과.skipped), (1, 0), "{결과:?}");
+        assert!(폴더.join("m.txt").exists(), "원래 자리로 돌아온다");
+        assert!(!폴더.join(r"dst\m.txt").exists());
+    }
+
+    #[test]
+    fn 이름을_되돌린다() {
+        let 폴더 = 임시_폴더("undo_rename");
+        std::fs::write(폴더.join("x.txt"), b"x").expect("파일");
+        let 결과 = 되돌리기(vec![UndoStep::RenameBack {
+            path: 폴더.join("x.txt"),
+            name: "w.txt".to_owned(),
+        }]);
+        assert_eq!((결과.done, 결과.skipped), (1, 0), "{결과:?}");
+        assert_eq!(이름들(&폴더), ["w.txt"]);
+    }
+
+    #[test]
+    fn 원래_자리가_찼으면_그_항목만_건너뛴다() {
+        let 폴더 = 임시_폴더("undo_skip");
+        std::fs::create_dir_all(폴더.join("dst")).expect("폴더");
+        for 이름 in [r"dst\a.txt", r"dst\b.txt", "a.txt"] {
+            std::fs::write(폴더.join(이름), 이름).expect("파일");
+        }
+        let 결과 = 되돌리기(vec![
+            // 원래 자리에 같은 이름이 새로 생겼다
+            UndoStep::MoveBack {
+                from: 폴더.join(r"dst\a.txt"),
+                to: 폴더.join("a.txt"),
+            },
+            UndoStep::MoveBack {
+                from: 폴더.join(r"dst\b.txt"),
+                to: 폴더.join("b.txt"),
+            },
+        ]);
+        assert_eq!((결과.done, 결과.skipped), (1, 1), "{결과:?}");
+        assert!(폴더.join("b.txt").exists());
+        assert!(폴더.join(r"dst\a.txt").exists(), "건너뛴 것은 그대로 둔다");
+        assert_eq!(std::fs::read(폴더.join("a.txt")).expect("읽기"), b"a.txt");
+    }
+
+    #[test]
+    fn 되돌릴_단계가_없으면_워커를_띄우지_않는다() {
+        let (tx, rx) = channel();
+        let started = undo(
+            UndoEntry { steps: Vec::new() },
+            HWND(std::ptr::null_mut()),
+            tx,
+            가짜_깨우기(),
+        );
+        assert!(!started);
+        assert!(rx.try_recv().is_err());
     }
 }

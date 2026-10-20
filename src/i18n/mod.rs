@@ -371,6 +371,8 @@ strings! {
     copy_no_source => "복사할 파일을 찾지 못했습니다" / "Could not find the files to copy";
     /// 이름을 바꿀 항목을 하나도 셸에 걸지 못했을 때 (FR-73) — 그 사이 전부 사라진 경우다
     rename_no_source => "이름을 바꿀 파일을 찾지 못했습니다" / "Could not find the files to rename";
+    /// 되돌릴 항목을 하나도 셸에 걸지 못했을 때 (FR-74)
+    undo_no_source => "되돌릴 파일을 찾지 못했습니다" / "Could not find the files to undo";
     /// 같은 이름이 이미 여럿이라 번호를 붙일 자리를 다 써 버렸을 때 —
     /// "무엇을 하다 실패했는지"가 없으면 사용자는 이 말을 알아들을 수 없다
     create_no_name
