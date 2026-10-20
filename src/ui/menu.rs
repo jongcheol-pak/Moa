@@ -94,9 +94,10 @@ pub enum Command {
     /// 좌우로 나눠 열며(FR-35) 이 명령을 거치지 않는다.
     /// `SiteId`가 `Copy`라 이 열거형의 `Copy`도 유지된다
     OpenSiteTab(SiteId),
-    /// 고른 것 중 첫 항목의 이름을 목록에서 바로 고친다 (FR-12·FR-64) — `F2`.
+    /// 이름을 바꾼다 (FR-12·FR-64·FR-73) — `F2`.
     ///
-    /// 여러 개를 골라 두어도 하나만 고친다(새 이름은 하나뿐이다 — 탐색기와 같다)
+    /// 하나를 골랐으면 목록에서 바로 고치고, **둘 이상이면 일괄 이름 바꾸기 대화를 연다**
+    /// (2026-10-20 — 종전에는 여러 개여도 첫 항목 하나만 고쳤다)
     Rename,
     /// 고른 것을 지운다 (FR-12·FR-64) — `Delete`는 휴지통, `Shift+Delete`는 곧바로.
     ///
@@ -114,6 +115,12 @@ pub enum Command {
     ///
     /// 복사로 담겼으면 복사하고 잘라내기로 담겼으면 옮긴다
     ClipboardPaste,
+    /// 방금 한 파일 작업을 되돌린다 (FR-74) — `Ctrl+Z`.
+    ///
+    /// 기록은 앱 전체에 하나라 어느 패널에서 눌러도 마지막 것을 되돌린다(plan D7). 고른 항목이
+    /// 대상은 아니지만 **파일 목록이 키를 가졌을 때만** 나간다(사용자 답 Q3) — 주소창·이름
+    /// 편집의 `Ctrl+Z`(글자 되돌리기)와 겹치지 않게 한다
+    Undo,
 }
 
 /// 패널 메뉴 항목의 활성/비활성을 가르는 현재 상태
@@ -431,7 +438,8 @@ fn targets_file_list(command: Command) -> bool {
         | Command::Delete { .. }
         | Command::ClipboardCopy
         | Command::ClipboardCut
-        | Command::ClipboardPaste => true,
+        | Command::ClipboardPaste
+        | Command::Undo => true,
     }
 }
 
@@ -473,7 +481,7 @@ pub fn poll_shortcuts(ctx: &egui::Context, owner: KeyOwner) -> Option<Command> {
 ///
 /// **이 표가 유일한 대응이며 사용자가 바꿀 길을 두지 않는다** — 키 매핑 설정 화면도,
 /// 그것을 담을 설정 항목도 만들지 않았다(요청에 없다 — plan T10 Design ④)
-fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 18] {
+fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 19] {
     let ctrl_shift = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
     let ctrl_alt = egui::Modifiers::CTRL | egui::Modifiers::ALT;
     [
@@ -517,6 +525,7 @@ fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 18] {
         (egui::Modifiers::CTRL, egui::Key::T, Command::NewTab),
         (egui::Modifiers::CTRL, egui::Key::W, Command::CloseTab),
         (egui::Modifiers::CTRL, egui::Key::B, Command::ToggleSidebar),
+        (egui::Modifiers::CTRL, egui::Key::Z, Command::Undo),
         (egui::Modifiers::ALT, egui::Key::ArrowLeft, Command::Back),
         (
             egui::Modifiers::ALT,
@@ -866,6 +875,21 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_z_는_되돌리기다() {
+        let 찾은 = shortcut_table()
+            .into_iter()
+            .find(|(modifiers, key, _)| *modifiers == egui::Modifiers::CTRL && *key == egui::Key::Z)
+            .map(|(_, _, command)| command);
+        assert_eq!(찾은, Some(Command::Undo));
+    }
+
+    #[test]
+    fn 되돌리기는_파일_목록이_키를_가질_때만_나간다() {
+        // 사용자 답 Q3 — 사이드바·주소창이 키를 쥔 동안의 `Ctrl+Z` 는 되돌리기가 아니다
+        assert!(targets_file_list(Command::Undo));
+    }
+
+    #[test]
     fn 파일_대상_명령만_키_소유를_가린다() {
         // 고른 항목을 건드리는 명령만 파일 목록이 키를 쥔 때 나간다 (FR-12) —
         // 사이드바를 누른 뒤 `Delete`를 눌렀는데 파일이 지워지면 안 된다.
@@ -879,6 +903,7 @@ mod tests {
             파일_대상,
             vec![
                 Command::Delete { permanent: true },
+                Command::Undo,
                 Command::Rename,
                 Command::Delete { permanent: false },
             ]

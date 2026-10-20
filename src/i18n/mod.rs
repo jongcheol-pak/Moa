@@ -369,6 +369,40 @@ strings! {
     /// 끌어다 놓은 것을 하나도 복사에 걸지 못했을 때 (FR-60) — 원본이 그 사이 전부
     /// 사라졌거나 셸이 그 경로를 다루지 못하는 경우다
     copy_no_source => "복사할 파일을 찾지 못했습니다" / "Could not find the files to copy";
+    /// 이름을 바꿀 항목을 하나도 셸에 걸지 못했을 때 (FR-73) — 그 사이 전부 사라진 경우다
+    rename_no_source => "이름을 바꿀 파일을 찾지 못했습니다" / "Could not find the files to rename";
+    /// 일괄 이름 바꾸기 대화 (FR-73)
+    bulk_rename_title => "이름 한꺼번에 바꾸기" / "Rename items";
+    /// 우클릭 메뉴의 진입 줄 — 둘 이상 골랐을 때만 선다 (FR-73)
+    menu_bulk_rename => "이름 한꺼번에 바꾸기…" / "Rename items…";
+    bulk_mode_replace => "찾아 바꾸기" / "Find and replace";
+    bulk_mode_number => "접두·접미·번호" / "Prefix, suffix, number";
+    bulk_mode_regex => "정규식" / "Regular expression";
+    bulk_find => "찾을 글자" / "Find";
+    bulk_with => "바꿀 글자" / "Replace with";
+    bulk_prefix => "앞에 붙일 글자" / "Prefix";
+    bulk_suffix => "뒤에 붙일 글자" / "Suffix";
+    bulk_start => "시작 번호" / "Start at";
+    bulk_digits => "자릿수" / "Digits";
+    bulk_keep_name => "원래 이름 남기기" / "Keep original name";
+    bulk_pattern => "정규식" / "Pattern";
+    bulk_include_ext => "확장자도 바꾸기" / "Include extension";
+    bulk_col_current => "현재 이름" / "Current name";
+    bulk_col_new => "새 이름" / "New name";
+    /// 충돌 판정에 쓸 폴더 안 이름 목록을 모으는 동안 — 그동안 `적용`은 흐리다
+    bulk_scanning => "폴더의 이름을 확인하는 중…" / "Checking names in the folder…";
+    bulk_block_empty => "이름이 비었습니다" / "Name is empty";
+    bulk_block_invalid => "쓸 수 없는 글자가 있습니다" / "Contains invalid characters";
+    bulk_block_duplicate => "새 이름끼리 겹칩니다" / "Duplicates another new name";
+    bulk_block_exists => "이미 있는 이름입니다" / "Name already exists";
+    bulk_block_pattern => "정규식이 잘못됐습니다" / "Invalid pattern";
+    bulk_apply => "적용" / "Apply";
+    /// 앱 안에서 Shift 를 든 채 끄는 동안 그림 옆에 붙는 표시 (FR-60 — 놓으면 이동한다)
+    drag_moving => "이동" / "Move";
+    /// `Ctrl+Z`를 눌렀는데 되돌릴 기록이 없을 때 (FR-74)
+    undo_nothing => "되돌릴 작업이 없습니다" / "Nothing to undo";
+    /// 되돌릴 항목을 하나도 셸에 걸지 못했을 때 (FR-74)
+    undo_no_source => "되돌릴 파일을 찾지 못했습니다" / "Could not find the files to undo";
     /// 같은 이름이 이미 여럿이라 번호를 붙일 자리를 다 써 버렸을 때 —
     /// "무엇을 하다 실패했는지"가 없으면 사용자는 이 말을 알아들을 수 없다
     create_no_name
@@ -963,6 +997,16 @@ pub mod dynamic {
         }
     }
 
+    /// 일괄 이름 바꾸기가 도중에 멈춰 **임시 이름으로 남은 항목**이 있을 때 (FR-73).
+    ///
+    /// 원래 이름으로 되돌리지 못한 것이라 사용자가 찾아 고칠 수 있게 경로를 그대로 싣는다
+    pub fn rename_temp_left(paths: &str) -> String {
+        match current() {
+            Language::Korean => format!("임시 이름으로 남은 항목이 있습니다: {paths}"),
+            Language::English => format!("Some items were left with a temporary name: {paths}"),
+        }
+    }
+
     /// 로컬 복사가 셸 오류로 끝났을 때 (FR-60).
     ///
     /// `detail`은 셸이 준 사유라 **그대로 싣는다** — 문장 틀만 카탈로그가 만든다
@@ -983,6 +1027,45 @@ pub mod dynamic {
             Language::Korean => format!("복사를 그만뒀습니다 — {count}개 항목"),
             Language::English if count == 1 => "Copy stopped — 1 item".to_owned(),
             Language::English => format!("Copy stopped — {count} items"),
+        }
+    }
+
+    /// 되돌리기가 끝났을 때 (FR-74) — 상태가 바뀌어 건너뛴 수가 있으면 함께 적는다 (사용자 답 Q6)
+    pub fn undo_done(done: usize, skipped: usize) -> String {
+        match (current(), skipped) {
+            (Language::Korean, 0) => format!("되돌렸습니다 — {done}개"),
+            (Language::Korean, _) => {
+                format!("되돌렸습니다 — {done}개 · {skipped}개는 상태가 바뀌어 건너뛰었습니다")
+            }
+            (Language::English, 0) => format!("Undone — {done}"),
+            (Language::English, _) => {
+                format!("Undone — {done} · skipped {skipped} that changed since")
+            }
+        }
+    }
+
+    /// 되돌리기가 셸 오류로 끝났을 때 (FR-74)
+    pub fn undo_failed(detail: &str) -> String {
+        match current() {
+            Language::Korean => format!("되돌리지 못했습니다 — {detail}"),
+            Language::English => format!("Could not undo — {detail}"),
+        }
+    }
+
+    /// 앱 안 드래그 이동(Shift)이 셸 오류로 끝났을 때 (FR-60) — 복사와 같은 틀이다
+    pub fn local_move_failed(detail: &str) -> String {
+        match current() {
+            Language::Korean => format!("옮기지 못했습니다 — {detail}"),
+            Language::English => format!("Could not move — {detail}"),
+        }
+    }
+
+    /// 사용자가 셸 이동 대화에서 그만뒀을 때 (FR-60) — `count`는 걸었던 항목 수다
+    pub fn local_move_cancelled(count: usize) -> String {
+        match current() {
+            Language::Korean => format!("옮기기를 그만뒀습니다 — {count}개 항목"),
+            Language::English if count == 1 => "Move stopped — 1 item".to_owned(),
+            Language::English => format!("Move stopped — {count} items"),
         }
     }
 
@@ -1698,6 +1781,39 @@ mod tests {
         // 영어는 한 개일 때 복수형을 쓰지 않는다
         assert_eq!(dynamic::local_copy_cancelled(1), "Copy stopped — 1 item");
         assert_eq!(dynamic::local_copy_cancelled(3), "Copy stopped — 3 items");
+    }
+
+    #[test]
+    fn 되돌리기_문구는_건너뛴_수를_적는다() {
+        // 사용자 답 Q6 — 건너뛴 것이 있으면 그 수를 알린다
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(dynamic::undo_done(3, 0), "되돌렸습니다 — 3개");
+        assert_eq!(
+            dynamic::undo_done(2, 1),
+            "되돌렸습니다 — 2개 · 1개는 상태가 바뀌어 건너뛰었습니다"
+        );
+        assert_eq!(undo_nothing(), "되돌릴 작업이 없습니다");
+        set_language(LanguageSetting::English);
+        assert_eq!(
+            dynamic::undo_done(2, 1),
+            "Undone — 2 · skipped 1 that changed since"
+        );
+    }
+
+    #[test]
+    fn 이동_문구는_복사와_다르다() {
+        // Shift 이동(FR-60)이 실패·취소되면 「복사」라고 알리지 않는다 (후보 5)
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(dynamic::local_move_failed("x"), "옮기지 못했습니다 — x");
+        assert_eq!(
+            dynamic::local_move_cancelled(2),
+            "옮기기를 그만뒀습니다 — 2개 항목"
+        );
+        assert_eq!(drag_moving(), "이동");
+        set_language(LanguageSetting::English);
+        assert_eq!(dynamic::local_move_failed("x"), "Could not move — x");
+        assert_eq!(dynamic::local_move_cancelled(1), "Move stopped — 1 item");
+        assert_eq!(drag_moving(), "Move");
     }
 
     #[test]

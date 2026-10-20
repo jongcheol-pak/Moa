@@ -1456,6 +1456,12 @@ mod tests {
     }
 
     #[test]
+    fn 되돌리기는_원격으로_가지_않는다() {
+        // 기록이 앱 전체 하나라 원격 탭에서 눌러도 로컬 기록을 되돌린다 (plan D7)
+        assert_eq!(remote_action_for(Command::Undo), None);
+    }
+
+    #[test]
     fn 새로_고침은_이_길로_오지_않는다() {
         // `refresh_panel`이 이미 원격 탭을 가려 `request_remote_list`를 보낸다 —
         // 여기에도 넣으면 같은 일에 길이 둘이 된다

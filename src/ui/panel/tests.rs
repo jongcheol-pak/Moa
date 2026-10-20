@@ -4873,3 +4873,54 @@ fn 고른_것이_있으면_상태_줄에_선택_통계가_선다() {
         "선택을 풀었는데 항목 수가 없다: {풂:?}"
     );
 }
+
+#[test]
+fn 새_폴더를_만들면_경로가_올라온다() {
+    // 되돌리기 기록(FR-74)은 앱이 한다 — 패널은 만든 자리와 도장을 다음 결과로 올려 보낸다
+    use std::time::{Duration, Instant};
+
+    let ctx = egui::Context::default();
+    let dir = std::env::temp_dir().join(format!("fe_undo_created_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("임시 폴더");
+    let mut panel = PanelState::new(dir.clone());
+    panel.new_folder(&ctx);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while panel.create.is_running() && Instant::now() < deadline {
+        panel.poll_create(&ctx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let sites = SiteStore::new();
+    let tree = crate::remote::tree_cache::TreeCache::new();
+    let mut icons = crate::fs::icons::IconCache::new();
+    let mut textures = crate::ui::icon_tex::IconTextures::inline();
+    let mut 올라온 = Vec::new();
+    for _ in 0..2 {
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let ctx = ui.ctx().clone();
+                let outcome = panel.show(
+                    ui,
+                    &ctx,
+                    &mut icons,
+                    &mut textures,
+                    RemoteView {
+                        sites: &sites,
+                        connected: &[],
+                        tree: &tree,
+                    },
+                    PanelMenuState::for_panes(1),
+                    crate::ui::tabs::TransferTargets::default(),
+                    &[],
+                    drive_rows(),
+                );
+                올라온.extend(outcome.created);
+            });
+        });
+    }
+    assert_eq!(올라온.len(), 1, "한 번만 올라온다: {올라온:?}");
+    let (path, stamp) = &올라온[0];
+    assert!(path.exists(), "{}", path.display());
+    assert!(stamp.is_some(), "도장은 워커가 잰다");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -289,6 +289,8 @@ pub(super) struct FolderSizes {
     requested: HashSet<PathBuf>,
     /// 이 세대에서 아직 답이 오지 않은 요청 수
     waiting: usize,
+    /// 잊은 뒤에도 옛 계산의 답이 아직 오지 않은 폴더 — 그 답은 받지 않는다 (plan D14)
+    forgotten: HashSet<PathBuf>,
 }
 
 impl FolderSizes {
@@ -300,6 +302,7 @@ impl FolderSizes {
             known: HashMap::new(),
             requested: HashSet::new(),
             waiting: 0,
+            forgotten: HashSet::new(),
         }
     }
 
@@ -309,6 +312,25 @@ impl FolderSizes {
         self.known.clear();
         self.requested.clear();
         self.waiting = 0;
+        self.forgotten.clear();
+    }
+
+    /// 파일 작업이 손댄 자리를 품은 폴더의 값을 잊는다 — 보이면 다음 프레임에 다시 잰다
+    /// (FR-71 · plan D14). 계산 중이던 것의 옛 답은 받지 않는다
+    pub(super) fn forget(&mut self, affected: &[PathBuf]) {
+        let stale: Vec<PathBuf> = self
+            .requested
+            .iter()
+            .filter(|folder| affected.iter().any(|path| is_within(path, folder)))
+            .cloned()
+            .collect();
+        for folder in stale {
+            self.requested.remove(&folder);
+            if self.known.remove(&folder).is_none() {
+                // 값이 없으면 아직 계산 중이다 — 그 답은 손대기 전의 크기다
+                self.forgotten.insert(folder);
+            }
+        }
     }
 
     /// 알려진 폴더 크기 — 자세히 보기가 크기 칸에 쓴다
@@ -358,6 +380,9 @@ impl FolderSizes {
             return;
         }
         self.waiting = self.waiting.saturating_sub(1);
+        if self.forgotten.remove(&path) {
+            return;
+        }
         if let Some(size) = size {
             self.known.insert(path, size);
         }
@@ -368,6 +393,19 @@ impl FolderSizes {
     pub(super) fn is_waiting(&self) -> bool {
         self.waiting > 0
     }
+}
+
+/// `path`가 `folder` 자신이거나 그 안에 있는가 — 구성요소마다 ASCII 대소문자를 접어 견준다
+fn is_within(path: &Path, folder: &Path) -> bool {
+    let mut inside = path.components();
+    folder.components().all(|part| {
+        inside.next().is_some_and(|other| {
+            other
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&part.as_os_str().to_string_lossy())
+        })
+    })
 }
 
 /// 폴더 크기 워커 — 요청 통로가 닫힐 때까지(패널이 사라질 때까지) 요청을 차례로 계산한다.
@@ -411,6 +449,9 @@ fn new_ext_infos(entries: &[FileEntry], seen: &mut HashSet<String>) -> Vec<ExtIn
         .collect()
 }
 
+/// 새 폴더·새 파일 하나를 만든 결과 — 만든 자리와 그 도장
+pub(super) type CreateResult = std::io::Result<(PathBuf, Option<crate::fs::undo::Stamp>)>;
+
 /// 새 폴더·새 파일 생성 상태 (FR-25).
 ///
 /// 생성도 열거와 같이 **워커 스레드에서** 한다 — `CreateDirectoryW`·`CreateFileW`는 로컬
@@ -418,8 +459,9 @@ fn new_ext_infos(entries: &[FileEntry], seen: &mut HashSet<String>) -> Vec<ExtIn
 /// 그만큼 재시도가 이어진다. UI 스레드에서 부르면 그동안 창이 멈춘다
 /// (AGENTS: UI 스레드 블로킹 I/O 금지 — `DirLoad`와 같은 규칙)
 pub(super) struct CreateOp {
-    /// (무엇을 만들었는지, 결과) — 실패 문구에 종류를 넣기 위해 함께 보낸다
-    pending: Option<Receiver<(&'static str, std::io::Result<PathBuf>)>>,
+    /// (무엇을 만들었는지, 결과) — 실패 문구에 종류를 넣기 위해 함께 보낸다.
+    /// 결과에는 만든 자리의 도장이 붙는다 — 되돌리기(FR-74)가 그 사이 바뀌었는지 가른다
+    pending: Option<Receiver<(&'static str, CreateResult)>>,
 }
 
 impl CreateOp {
@@ -443,14 +485,19 @@ impl CreateOp {
         self.pending = Some(rx);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
+            // 도장은 여기(워커)서 잰다 — UI 스레드에서 파일시스템을 묻지 않는다
+            let made = make(&dir).map(|path| {
+                let stamp = crate::fs::undo::stamp_of(&path);
+                (path, stamp)
+            });
             // 수신부가 이미 버려졌으면(패널 닫힘·앱 종료) 전송 실패는 무해하다
-            let _ = tx.send((kind, make(&dir)));
+            let _ = tx.send((kind, made));
             ctx.request_repaint();
         });
     }
 
     /// 완료된 결과를 꺼낸다. 아직이면 `None`
-    pub(super) fn poll(&mut self) -> Option<(&'static str, std::io::Result<PathBuf>)> {
+    pub(super) fn poll(&mut self) -> Option<(&'static str, CreateResult)> {
         let rx = self.pending.as_ref()?;
         match rx.try_recv() {
             Ok(done) => {
@@ -519,5 +566,54 @@ mod tests {
         }
         assert_eq!(sizes.known().get(&dir), Some(&7));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 값을 손으로 넣은 크기 상태 — 워커 없이 잊기 규칙만 잰다
+    fn 알려진_크기(folders: &[&str]) -> FolderSizes {
+        let mut sizes = FolderSizes::new();
+        for folder in folders {
+            sizes.requested.insert(PathBuf::from(folder));
+            sizes.known.insert(PathBuf::from(folder), 10);
+        }
+        sizes
+    }
+
+    #[test]
+    fn 영향받은_폴더의_크기를_잊는다() {
+        // 하위 폴더로 파일을 옮기면 그 폴더의 크기가 바뀐다 (plan D14)
+        let mut sizes = 알려진_크기(&[r"C:\w\sub", r"C:\w\other"]);
+        sizes.forget(&[PathBuf::from(r"C:\W\SUB\deep\a.txt")]);
+        assert_eq!(sizes.known().get(Path::new(r"C:\w\sub")), None);
+    }
+
+    #[test]
+    fn 영향_밖_폴더의_크기는_남는다() {
+        let mut sizes = 알려진_크기(&[r"C:\w\sub", r"C:\w\subway"]);
+        sizes.forget(&[PathBuf::from(r"C:\w\sub\a.txt")]);
+        assert_eq!(
+            sizes.known().get(Path::new(r"C:\w\subway")),
+            Some(&10),
+            "이름 앞부분만 같은 다른 폴더다"
+        );
+    }
+
+    #[test]
+    fn 잊은_폴더는_다시_요청된다() {
+        let ctx = egui::Context::default();
+        let mut sizes = 알려진_크기(&[]);
+        let dir = std::env::temp_dir();
+        // 계산 중(값 없이 요청만 됨)에 잊으면 옛 답은 받지 않고 다시 요청한다
+        sizes.requested.insert(dir.clone());
+        sizes.forget(&[dir.join("x.txt")]);
+        assert_eq!(sizes.request(vec![dir.clone()], &ctx), 1, "다시 요청한다");
+        let generation = sizes.generation.load(Ordering::Relaxed);
+        sizes.accept(generation, dir.clone(), Some(1));
+        assert_eq!(
+            sizes.known().get(&dir),
+            None,
+            "잊기 전의 옛 답은 받지 않는다"
+        );
+        sizes.accept(generation, dir.clone(), Some(2));
+        assert_eq!(sizes.known().get(&dir), Some(&2));
     }
 }
