@@ -64,6 +64,10 @@ pub struct FileListView {
     selection: BTreeSet<usize>,
     /// Shift 범위 선택의 기준점
     anchor: Option<usize>,
+    /// 포커스 행 — 화살표가 움직이는 끝이자 미리보기 대상 (FR-77·FR-76). 범위는 `anchor..=cursor`다
+    cursor: Option<usize>,
+    /// 화살표 한 번에 옮길 칸 수 — 가로로 흐르는 격자는 그린 한 행의 칸 수, 그 밖은 1이다
+    step: usize,
     /// 지금 담긴 원격 목록의 자리 — **같은 자리를 다시 읽었는지** 가리는 데 쓴다 (FR-67 · D7).
     ///
     /// 로컬의 `dir`과 같은 구실이며 둘을 한 필드로 합치지 않는다 — 로컬은 `PathBuf`,
@@ -142,6 +146,8 @@ impl FileListView {
             remote_dir: crate::remote::types::RemotePath::root(),
             selection: BTreeSet::new(),
             anchor: None,
+            cursor: None,
+            step: 1,
             columns: Columns::new(),
             column_flags: ColumnFlags::default(),
             dir_count: 0,
@@ -275,6 +281,7 @@ impl FileListView {
         };
         self.selection.clear();
         self.anchor = None;
+        self.cursor = None;
         self.relocate_rename();
     }
 
@@ -341,6 +348,11 @@ impl FileListView {
         // 검색 결과에서 내려올 때는 이름으로 되살리지 않는다 — `sub.txt`의 선택이 뿌리의
         // `a.txt`로 옮겨붙는다(같은 이름이 다른 폴더에 있을 수 있다)
         let keep = (dir == self.dir && !self.searching).then(|| self.selected_name_keys());
+        // 기준점·포커스 행도 이름으로 되살린다 — 다시 읽은 뒤 화살표가 맨 위로 튀거나
+        // 미리보기 대상이 사라지지 않게 한다 (FR-76·FR-77)
+        let marks = keep
+            .as_ref()
+            .map(|_| (self.row_key(self.anchor), self.row_key(self.cursor)));
         self.searching = false;
         self.drop_rename_on_dir_change(&dir);
         self.dir = dir;
@@ -355,10 +367,31 @@ impl FileListView {
         // 숨김·시스템·이름 필터를 여기서 한 번에 건다 (FR-13·FR-65)
         self.rebuild_visible();
         if let Some(keep) = keep {
-            // 기준점(anchor)은 복원하지 않는다 — 다음 클릭이 새로 잡으며,
-            // 없는 상태가 엉뚱한 위치를 가리키는 것보다 낫다
             self.selection = self.matching_selection(&keep);
         }
+        if let Some((anchor, cursor)) = marks {
+            self.anchor = self.index_of_key(anchor.as_deref());
+            self.cursor = self.index_of_key(cursor.as_deref());
+        }
+    }
+
+    /// 그 행의 이름 키 — 다시 읽은 뒤 같은 행을 찾는 데 쓴다
+    fn row_key(&self, index: Option<usize>) -> Option<Vec<u16>> {
+        let ListModel::Local(rows) = &self.model else {
+            return None;
+        };
+        index
+            .and_then(|index| rows.get(index))
+            .map(|row| row.name_sort_key().into_owned())
+    }
+
+    /// 그 이름 키를 가진 행의 자리
+    fn index_of_key(&self, key: Option<&[u16]>) -> Option<usize> {
+        let ListModel::Local(rows) = &self.model else {
+            return None;
+        };
+        let key = key?;
+        rows.iter().position(|row| *row.name_sort_key() == *key)
     }
 
     /// 이미 세운 목록에 **다 읽지 못한 폴더의 다음 몫을 이어 붙인다** (FR-69).
@@ -472,6 +505,7 @@ impl FileListView {
             .filter_map(|&index| old_to_new.get(index).copied())
             .collect();
         self.anchor = self.anchor.and_then(|index| old_to_new.get(index).copied());
+        self.cursor = self.cursor.and_then(|index| old_to_new.get(index).copied());
         if let Some(edit) = self.rename.as_mut() {
             match old_to_new.get(edit.index) {
                 Some(&index) => edit.index = index,
@@ -524,6 +558,7 @@ impl FileListView {
         self.order.clear();
         self.selection.clear();
         self.anchor = None;
+        self.cursor = None;
         self.searching = false;
     }
 
@@ -664,6 +699,60 @@ impl FileListView {
         self.resort();
     }
 
+    /// 미리보기 창에 보일 파일 (FR-76) — 포커스 행이 선택에 들어 있고 로컬 **파일**일 때 그 경로와 도장.
+    /// 폴더·`..` 줄·원격 목록은 `None` 이다. 선택 전체를 훑지 않는다 — 매 프레임 불린다
+    pub fn preview_item(&self) -> Option<(PathBuf, FileStamp)> {
+        let ListModel::Local(rows) = &self.model else {
+            return None;
+        };
+        let cursor = self
+            .cursor
+            .filter(|cursor| self.selection.contains(cursor))?;
+        let row = rows.get(cursor).filter(|row| !row.is_dir())?;
+        Some((row.path_in(&self.dir), crate::ui::list_grid::row_stamp(row)))
+    }
+
+    /// 화살표로 포커스 행을 옮긴다 (FR-77) — 로컬 목록에서만.
+    ///
+    /// 무수식이면 옮긴 행 하나를 고르고 기준점도 거기로, `extend`(Shift)면 기준점을 두고
+    /// `anchor..=cursor` 를 고른다. 끝에서 멈추며, 고른 행이 보이게 굴린다
+    pub fn move_selection(&mut self, down: bool, extend: bool) {
+        let ListModel::Local(rows) = &self.model else {
+            return;
+        };
+        let len = rows.len();
+        if len == 0 {
+            return;
+        }
+        let step = self.step.max(1);
+        let next = match self.cursor.filter(|&cursor| cursor < len) {
+            None => 0,
+            Some(cursor) if down => {
+                // 마지막 행이 아니면 한 행 아래, 그 자리에 칸이 없으면 마지막 항목이다
+                if cursor / step < (len - 1) / step {
+                    (cursor + step).min(len - 1)
+                } else {
+                    cursor
+                }
+            }
+            Some(cursor) => cursor.checked_sub(step).unwrap_or(cursor),
+        };
+        if extend {
+            let anchor = *self.anchor.get_or_insert(next);
+            let (lo, hi) = if anchor <= next {
+                (anchor, next)
+            } else {
+                (next, anchor)
+            };
+            self.selection = (lo..=hi).collect();
+        } else {
+            self.selection = BTreeSet::from([next]);
+            self.anchor = Some(next);
+        }
+        self.cursor = Some(next);
+        self.scroll_to = Some(next);
+    }
+
     /// 클릭 선택 — Ctrl은 토글, Shift는 기준점부터 범위
     fn select(&mut self, index: usize, modifiers: egui::Modifiers) {
         if modifiers.shift
@@ -675,6 +764,7 @@ impl FileListView {
                 (index, anchor)
             };
             self.selection = (lo..=hi).collect();
+            self.cursor = Some(index);
             return;
         }
         if modifiers.ctrl {
@@ -686,6 +776,7 @@ impl FileListView {
             self.selection.insert(index);
         }
         self.anchor = Some(index);
+        self.cursor = Some(index);
     }
 
     /// 목록을 그리고 이번 프레임의 조작을 반영한다.
@@ -744,6 +835,7 @@ impl FileListView {
         };
 
         // 상태 변경은 그리기가 끝난 뒤에 한다 — 그리는 동안에는 목록이 빌려진 상태다
+        self.step = outcome.step;
         if let Some(kind) = outcome.column_toggle {
             self.column_flags.toggle(kind);
         }
@@ -756,6 +848,7 @@ impl FileListView {
         if outcome.clear_selection {
             self.selection.clear();
             self.anchor = None;
+            self.cursor = None;
         }
         // 편집이 끝났으면 상태를 접고, 확정이면 그것을 이번 프레임의 조작으로 올린다 —
         // 실제로 이름을 바꾸는 것은 셸에 맡기므로 여기서는 값만 돌려준다
@@ -993,6 +1086,7 @@ impl FileListView {
         };
         self.selection = BTreeSet::from([index]);
         self.anchor = Some(index);
+        self.cursor = Some(index);
         self.scroll_to = Some(index);
         true
     }
@@ -1196,7 +1290,7 @@ struct RenderRequest<'a> {
     columns: &'a mut Columns,
     column_flags: ColumnFlags,
     view_mode: ViewMode,
-    /// 이번 그리기에서 이 행으로 스크롤한다 — 자세히 보기만 쓴다 (FR-70)
+    /// 이번 그리기에서 이 행으로 스크롤한다 (FR-70·FR-77)
     scroll_to: Option<usize>,
     thumbnails: &'a ThumbnailTextures,
     visible: &'a mut Vec<(PathBuf, FileStamp)>,
@@ -1217,6 +1311,8 @@ struct RenderOutcome {
     drag_started: Option<usize>,
     /// 이름 편집이 이번 프레임에 끝난 방식 (FR-64) — 상태를 접는 것은 호출부가 한다
     rename_end: Option<RenameEnd>,
+    /// 화살표 한 걸음의 칸 수 (FR-77) — 가로로 흐르는 격자의 한 행 칸 수, 그 밖은 1
+    step: usize,
 }
 
 /// 보기 모드에 맞는 렌더 모듈에 넘긴다. **모델 종류마다 한 번씩 찍히는 유일한 자리**다
@@ -1263,6 +1359,7 @@ fn render_rows<R: ListRow>(
             clear_selection: outcome.clear_selection,
             drag_started: outcome.drag_started,
             rename_end: outcome.rename_end,
+            step: 1,
         }
     } else {
         let outcome = list_grid::show(
@@ -1280,6 +1377,7 @@ fn render_rows<R: ListRow>(
                 visible: request.visible,
                 local_paths: request.local_paths,
                 show_extensions: request.show_extensions,
+                scroll_to: request.scroll_to,
             },
             icons,
             textures,
@@ -1293,6 +1391,7 @@ fn render_rows<R: ListRow>(
             clear_selection: outcome.clear_selection,
             drag_started: outcome.drag_started,
             rename_end: outcome.rename_end,
+            step: outcome.row_step,
         }
     }
 }
@@ -2399,5 +2498,203 @@ mod tests {
         ]);
         v.selection = (0..3).collect();
         assert_eq!(v.selection_summary(), Some((2, 2048)));
+    }
+
+    /// `n` 개의 파일 행 — 이름이 차례대로 정렬되게 붙인다
+    fn files(n: usize) -> FileListView {
+        view(
+            (0..n)
+                .map(|i| (entry(&format!("f{i:02}.txt"), false, 0, 0), "텍스트"))
+                .collect(),
+        )
+    }
+
+    fn picked(v: &FileListView) -> Vec<usize> {
+        v.selection.iter().copied().collect()
+    }
+
+    #[test]
+    fn move_selection_은_다음_행을_단독으로_고른다() {
+        let mut v = files(5);
+        v.select(1, egui::Modifiers::NONE);
+        v.move_selection(true, false);
+        assert_eq!(picked(&v), vec![2]);
+        assert_eq!(v.cursor, Some(2));
+        assert_eq!(v.scroll_to, Some(2), "옮긴 행으로 굴리지 않았다");
+        v.move_selection(false, false);
+        v.move_selection(false, false);
+        assert_eq!(picked(&v), vec![0]);
+    }
+
+    #[test]
+    fn move_selection_은_끝에서_멈춘다() {
+        let mut v = files(3);
+        v.select(2, egui::Modifiers::NONE);
+        v.move_selection(true, false);
+        assert_eq!(picked(&v), vec![2], "끝에서 감싸 돌았다");
+        v.select(0, egui::Modifiers::NONE);
+        v.move_selection(false, false);
+        assert_eq!(picked(&v), vec![0]);
+    }
+
+    #[test]
+    fn move_selection_은_고른_것이_없으면_첫_행을_고른다() {
+        let mut v = files(3);
+        v.move_selection(true, false);
+        assert_eq!(picked(&v), vec![0]);
+    }
+
+    #[test]
+    fn move_selection_shift_는_두_번_누르면_두_칸_넓어진다() {
+        let mut v = files(6);
+        v.select(1, egui::Modifiers::NONE);
+        v.move_selection(true, true);
+        v.move_selection(true, true);
+        assert_eq!(picked(&v), vec![1, 2, 3]);
+        // 위로 거슬러 기준점을 넘으면 반대쪽으로 넓어진다
+        for _ in 0..3 {
+            v.move_selection(false, true);
+        }
+        assert_eq!(picked(&v), vec![0, 1]);
+    }
+
+    #[test]
+    fn move_selection_shift_뒤_무수식은_범위_끝_다음으로_간다() {
+        let mut v = files(6);
+        v.select(1, egui::Modifiers::NONE);
+        v.move_selection(true, true);
+        v.move_selection(true, true);
+        v.move_selection(true, false);
+        assert_eq!(picked(&v), vec![4], "기준점 다음으로 돌아갔다");
+    }
+
+    #[test]
+    fn move_selection_은_필터로_가린_행을_건너뛴다() {
+        let mut v = view(vec![
+            (entry("a1.txt", false, 0, 0), "텍스트"),
+            (entry("b.txt", false, 0, 0), "텍스트"),
+            (entry("a2.txt", false, 0, 0), "텍스트"),
+        ]);
+        v.set_filter("a");
+        v.move_selection(true, false);
+        v.move_selection(true, false);
+        assert_eq!(names(&v)[picked(&v)[0]], "a2.txt");
+    }
+
+    #[test]
+    fn move_selection_격자는_한_행씩_옮긴다() {
+        // 가로로 흐르는 격자에서 한 행이 4칸이면 ↓ 는 바로 아래 칸이다
+        let mut v = files(10);
+        v.step = 4;
+        v.select(1, egui::Modifiers::NONE);
+        v.move_selection(true, false);
+        assert_eq!(picked(&v), vec![5]);
+        // 마지막 행에 칸이 모자라면 마지막 항목으로 간다
+        v.move_selection(true, false);
+        assert_eq!(picked(&v), vec![9]);
+        v.move_selection(true, false);
+        assert_eq!(picked(&v), vec![9], "마지막 행에서 더 내려갔다");
+        // 첫 행에서 ↑ 는 그대로다
+        v.select(2, egui::Modifiers::NONE);
+        v.move_selection(false, false);
+        assert_eq!(picked(&v), vec![2]);
+    }
+
+    #[test]
+    fn shift_클릭은_기준점을_두고_포커스만_옮긴다() {
+        let mut v = files(6);
+        v.select(1, egui::Modifiers::NONE);
+        v.select(3, egui::Modifiers::SHIFT);
+        assert_eq!(v.anchor, Some(1));
+        assert_eq!(v.cursor, Some(3));
+        v.move_selection(true, true);
+        assert_eq!(picked(&v), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn 다시_읽어도_포커스_행이_남는다() {
+        // 감시·F5 로 같은 폴더를 다시 읽으면 행 번호가 바뀔 수 있다 — 이름으로 되살린다
+        let mut icons = crate::fs::icons::IconCache::new();
+        let dir = PathBuf::from(r"C:\문서");
+        let mut v = FileListView::new();
+        v.set_entries(
+            dir.clone(),
+            vec![entry("b.txt", false, 0, 0), entry("c.txt", false, 0, 0)],
+            &mut icons,
+        );
+        v.select(0, egui::Modifiers::NONE);
+        v.move_selection(true, false);
+        // 앞에 새 파일이 생겨 c.txt 의 자리가 하나 밀린다
+        v.set_entries(
+            dir,
+            vec![
+                entry("a.txt", false, 0, 0),
+                entry("b.txt", false, 0, 0),
+                entry("c.txt", false, 0, 0),
+            ],
+            &mut icons,
+        );
+        let c = names(&v).iter().position(|n| n == "c.txt").expect("c.txt");
+        assert_eq!(v.cursor, Some(c), "포커스 행을 잃었다");
+        assert_eq!(v.anchor, Some(c), "기준점을 잃었다");
+        v.move_selection(false, false);
+        assert_eq!(names(&v)[picked(&v)[0]], "b.txt");
+    }
+
+    #[test]
+    fn 원격_목록에서는_move_selection_이_아무것도_하지_않는다() {
+        let mut v = FileListView::new();
+        v.all_type_names = vec![String::new(); 2];
+        v.all_entries = ListModel::Remote(vec![remote("a", false, 1), remote("b", false, 1)]);
+        v.rebuild_order();
+        v.rebuild_visible();
+        v.move_selection(true, false);
+        assert!(v.selection.is_empty());
+        assert_eq!(v.cursor, None);
+    }
+
+    #[test]
+    fn 포커스_파일이_미리보기_대상이다() {
+        let mut v = view(vec![
+            (entry("a.txt", false, 10, 7), "텍스트"),
+            (entry("b.txt", false, 20, 8), "텍스트"),
+        ]);
+        v.dir = PathBuf::from(r"C:\문서");
+        v.select(0, egui::Modifiers::NONE);
+        v.move_selection(true, true);
+        // 둘을 골라도 포커스 행(b)이 대상이다
+        assert_eq!(
+            v.preview_item(),
+            Some((
+                PathBuf::from(r"C:\문서\b.txt"),
+                FileStamp {
+                    size: 20,
+                    modified: 8
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn 폴더와_상위_줄은_미리보기_대상이_아니다() {
+        let mut v = view(vec![
+            (entry("..", true, 0, 0), "폴더"),
+            (entry("사진", true, 0, 0), "폴더"),
+        ]);
+        v.select(0, egui::Modifiers::NONE);
+        assert_eq!(v.preview_item(), None);
+        v.move_selection(true, false);
+        assert_eq!(v.preview_item(), None);
+    }
+
+    #[test]
+    fn 원격_목록은_미리보기_대상이_없다() {
+        let mut v = FileListView::new();
+        v.all_type_names = vec![String::new()];
+        v.all_entries = ListModel::Remote(vec![remote("a.txt", false, 1)]);
+        v.rebuild_order();
+        v.rebuild_visible();
+        v.select(0, egui::Modifiers::NONE);
+        assert_eq!(v.preview_item(), None);
     }
 }

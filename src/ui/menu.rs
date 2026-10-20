@@ -121,6 +121,17 @@ pub enum Command {
     /// 대상은 아니지만 **파일 목록이 키를 가졌을 때만** 나간다(사용자 답 Q3) — 주소창·이름
     /// 편집의 `Ctrl+Z`(글자 되돌리기)와 겹치지 않게 한다
     Undo,
+    /// 빠른 이동 팔레트를 연다 (FR-75) — `Ctrl+P`. 고른 항목이 아니라 앱 전체가 대상이다
+    QuickOpen,
+    /// 목록의 포커스 행을 한 걸음 옮긴다 (FR-77) — `↑`·`↓`, `Shift` 를 들면 범위를 넓힌다.
+    /// 고른 항목을 바꾸므로 파일 목록이 키를 쥔 때만 나간다
+    MoveSelection {
+        down: bool,
+        extend: bool,
+    },
+    /// 미리보기 창을 켜고 끈다 (FR-76) — `Space`. 창은 앱에 하나라 고른 항목을 바꾸지 않아
+    /// 파일 대상 명령이 아니다(사이드바가 키를 가져도 듣는다)
+    TogglePreview,
 }
 
 /// 패널 메뉴 항목의 활성/비활성을 가르는 현재 상태
@@ -432,14 +443,17 @@ fn targets_file_list(command: Command) -> bool {
         | Command::CheckUpdate
         | Command::StartUpdate
         | Command::OpenReleaseNotes
-        | Command::OpenSiteTab(_) => false,
+        | Command::OpenSiteTab(_)
+        | Command::QuickOpen
+        | Command::TogglePreview => false,
         // 고른 항목이 대상이다 — 파일 목록이 키를 쥔 때만 나간다
         Command::Rename
         | Command::Delete { .. }
         | Command::ClipboardCopy
         | Command::ClipboardCut
         | Command::ClipboardPaste
-        | Command::Undo => true,
+        | Command::Undo
+        | Command::MoveSelection { .. } => true,
     }
 }
 
@@ -467,6 +481,11 @@ pub fn poll_shortcuts(ctx: &egui::Context, owner: KeyOwner) -> Option<Command> {
                 if targets_file_list(command) && owner != KeyOwner::FileList {
                     return None;
                 }
+                // `Space` 는 수식 키가 하나도 없을 때만이다 — egui 는 여분 Shift·Alt 를 무시하고
+                // 맞춰 `Alt+Space`(창 시스템 메뉴)까지 미리보기 토글로 읽는다 (FR-76)
+                if key == egui::Key::Space && !input.modifiers.is_none() {
+                    return None;
+                }
                 let shortcut = egui::KeyboardShortcut::new(modifiers, key);
                 input.consume_shortcut(&shortcut).then_some(command)
             })
@@ -481,7 +500,7 @@ pub fn poll_shortcuts(ctx: &egui::Context, owner: KeyOwner) -> Option<Command> {
 ///
 /// **이 표가 유일한 대응이며 사용자가 바꿀 길을 두지 않는다** — 키 매핑 설정 화면도,
 /// 그것을 담을 설정 항목도 만들지 않았다(요청에 없다 — plan T10 Design ④)
-fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 19] {
+fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 25] {
     let ctrl_shift = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
     let ctrl_alt = egui::Modifiers::CTRL | egui::Modifiers::ALT;
     [
@@ -526,6 +545,7 @@ fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 19] {
         (egui::Modifiers::CTRL, egui::Key::W, Command::CloseTab),
         (egui::Modifiers::CTRL, egui::Key::B, Command::ToggleSidebar),
         (egui::Modifiers::CTRL, egui::Key::Z, Command::Undo),
+        (egui::Modifiers::CTRL, egui::Key::P, Command::QuickOpen),
         (egui::Modifiers::ALT, egui::Key::ArrowLeft, Command::Back),
         (
             egui::Modifiers::ALT,
@@ -533,6 +553,46 @@ fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 19] {
             Command::Forward,
         ),
         (egui::Modifiers::ALT, egui::Key::ArrowUp, Command::Up),
+        // **`Shift+↑/↓`가 `↑/↓`보다 앞이다** — egui 는 여분 Shift·Alt 를 무시하고 맞춘다
+        // (`consume_shortcut`). `Alt+↑`·`Ctrl+Alt+↑/↓`는 이미 위에 있다
+        (
+            egui::Modifiers::SHIFT,
+            egui::Key::ArrowUp,
+            Command::MoveSelection {
+                down: false,
+                extend: true,
+            },
+        ),
+        (
+            egui::Modifiers::SHIFT,
+            egui::Key::ArrowDown,
+            Command::MoveSelection {
+                down: true,
+                extend: true,
+            },
+        ),
+        (
+            egui::Modifiers::NONE,
+            egui::Key::ArrowUp,
+            Command::MoveSelection {
+                down: false,
+                extend: false,
+            },
+        ),
+        (
+            egui::Modifiers::NONE,
+            egui::Key::ArrowDown,
+            Command::MoveSelection {
+                down: true,
+                extend: false,
+            },
+        ),
+        // 수식 키를 든 `Space`(창 시스템 메뉴의 `Alt+Space` 등)는 `poll_shortcuts`가 거른다
+        (
+            egui::Modifiers::NONE,
+            egui::Key::Space,
+            Command::TogglePreview,
+        ),
         (egui::Modifiers::NONE, egui::Key::F5, Command::Refresh),
         (egui::Modifiers::NONE, egui::Key::F2, Command::Rename),
         (
@@ -884,6 +944,103 @@ mod tests {
     }
 
     #[test]
+    fn 화살표는_선택_옮기기다() {
+        // FR-77 — 무수식 ↑·↓ 는 한 걸음, Shift 를 들면 범위를 넓힌다
+        let 찾기 = |modifiers, key| {
+            shortcut_table()
+                .into_iter()
+                .find(|(m, k, _)| *m == modifiers && *k == key)
+                .map(|(_, _, command)| command)
+        };
+        assert_eq!(
+            찾기(egui::Modifiers::NONE, egui::Key::ArrowDown),
+            Some(Command::MoveSelection {
+                down: true,
+                extend: false
+            })
+        );
+        assert_eq!(
+            찾기(egui::Modifiers::SHIFT, egui::Key::ArrowUp),
+            Some(Command::MoveSelection {
+                down: false,
+                extend: true
+            })
+        );
+    }
+
+    #[test]
+    fn shift_화살표가_화살표보다_앞이다() {
+        // egui 의 `consume_shortcut` 은 여분 Shift·Alt 를 무시한다 — 무수식 ↑ 가 먼저 오면
+        // `Shift+↑`·`Alt+↑`(상위 폴더)·`Ctrl+Alt+↑`(위로 분할)가 그 줄에 먼저 걸린다
+        let table = shortcut_table();
+        let 자리 = |modifiers: egui::Modifiers, key| {
+            table
+                .iter()
+                .position(|(m, k, _)| *m == modifiers && *k == key)
+                .expect("표에 있어야 한다")
+        };
+        let ctrl_alt = egui::Modifiers::CTRL | egui::Modifiers::ALT;
+        for key in [egui::Key::ArrowUp, egui::Key::ArrowDown] {
+            let plain = 자리(egui::Modifiers::NONE, key);
+            assert!(자리(egui::Modifiers::SHIFT, key) < plain, "{key:?}");
+            assert!(자리(ctrl_alt, key) < plain, "{key:?}");
+        }
+        assert!(
+            자리(egui::Modifiers::ALT, egui::Key::ArrowUp)
+                < 자리(egui::Modifiers::NONE, egui::Key::ArrowUp)
+        );
+    }
+
+    /// 키 하나를 눌러 한 프레임 돌리고 그 프레임에 나간 명령을 돌려준다
+    fn press(key: egui::Key, modifiers: egui::Modifiers) -> Option<Command> {
+        let ctx = egui::Context::default();
+        let mut got = None;
+        let input = egui::RawInput {
+            modifiers,
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ctx| {
+            got = poll_shortcuts(ctx, KeyOwner::FileList);
+        });
+        got
+    }
+
+    #[test]
+    fn space_는_미리보기_토글이다() {
+        // FR-76 — 사이드바가 키를 가져도 켜고 끈다(파일 대상이 아니다)
+        assert_eq!(
+            press(egui::Key::Space, egui::Modifiers::NONE),
+            Some(Command::TogglePreview)
+        );
+        assert!(!targets_file_list(Command::TogglePreview));
+    }
+
+    #[test]
+    fn 수식_키를_든_space_는_받지_않는다() {
+        for modifiers in [egui::Modifiers::ALT, egui::Modifiers::SHIFT] {
+            assert_eq!(press(egui::Key::Space, modifiers), None, "{modifiers:?}");
+        }
+    }
+
+    #[test]
+    fn ctrl_p_는_빠른_이동이다() {
+        // FR-75 — 파일 목록이 키를 갖지 않아도(사이드바를 누른 뒤에도) 열린다
+        let 찾은 = shortcut_table()
+            .into_iter()
+            .find(|(modifiers, key, _)| *modifiers == egui::Modifiers::CTRL && *key == egui::Key::P)
+            .map(|(_, _, command)| command);
+        assert_eq!(찾은, Some(Command::QuickOpen));
+        assert!(!targets_file_list(Command::QuickOpen));
+    }
+
+    #[test]
     fn 되돌리기는_파일_목록이_키를_가질_때만_나간다() {
         // 사용자 답 Q3 — 사이드바·주소창이 키를 쥔 동안의 `Ctrl+Z` 는 되돌리기가 아니다
         assert!(targets_file_list(Command::Undo));
@@ -904,6 +1061,22 @@ mod tests {
             vec![
                 Command::Delete { permanent: true },
                 Command::Undo,
+                Command::MoveSelection {
+                    down: false,
+                    extend: true
+                },
+                Command::MoveSelection {
+                    down: true,
+                    extend: true
+                },
+                Command::MoveSelection {
+                    down: false,
+                    extend: false
+                },
+                Command::MoveSelection {
+                    down: true,
+                    extend: false
+                },
                 Command::Rename,
                 Command::Delete { permanent: false },
             ]
@@ -1270,9 +1443,9 @@ mod tests {
     }
 
     #[test]
-    fn 무수식_키는_셋뿐이다() {
-        // `F5`·`F2`·`Delete` 셋만 수식 키 없이 받는다 (FR-12). 글자 키를 여기 더하면
-        // 이름 편집 중 텍스트 입력을 가로챈다 — `F2`·`Delete`는 글자가 아니고,
+    fn 무수식_키는_정해진_것뿐이다() {
+        // 수식 키 없이 받는 키는 이 목록뿐이다 (FR-12·FR-77). 글자 키를 여기 더하면
+        // 이름 편집 중 텍스트 입력을 가로챈다 — 화살표·`F2`·`Delete`는 글자가 아니고,
         // 편집 중에는 `egui_wants_keyboard_input`이 먼저 걸러 낸다
         let 무수식: Vec<egui::Key> = shortcut_table()
             .into_iter()
@@ -1281,7 +1454,14 @@ mod tests {
             .collect();
         assert_eq!(
             무수식,
-            vec![egui::Key::F5, egui::Key::F2, egui::Key::Delete]
+            vec![
+                egui::Key::ArrowUp,
+                egui::Key::ArrowDown,
+                egui::Key::Space,
+                egui::Key::F5,
+                egui::Key::F2,
+                egui::Key::Delete
+            ]
         );
     }
 

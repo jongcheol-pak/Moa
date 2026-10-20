@@ -14,7 +14,7 @@ use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{DeleteObject, HBITMAP};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::UI::Shell::{
-    IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_RESIZETOFIT,
+    IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF, SIIGBF_RESIZETOFIT,
 };
 use windows::core::HSTRING;
 
@@ -438,20 +438,23 @@ fn worker(rx: Receiver<Request>, tx: Sender<Outcome>) {
 
 /// 파일 하나의 썸네일을 만든다. 만들 수 없으면 `None`(형식 아이콘으로 폴백된다).
 ///
-/// 안전성: COM이 초기화된 스레드에서만 호출한다. 얻은 HBITMAP은 이 함수 안에서 해제한다
+/// RESIZETOFIT만 준다 — 비율을 지키며 요청 크기 **안으로** 맞춘다.
+/// `BIGGERSIZEOK`을 함께 주면 셸이 요청보다 큰 그림을 돌려줄 수 있어 한 장이
+/// 256×256×4를 넘고, 그러면 장수로만 거는 상한(NFR-9)이 바이트를 보장하지 못한다.
+/// ICONONLY를 주지 않으므로 썸네일이 있으면 그것이 온다
 fn make_thumbnail(path: &Path) -> Option<ThumbnailImage> {
+    shell_image(path, THUMB_PX, SIIGBF_RESIZETOFIT)
+}
+
+/// 셸에 그 파일의 그림을 `px`×`px` 안으로 청한다 — 썸네일과 미리보기 창(`fs::preview`)이 함께 쓴다.
+///
+/// 안전성: COM이 초기화된 스레드에서만 호출한다. 얻은 HBITMAP은 이 함수 안에서 해제한다
+pub(crate) fn shell_image(path: &Path, px: i32, flags: SIIGBF) -> Option<ThumbnailImage> {
     unsafe {
         let factory: IShellItemImageFactory =
             SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None).ok()?;
-        let size = SIZE {
-            cx: THUMB_PX,
-            cy: THUMB_PX,
-        };
-        // RESIZETOFIT만 준다 — 비율을 지키며 요청 크기 **안으로** 맞춘다.
-        // `BIGGERSIZEOK`을 함께 주면 셸이 요청보다 큰 그림을 돌려줄 수 있어 한 장이
-        // 256×256×4를 넘고, 그러면 장수로만 거는 상한(NFR-9)이 바이트를 보장하지 못한다.
-        // ICONONLY를 주지 않으므로 썸네일이 있으면 그것이 온다
-        let bitmap = factory.GetImage(size, SIIGBF_RESIZETOFIT).ok()?;
+        let size = SIZE { cx: px, cy: px };
+        let bitmap = factory.GetImage(size, flags).ok()?;
         let image = bitmap_to_rgba(bitmap);
         let _ = DeleteObject(bitmap.into());
         image
