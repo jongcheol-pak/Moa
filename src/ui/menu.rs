@@ -129,6 +129,9 @@ pub enum Command {
         down: bool,
         extend: bool,
     },
+    /// 미리보기 창을 켜고 끈다 (FR-76) — `Space`. 창은 앱에 하나라 고른 항목을 바꾸지 않아
+    /// 파일 대상 명령이 아니다(사이드바가 키를 가져도 듣는다)
+    TogglePreview,
 }
 
 /// 패널 메뉴 항목의 활성/비활성을 가르는 현재 상태
@@ -441,7 +444,8 @@ fn targets_file_list(command: Command) -> bool {
         | Command::StartUpdate
         | Command::OpenReleaseNotes
         | Command::OpenSiteTab(_)
-        | Command::QuickOpen => false,
+        | Command::QuickOpen
+        | Command::TogglePreview => false,
         // 고른 항목이 대상이다 — 파일 목록이 키를 쥔 때만 나간다
         Command::Rename
         | Command::Delete { .. }
@@ -477,6 +481,11 @@ pub fn poll_shortcuts(ctx: &egui::Context, owner: KeyOwner) -> Option<Command> {
                 if targets_file_list(command) && owner != KeyOwner::FileList {
                     return None;
                 }
+                // `Space` 는 수식 키가 하나도 없을 때만이다 — egui 는 여분 Shift·Alt 를 무시하고
+                // 맞춰 `Alt+Space`(창 시스템 메뉴)까지 미리보기 토글로 읽는다 (FR-76)
+                if key == egui::Key::Space && !input.modifiers.is_none() {
+                    return None;
+                }
                 let shortcut = egui::KeyboardShortcut::new(modifiers, key);
                 input.consume_shortcut(&shortcut).then_some(command)
             })
@@ -491,7 +500,7 @@ pub fn poll_shortcuts(ctx: &egui::Context, owner: KeyOwner) -> Option<Command> {
 ///
 /// **이 표가 유일한 대응이며 사용자가 바꿀 길을 두지 않는다** — 키 매핑 설정 화면도,
 /// 그것을 담을 설정 항목도 만들지 않았다(요청에 없다 — plan T10 Design ④)
-fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 24] {
+fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 25] {
     let ctrl_shift = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
     let ctrl_alt = egui::Modifiers::CTRL | egui::Modifiers::ALT;
     [
@@ -577,6 +586,12 @@ fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 24] {
                 down: true,
                 extend: false,
             },
+        ),
+        // 수식 키를 든 `Space`(창 시스템 메뉴의 `Alt+Space` 등)는 `poll_shortcuts`가 거른다
+        (
+            egui::Modifiers::NONE,
+            egui::Key::Space,
+            Command::TogglePreview,
         ),
         (egui::Modifiers::NONE, egui::Key::F5, Command::Refresh),
         (egui::Modifiers::NONE, egui::Key::F2, Command::Rename),
@@ -974,6 +989,44 @@ mod tests {
             자리(egui::Modifiers::ALT, egui::Key::ArrowUp)
                 < 자리(egui::Modifiers::NONE, egui::Key::ArrowUp)
         );
+    }
+
+    /// 키 하나를 눌러 한 프레임 돌리고 그 프레임에 나간 명령을 돌려준다
+    fn press(key: egui::Key, modifiers: egui::Modifiers) -> Option<Command> {
+        let ctx = egui::Context::default();
+        let mut got = None;
+        let input = egui::RawInput {
+            modifiers,
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ctx| {
+            got = poll_shortcuts(ctx, KeyOwner::FileList);
+        });
+        got
+    }
+
+    #[test]
+    fn space_는_미리보기_토글이다() {
+        // FR-76 — 사이드바가 키를 가져도 켜고 끈다(파일 대상이 아니다)
+        assert_eq!(
+            press(egui::Key::Space, egui::Modifiers::NONE),
+            Some(Command::TogglePreview)
+        );
+        assert!(!targets_file_list(Command::TogglePreview));
+    }
+
+    #[test]
+    fn 수식_키를_든_space_는_받지_않는다() {
+        for modifiers in [egui::Modifiers::ALT, egui::Modifiers::SHIFT] {
+            assert_eq!(press(egui::Key::Space, modifiers), None, "{modifiers:?}");
+        }
     }
 
     #[test]
@@ -1404,6 +1457,7 @@ mod tests {
             vec![
                 egui::Key::ArrowUp,
                 egui::Key::ArrowDown,
+                egui::Key::Space,
                 egui::Key::F5,
                 egui::Key::F2,
                 egui::Key::Delete

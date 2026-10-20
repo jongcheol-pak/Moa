@@ -1214,6 +1214,18 @@ impl PanelState {
         }
     }
 
+    /// 미리보기 창이 보일 것 (FR-76) — 원격 탭이면 따로 갈라 사유를 보이게 한다
+    pub fn preview_target(&self) -> crate::ui::preview::PreviewTarget {
+        use crate::ui::preview::PreviewTarget;
+        if self.is_remote() {
+            return PreviewTarget::Remote;
+        }
+        match self.list.preview_item() {
+            Some((path, stamp)) => PreviewTarget::File { path, stamp },
+            None => PreviewTarget::Nothing,
+        }
+    }
+
     /// 목록의 포커스 행을 한 걸음 옮긴다 (FR-77) — 원격 목록에서는 아무 일도 하지 않는다
     pub fn move_selection(&mut self, down: bool, extend: bool) {
         self.list.move_selection(down, extend);

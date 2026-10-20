@@ -5067,3 +5067,30 @@ fn 감시_재읽기_뒤에도_포커스_행이_남는다() {
         "포커스 행을 잃어 다른 자리에서 시작했다"
     );
 }
+
+#[test]
+fn 재읽기_뒤에도_미리보기_대상이_남는다() {
+    // FR-76 — 쓰이고 있는 파일을 미리보는 동안 감시가 폴더를 다시 읽어도 대상이 사라지지 않는다
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let docs = std::path::PathBuf::from(r"C:\Docs");
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\Users"));
+    for names in [&["b.txt", "c.txt"][..], &["a.txt", "b.txt", "c.txt"][..]] {
+        panel.pending_dir = docs.clone();
+        panel.pending_nav = PendingNav::None;
+        panel.apply_enumerated(EnumOutcome::Ok(batch(names)), &mut icons, &mut cache, &ctx);
+        if names.len() == 2 {
+            // `..` 다음 b → c
+            for _ in 0..3 {
+                panel.move_selection(true, false);
+            }
+        }
+    }
+    assert!(
+        matches!(
+            panel.preview_target(),
+            crate::ui::preview::PreviewTarget::File { ref path, .. } if *path == docs.join("c.txt")
+        ),
+        "{:?}",
+        panel.preview_target()
+    );
+}

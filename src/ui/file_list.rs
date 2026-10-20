@@ -699,6 +699,19 @@ impl FileListView {
         self.resort();
     }
 
+    /// 미리보기 창에 보일 파일 (FR-76) — 포커스 행이 선택에 들어 있고 로컬 **파일**일 때 그 경로와 도장.
+    /// 폴더·`..` 줄·원격 목록은 `None` 이다. 선택 전체를 훑지 않는다 — 매 프레임 불린다
+    pub fn preview_item(&self) -> Option<(PathBuf, FileStamp)> {
+        let ListModel::Local(rows) = &self.model else {
+            return None;
+        };
+        let cursor = self
+            .cursor
+            .filter(|cursor| self.selection.contains(cursor))?;
+        let row = rows.get(cursor).filter(|row| !row.is_dir())?;
+        Some((row.path_in(&self.dir), crate::ui::list_grid::row_stamp(row)))
+    }
+
     /// 화살표로 포커스 행을 옮긴다 (FR-77) — 로컬 목록에서만.
     ///
     /// 무수식이면 옮긴 행 하나를 고르고 기준점도 거기로, `extend`(Shift)면 기준점을 두고
@@ -2638,5 +2651,50 @@ mod tests {
         v.move_selection(true, false);
         assert!(v.selection.is_empty());
         assert_eq!(v.cursor, None);
+    }
+
+    #[test]
+    fn 포커스_파일이_미리보기_대상이다() {
+        let mut v = view(vec![
+            (entry("a.txt", false, 10, 7), "텍스트"),
+            (entry("b.txt", false, 20, 8), "텍스트"),
+        ]);
+        v.dir = PathBuf::from(r"C:\문서");
+        v.select(0, egui::Modifiers::NONE);
+        v.move_selection(true, true);
+        // 둘을 골라도 포커스 행(b)이 대상이다
+        assert_eq!(
+            v.preview_item(),
+            Some((
+                PathBuf::from(r"C:\문서\b.txt"),
+                FileStamp {
+                    size: 20,
+                    modified: 8
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn 폴더와_상위_줄은_미리보기_대상이_아니다() {
+        let mut v = view(vec![
+            (entry("..", true, 0, 0), "폴더"),
+            (entry("사진", true, 0, 0), "폴더"),
+        ]);
+        v.select(0, egui::Modifiers::NONE);
+        assert_eq!(v.preview_item(), None);
+        v.move_selection(true, false);
+        assert_eq!(v.preview_item(), None);
+    }
+
+    #[test]
+    fn 원격_목록은_미리보기_대상이_없다() {
+        let mut v = FileListView::new();
+        v.all_type_names = vec![String::new()];
+        v.all_entries = ListModel::Remote(vec![remote("a.txt", false, 1)]);
+        v.rebuild_order();
+        v.rebuild_visible();
+        v.select(0, egui::Modifiers::NONE);
+        assert_eq!(v.preview_item(), None);
     }
 }

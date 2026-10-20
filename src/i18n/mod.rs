@@ -406,6 +406,12 @@ strings! {
     palette_source_favorite => "즐겨찾기" / "Favorite";
     palette_source_tab => "탭" / "Tab";
     palette_source_workspace => "워크스페이스" / "Workspace";
+    /// 미리보기 창(`Space`, FR-76)의 사유 한 줄 — 보일 것이 없을 때
+    preview_nothing => "고른 파일이 없습니다" / "No file selected";
+    preview_remote => "원격 파일은 미리보지 않습니다" / "Remote files are not previewed";
+    preview_binary => "미리볼 수 없는 형식입니다" / "This file can't be previewed";
+    preview_failed => "읽지 못했습니다" / "Couldn't read this file";
+    preview_loading => "읽는 중…" / "Loading…";
     /// 앱 안에서 Shift 를 든 채 끄는 동안 그림 옆에 붙는 표시 (FR-60 — 놓으면 이동한다)
     drag_moving => "이동" / "Move";
     /// `Ctrl+Z`를 눌렀는데 되돌릴 기록이 없을 때 (FR-74)
@@ -2191,5 +2197,23 @@ mod tests {
         assert_eq!(palette_source_tab(), "Tab");
         assert_eq!(palette_source_workspace(), "Workspace");
         assert!(palette_placeholder().starts_with("Go to"));
+    }
+
+    #[test]
+    fn 미리보기_문구는_두_언어를_모두_낸다() {
+        // FR-76 — 기대값은 원문 리터럴이고 언어를 잠근다
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(preview_nothing(), "고른 파일이 없습니다");
+        assert_eq!(preview_remote(), "원격 파일은 미리보지 않습니다");
+        assert_eq!(preview_binary(), "미리볼 수 없는 형식입니다");
+        assert_eq!(preview_failed(), "읽지 못했습니다");
+        assert_eq!(preview_loading(), "읽는 중…");
+
+        set_language(LanguageSetting::English);
+        assert_eq!(preview_nothing(), "No file selected");
+        assert_eq!(preview_remote(), "Remote files are not previewed");
+        assert_eq!(preview_binary(), "This file can't be previewed");
+        assert_eq!(preview_failed(), "Couldn't read this file");
+        assert_eq!(preview_loading(), "Loading…");
     }
 }

@@ -22,6 +22,7 @@ pub mod menu;
 pub mod paint_guard;
 pub mod palette;
 pub mod panel;
+pub mod preview;
 pub mod queue_panel;
 pub mod remote_menu;
 pub mod remote_states;

@@ -608,6 +608,8 @@ pub struct ExplorerApp {
     bulk_rename: crate::ui::bulk_rename_dialog::BulkRenameDialog,
     /// 빠른 이동 팔레트 (FR-75) — `Ctrl+P`가 연다
     quick_open: crate::ui::palette::QuickOpen,
+    /// 미리보기 창 (FR-76) — `Space`가 켜고 끈다. 창 전체에 하나다
+    preview: crate::ui::preview::PreviewPane,
     /// 고를 수 있는 글꼴 목록 (FR-48) — 워커가 만든다. 앱이 시작할 때 한 번만 읽는다
     font_scan: FontScan,
     /// 알림 영역 아이콘 (FR-50) — `종료` 토글이 켜져 있을 때만 있다. 없애면 아이콘이 사라진다
@@ -887,6 +889,7 @@ impl ExplorerApp {
             about_dialog: AboutDialog::new(),
             bulk_rename: crate::ui::bulk_rename_dialog::BulkRenameDialog::new(),
             quick_open: crate::ui::palette::QuickOpen::new(),
+            preview: crate::ui::preview::PreviewPane::new(),
             font_scan: FontScan::new(),
             tray: None,
             tray_rx,
@@ -2133,6 +2136,7 @@ impl ExplorerApp {
             // 기록이 앱 전체 하나라 대상 패널을 보지 않는다 (plan D7)
             Command::Undo => self.undo_last(ctx.input(|input| input.time)),
             Command::QuickOpen => self.open_quick_open(),
+            Command::TogglePreview => self.preview.toggle(),
             Command::MoveSelection { down, extend } => {
                 if let Some(panel) = self.command_panel_mut(target) {
                     panel.move_selection(down, extend);
@@ -3075,6 +3079,28 @@ impl eframe::App for ExplorerApp {
                     sidebar_actions = panel.inner;
                 }
 
+                // 미리보기 창은 사이드바 다음·분할 영역 앞에서 뗀다 — 남는 자리가 분할 영역이다 (FR-76).
+                // 대상은 활성 워크스페이스의 활성 패널이다. **이 배선은 리뷰가 지키는 자리다** —
+                // 대상 판정(`PanelState::preview_target`)과 창 상태(`PreviewPane`)는 시험이 덮는다
+                if self.preview.is_open() {
+                    let target = self
+                        .views
+                        .get(&self.workspaces.active().id)
+                        .and_then(|view| view.panels.get(&view.active))
+                        .map_or(crate::ui::preview::PreviewTarget::Nothing, |panel| {
+                            panel.preview_target()
+                        });
+                    self.preview.update(target, &ctx);
+                    egui::Panel::right(egui::Id::new("preview_pane"))
+                        .resizable(true)
+                        .default_size(crate::ui::preview::DEFAULT_WIDTH)
+                        .size_range(egui::Rangef::new(
+                            crate::ui::preview::MIN_WIDTH,
+                            crate::ui::preview::MAX_WIDTH,
+                        ))
+                        .frame(egui::Frame::NONE.fill(theme::SURFACE_BG))
+                        .show(ui, |ui| self.preview.show(ui));
+                }
                 let area = splitter::to_layout_rect(ui.available_rect_before_wrap());
                 layout_area = Some(area);
                 let now = ui.input(|input| input.time);
