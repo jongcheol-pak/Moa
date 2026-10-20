@@ -16,5 +16,6 @@ pub mod search;
 pub mod shell_menu;
 pub mod shell_menu_worker;
 pub mod thumbnail;
+pub mod undo;
 pub mod watcher;
 pub mod zip_shell;

@@ -9,32 +9,53 @@
 //! 돌아오지 않아, UI 스레드에서 부르면 대용량 복사·수백 항목 삭제 내내 앱이 굳는다
 //! (AGENTS: UI 스레드 블로킹 I/O 금지). 그 골격은 `spawn_shell_op` 한 곳에 있다.
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{
-    CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+    CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+    CoUninitialize,
 };
 use windows::Win32::UI::Shell::{
     FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR, FileOperation, IFileOperation,
-    IShellItem, SHCreateItemFromParsingName,
+    IFileOperationProgressSink, IFileOperationProgressSink_Impl, IShellItem,
+    SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
 };
-use windows::core::{HSTRING, PCWSTR};
+use windows::core::{HRESULT, HSTRING, PCWSTR, Ref, implement};
 
-/// 복사 한 번의 결과 — 화면이 알릴 것만 담는다.
+use crate::fs::undo::{Stamp, stamp_of};
+
+/// 셸 작업 하나가 실제로 해낸 것 — 원래 자리와 그 뒤의 자리 (FR-74).
 ///
-/// **성공 건수를 세지 않는다** — 셸이 자기 진행률 대화로 이미 알렸고, 몇 개가 실제로
-/// 복사됐는지는 사용자가 충돌 대화에서 무엇을 골랐는지에 달려 셸만 안다. 앱이 알아야
-/// 하는 것은 "탈이 났는가"뿐이다
+/// `to`는 **셸이 알려 준 실제 자리**다 — 같은 이름 충돌 대화에서 「둘 다 유지」를 고르면
+/// `(2)`가 붙어 우리가 건 이름과 달라진다. `preexisting`은 작업 직전에 그 자리에 이미
+/// 무언가 있었는가(덮어쓰기·폴더 병합)이며, 그런 항목은 되돌리면 원래 있던 것까지 잃는다
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Applied {
+    pub from: PathBuf,
+    pub to: PathBuf,
+    /// 작업 직후 `to`의 도장 — 워커가 잰다(UI 스레드에서 파일시스템을 묻지 않는다)
+    pub stamp: Option<Stamp>,
+    pub preexisting: bool,
+}
+
+/// 복사·이동 한 번의 결과 — 화면이 알릴 것과 되돌리기가 기록할 것을 담는다.
+///
+/// 몇 개가 실제로 갔는지는 사용자가 충돌 대화에서 무엇을 골랐는지에 달려 셸만 안다 —
+/// 그것은 `applied`가 셸의 진행 통지로 받아 온다
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyOutcome {
-    /// 복사를 걸었던 항목 수 — 알림 문구가 규모를 적는 데 쓴다
+    /// 걸었던 항목 수 — 알림 문구가 규모를 적는 데 쓴다
     pub requested: usize,
+    /// 복사였나 이동이었나 — 알림 문구와 되돌리기 방식이 갈린다
+    pub how: Transfer,
     /// 사용자가 셸 대화에서 그만뒀는가. **오류가 아니다**
     pub cancelled: bool,
     /// 셸이 준 실패 사유 — 없으면 탈 없이 끝났다
     pub error: Option<String>,
+    /// 실제로 옮겨지거나 생긴 것 — 도중에 그만뒀거나 실패했어도 된 것은 실린다
+    pub applied: Vec<Applied>,
 }
 
 /// 워커를 깨워 화면을 다시 그리게 하는 손잡이 — `remote::connection::Wake`와 같은 모양이다
@@ -68,26 +89,7 @@ pub fn copy_into(
     done: Sender<CopyOutcome>,
     wake: Wake,
 ) -> bool {
-    if sources.is_empty() {
-        return false;
-    }
-    let owner = HwndSend(owner.0 as isize);
-    let requested = sources.len();
-    spawn_shell_op(done, wake, move || {
-        // 결과 타입이 `FileOpOutcome`과 달라 조립만 따로 한다 — 워커 껍데기는 같이 쓴다
-        match perform(&dest, &sources, &owner, Transfer::Copy) {
-            Ok(cancelled) => CopyOutcome {
-                requested,
-                cancelled,
-                error: None,
-            },
-            Err(error) => CopyOutcome {
-                requested,
-                cancelled: false,
-                error: Some(error),
-            },
-        }
-    })
+    start_transfer(dest, sources, Transfer::Copy, owner, done, wake)
 }
 
 /// `sources`를 `dest` 폴더로 **옮긴다** — 곧바로 돌아오고 결과는 `done`으로 온다 (FR-64).
@@ -104,38 +106,70 @@ pub fn move_into(
     done: Sender<CopyOutcome>,
     wake: Wake,
 ) -> bool {
+    start_transfer(dest, sources, Transfer::Move, owner, done, wake)
+}
+
+/// 복사·이동의 공통 진입 — 워커를 띄우고 결과를 `CopyOutcome`으로 조립한다
+fn start_transfer(
+    dest: PathBuf,
+    sources: Vec<PathBuf>,
+    how: Transfer,
+    owner: HWND,
+    done: Sender<CopyOutcome>,
+    wake: Wake,
+) -> bool {
     if sources.is_empty() {
         return false;
     }
     let owner = HwndSend(owner.0 as isize);
     let requested = sources.len();
     spawn_shell_op(done, wake, move || {
-        match perform(&dest, &sources, &owner, Transfer::Move) {
-            Ok(cancelled) => CopyOutcome {
-                requested,
-                cancelled,
-                error: None,
-            },
-            Err(error) => CopyOutcome {
-                requested,
-                cancelled: false,
-                error: Some(error),
-            },
+        let ran = perform(&dest, &sources, &owner, how, TRANSFER_FLAGS);
+        CopyOutcome {
+            requested,
+            how,
+            cancelled: ran.cancelled,
+            error: ran.error,
+            applied: ran.applied,
         }
     })
 }
+
+/// 복사·이동에 거는 셸 플래그.
+///
+/// `FOF_ALLOWUNDO`는 셸 쪽 되돌리기 기록에도 남게 한다. `FOF_NOCONFIRMMKDIR`는 대상 폴더를
+/// 만들 때만 묻지 않는 것이라, 같은 이름 충돌 확인은 그대로 뜬다(FR-60이 셸에 맡긴 그 대화다)
+const TRANSFER_FLAGS: FILEOPERATION_FLAGS =
+    FILEOPERATION_FLAGS(FOF_ALLOWUNDO.0 | FOF_NOCONFIRMMKDIR.0);
 
 /// 셸에 걸 전송 방식 — 복사인가 이동인가.
 ///
 /// 불리언 대신 두는 이유: 호출부에서 `perform(dest, sources, owner, true)`가 무엇의
 /// 참인지 읽히지 않는다
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Transfer {
+pub enum Transfer {
     Copy,
     Move,
 }
 
-/// 실제 COM 호출 — 성공하면 `사용자가 그만뒀는가`를 돌려준다.
+/// 셸 작업 한 번을 돌린 결과 — 걸기 전 실패도, 도중 실패도 여기 담긴다
+struct Performed {
+    cancelled: bool,
+    error: Option<String>,
+    applied: Vec<Applied>,
+}
+
+impl Performed {
+    fn failed(error: String) -> Performed {
+        Performed {
+            cancelled: false,
+            error: Some(error),
+            applied: Vec::new(),
+        }
+    }
+}
+
+/// 실제 COM 호출.
 ///
 /// **읽지 못하는 원본은 그것만 건너뛴다** — 여러 개를 끌어다 놓았는데 그 사이 하나가
 /// 사라졌다고 나머지를 버릴 이유가 없다. 하나도 걸지 못했으면 실패로 본다.
@@ -147,35 +181,261 @@ fn perform(
     sources: &[PathBuf],
     owner: &HwndSend,
     how: Transfer,
-) -> Result<bool, String> {
+    flags: FILEOPERATION_FLAGS,
+) -> Performed {
+    // 작업 직전에 대상 자리가 차 있었는가 — 덮어쓰기·병합을 가른다 (plan D1)
+    let occupied: Vec<PathBuf> = sources
+        .iter()
+        .filter_map(|source| source.file_name().map(|name| dest.join(name)))
+        .filter(|target| std::fs::symlink_metadata(target).is_ok())
+        .collect();
     // 안전성: 아래 호출은 모두 COM이 STA로 초기화된 이 스레드에서만 돌고, 얻은 인터페이스는
     // 이 함수 안에서만 살다 `Drop`으로 해제된다. 경로 문자열은 호출이 끝날 때까지 지역 소유다
-    unsafe {
-        // `FOF_ALLOWUNDO`가 `Ctrl+Z`를 만든다. `FOF_NOCONFIRMMKDIR`는 대상 폴더를 만들 때만
-        // 묻지 않는 것이라, 같은 이름 충돌 확인은 그대로 뜬다(FR-60이 셸에 맡긴 그 대화다)
-        let op = new_operation(FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR, owner)?;
-        let folder: IShellItem = shell_item(dest)?;
-        let mut queued = 0usize;
-        for source in sources {
-            let Ok(item) = shell_item(source) else {
-                // 그 사이 사라진 원본 — 나머지는 그대로 보낸다
-                continue;
-            };
-            // 사유를 만들지 않는다 — 이 실패는 그 항목만 건너뛰는 것이라 아무도 읽지 않는다.
-            // 하나도 걸지 못한 경우의 사유는 아래에서 따로 만든다
-            let queued_one = match how {
-                Transfer::Copy => op.CopyItem(&item, &folder, PCWSTR::null(), None),
-                Transfer::Move => op.MoveItem(&item, &folder, PCWSTR::null(), None),
-            };
-            if queued_one.is_ok() {
-                queued += 1;
+    let ran = unsafe {
+        run_operation(flags, owner, sources, |op| {
+            let folder: IShellItem = shell_item(dest)?;
+            let mut queued = 0usize;
+            for source in sources {
+                let Ok(item) = shell_item(source) else {
+                    // 그 사이 사라진 원본 — 나머지는 그대로 보낸다
+                    continue;
+                };
+                // 사유를 만들지 않는다 — 이 실패는 그 항목만 건너뛰는 것이라 아무도 읽지 않는다.
+                // 하나도 걸지 못한 경우의 사유는 아래에서 따로 만든다
+                let queued_one = match how {
+                    Transfer::Copy => op.CopyItem(&item, &folder, PCWSTR::null(), None),
+                    Transfer::Move => op.MoveItem(&item, &folder, PCWSTR::null(), None),
+                };
+                if queued_one.is_ok() {
+                    queued += 1;
+                }
             }
+            if queued == 0 {
+                return Err(crate::i18n::copy_no_source().to_owned());
+            }
+            Ok(())
+        })
+    };
+    finish(ran, |to| occupied.iter().any(|seen| same_path(seen, to)))
+}
+
+/// `PerformOperations`까지 간 작업 한 번 — 셸이 알려 준 (원래, 새) 자리를 함께 든다
+struct Ran {
+    cancelled: bool,
+    error: Option<String>,
+    pairs: Vec<(PathBuf, PathBuf)>,
+}
+
+/// 셸 작업 하나를 진행 통지와 함께 돌린다 — 항목을 거는 것은 `queue`가 한다.
+///
+/// 걸기 전 실패면 `Err`다. **도중에 실패해도 된 것은 버리지 않는다** — 되돌리기가 그것을
+/// 기록해야 한다
+///
+/// 안전성: COM이 STA로 초기화된 스레드에서만 부른다
+unsafe fn run_operation(
+    flags: FILEOPERATION_FLAGS,
+    owner: &HwndSend,
+    sources: &[PathBuf],
+    queue: impl FnOnce(&IFileOperation) -> Result<(), String>,
+) -> Result<Ran, String> {
+    // 안전성: 위 주석 참조
+    unsafe {
+        let op = new_operation(flags, owner)?;
+        let done = Arc::new(Mutex::new(Vec::new()));
+        let sink: IFileOperationProgressSink = ResultSink {
+            sources: sources.to_vec(),
+            done: done.clone(),
         }
-        if queued == 0 {
-            return Err(crate::i18n::copy_no_source().to_owned());
+        .into();
+        // 통지를 걸지 못해도 작업 자체는 한다 — 그때는 되돌리기 기록만 비어 남는다
+        let cookie = op.Advise(&sink).ok();
+        queue(&op)?;
+        let error = op.PerformOperations().err().map(|err| err.message());
+        let cancelled = aborted(&op);
+        if let Some(cookie) = cookie {
+            let _ = op.Unadvise(cookie);
         }
-        op.PerformOperations().map_err(|err| err.message())?;
-        Ok(aborted(&op))
+        let pairs = done.lock().map(|pairs| pairs.clone()).unwrap_or_default();
+        Ok(Ran {
+            cancelled,
+            error,
+            pairs,
+        })
+    }
+}
+
+/// 작업 결과를 `Performed`로 접는다 — 도장은 여기(워커)서 잰다
+fn finish(ran: Result<Ran, String>, was_occupied: impl Fn(&Path) -> bool) -> Performed {
+    match ran {
+        Err(error) => Performed::failed(error),
+        Ok(Ran {
+            cancelled,
+            error,
+            pairs,
+        }) => Performed {
+            cancelled,
+            error,
+            applied: pairs
+                .into_iter()
+                .map(|(from, to)| Applied {
+                    stamp: stamp_of(&to),
+                    preexisting: was_occupied(&to),
+                    from,
+                    to,
+                })
+                .collect(),
+        },
+    }
+}
+
+/// 두 경로가 같은 자리인가 — ASCII 대소문자를 접어 견준다(Windows 파일시스템 규칙)
+fn same_path(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy()
+        .eq_ignore_ascii_case(&b.to_string_lossy())
+}
+
+/// 셸의 진행 통지를 받아 **우리가 건 최상위 항목**이 실제로 간 자리를 모은다 (plan D2).
+///
+/// 폴더를 옮기면 그 안 항목의 통지도 올 수 있어 `sources`로 거른다. 실패한 항목(`hr` 실패)과
+/// 새 자리를 알려 주지 않은 통지는 버린다
+#[implement(IFileOperationProgressSink)]
+struct ResultSink {
+    sources: Vec<PathBuf>,
+    done: Arc<Mutex<Vec<(PathBuf, PathBuf)>>>,
+}
+
+impl ResultSink_Impl {
+    fn record(&self, item: Ref<IShellItem>, hr: HRESULT, created: Ref<IShellItem>) {
+        if hr.is_err() {
+            return;
+        }
+        let (Some(from), Some(to)) = (
+            item.as_ref().and_then(item_path),
+            created.as_ref().and_then(item_path),
+        ) else {
+            return;
+        };
+        if !self.sources.iter().any(|source| same_path(source, &from)) {
+            return;
+        }
+        if let Ok(mut done) = self.done.lock() {
+            done.push((from, to));
+        }
+    }
+}
+
+impl IFileOperationProgressSink_Impl for ResultSink_Impl {
+    fn StartOperations(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn FinishOperations(&self, _hr: HRESULT) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PreRenameItem(&self, _: u32, _: Ref<IShellItem>, _: &PCWSTR) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PostRenameItem(
+        &self,
+        _: u32,
+        item: Ref<IShellItem>,
+        _: &PCWSTR,
+        hr: HRESULT,
+        created: Ref<IShellItem>,
+    ) -> windows::core::Result<()> {
+        self.record(item, hr, created);
+        Ok(())
+    }
+    fn PreMoveItem(
+        &self,
+        _: u32,
+        _: Ref<IShellItem>,
+        _: Ref<IShellItem>,
+        _: &PCWSTR,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PostMoveItem(
+        &self,
+        _: u32,
+        item: Ref<IShellItem>,
+        _: Ref<IShellItem>,
+        _: &PCWSTR,
+        hr: HRESULT,
+        created: Ref<IShellItem>,
+    ) -> windows::core::Result<()> {
+        self.record(item, hr, created);
+        Ok(())
+    }
+    fn PreCopyItem(
+        &self,
+        _: u32,
+        _: Ref<IShellItem>,
+        _: Ref<IShellItem>,
+        _: &PCWSTR,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PostCopyItem(
+        &self,
+        _: u32,
+        item: Ref<IShellItem>,
+        _: Ref<IShellItem>,
+        _: &PCWSTR,
+        hr: HRESULT,
+        created: Ref<IShellItem>,
+    ) -> windows::core::Result<()> {
+        self.record(item, hr, created);
+        Ok(())
+    }
+    fn PreDeleteItem(&self, _: u32, _: Ref<IShellItem>) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PostDeleteItem(
+        &self,
+        _: u32,
+        _: Ref<IShellItem>,
+        _: HRESULT,
+        _: Ref<IShellItem>,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PreNewItem(&self, _: u32, _: Ref<IShellItem>, _: &PCWSTR) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PostNewItem(
+        &self,
+        _: u32,
+        _: Ref<IShellItem>,
+        _: &PCWSTR,
+        _: &PCWSTR,
+        _: u32,
+        _: HRESULT,
+        _: Ref<IShellItem>,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn UpdateProgress(&self, _: u32, _: u32) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn ResetTimer(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PauseTimer(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn ResumeTimer(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+}
+
+/// 셸 항목의 파일시스템 경로 — 가상 항목(경로가 없는 것)이면 `None`
+fn item_path(item: &IShellItem) -> Option<PathBuf> {
+    // 안전성: 유효한 셸 항목에만 부르고, 셸이 잡아 준 문자열은 읽은 뒤 곧바로 돌려준다
+    unsafe {
+        let raw = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = raw.to_string().ok().map(PathBuf::from);
+        CoTaskMemFree(Some(raw.as_ptr().cast()));
+        path
     }
 }
 
@@ -204,6 +464,8 @@ pub struct FileOpOutcome {
     pub cancelled: bool,
     /// 셸이 준 실패 사유 — 없으면 탈 없이 끝났다
     pub error: Option<String>,
+    /// 실제로 이름이 바뀐 것 — 삭제는 늘 비어 있다(되돌리기 대상이 아니다)
+    pub applied: Vec<Applied>,
 }
 
 /// 파일 이름에 쓸 수 없는 글자 — 셸에 걸기 전에 우리가 먼저 거른다.
@@ -258,6 +520,7 @@ pub fn rename_item(
             requested: 1,
             cancelled: false,
             error: Some(reason),
+            applied: Vec::new(),
         };
         if done.send(outcome).is_ok() {
             wake();
@@ -266,7 +529,13 @@ pub fn rename_item(
     }
     let owner = HwndSend(owner.0 as isize);
     spawn_shell_op(done, wake, move || {
-        outcome_of(1, perform_rename(&path, &new_name, &owner))
+        let ran = perform_rename(&path, &new_name, &owner, FOF_ALLOWUNDO);
+        FileOpOutcome {
+            requested: 1,
+            cancelled: ran.cancelled,
+            error: ran.error,
+            applied: ran.applied,
+        }
     })
 }
 
@@ -332,30 +601,45 @@ fn outcome_of(requested: usize, result: Result<bool, String>) -> FileOpOutcome {
             requested,
             cancelled,
             error: None,
+            applied: Vec::new(),
         },
         Err(error) => FileOpOutcome {
             requested,
             cancelled: false,
             error: Some(error),
+            applied: Vec::new(),
         },
     }
 }
 
-/// 이름 바꾸기 COM 호출 — 성공하면 `사용자가 그만뒀는가`를 돌려준다.
+/// 이름 바꾸기 COM 호출.
 ///
-/// 안전성: COM이 STA로 초기화된 워커 스레드에서만 부른다. 얻은 인터페이스는 이 함수 안에서만
-/// 살다 `Drop`으로 해제되고, 이름 문자열은 호출이 끝날 때까지 지역 소유다
-fn perform_rename(path: &Path, new_name: &str, owner: &HwndSend) -> Result<bool, String> {
+/// 새 이름 자리가 **자기 자신이 아닌 것으로** 차 있었으면 `preexisting`이다 — 대소문자만
+/// 바꾸는 이름(`a.txt` → `A.txt`)은 그 자리가 자기라 해당하지 않는다
+fn perform_rename(
+    path: &Path,
+    new_name: &str,
+    owner: &HwndSend,
+    flags: FILEOPERATION_FLAGS,
+) -> Performed {
+    let target = path.with_file_name(new_name);
+    let occupied = !same_path(path, &target) && std::fs::symlink_metadata(&target).is_ok();
     let wide = HSTRING::from(new_name);
-    // 안전성: 위 주석 참조
-    unsafe {
-        let op = new_operation(FOF_ALLOWUNDO, owner)?;
-        let item = shell_item(path)?;
-        op.RenameItem(&item, PCWSTR(wide.as_ptr()), None)
-            .map_err(|err| err.message())?;
-        op.PerformOperations().map_err(|err| err.message())?;
-        Ok(aborted(&op))
-    }
+    // 안전성: COM이 STA로 초기화된 워커 스레드에서만 부른다. 얻은 인터페이스는 이 함수 안에서만
+    // 살다 `Drop`으로 해제되고, 이름 문자열은 호출이 끝날 때까지 지역 소유다
+    let ran = unsafe {
+        run_operation(
+            flags,
+            owner,
+            std::slice::from_ref(&path.to_path_buf()),
+            |op| {
+                let item = shell_item(path)?;
+                op.RenameItem(&item, PCWSTR(wide.as_ptr()), None)
+                    .map_err(|err| err.message())
+            },
+        )
+    };
+    finish(ran, |to| occupied && same_path(to, &target))
 }
 
 /// 삭제 COM 호출 — 성공하면 `사용자가 그만뒀는가`를 돌려준다.
@@ -591,8 +875,10 @@ mod tests {
         // 화면이 규모를 적는 데 쓴다 — 셸이 실제로 몇 개를 복사했는지는 셸만 안다
         let outcome = CopyOutcome {
             requested: 3,
+            how: Transfer::Copy,
             cancelled: false,
             error: None,
+            applied: Vec::new(),
         };
         assert_eq!(outcome.requested, 3);
         assert!(outcome.error.is_none());
@@ -603,9 +889,148 @@ mod tests {
         // 사용자가 셸 대화에서 그만둔 것과 셸이 실패한 것은 화면에서 다르게 알린다
         let 취소 = CopyOutcome {
             requested: 1,
+            how: Transfer::Copy,
             cancelled: true,
             error: None,
+            applied: Vec::new(),
         };
         assert!(취소.cancelled && 취소.error.is_none());
+    }
+
+    /// 시험 전용 셸 플래그 — 대화를 하나도 띄우지 않는다(충돌은 덮어쓰기로 답한다)
+    const 조용히: FILEOPERATION_FLAGS = FILEOPERATION_FLAGS(
+        windows::Win32::UI::Shell::FOF_SILENT.0
+            | windows::Win32::UI::Shell::FOF_NOCONFIRMATION.0
+            | windows::Win32::UI::Shell::FOF_NOERRORUI.0
+            | FOF_NOCONFIRMMKDIR.0,
+    );
+
+    fn 임시_폴더(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("fe_fileop_test_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("임시 폴더");
+        dir
+    }
+
+    /// COM 을 STA 로 잡은 새 스레드에서 돌린다 — 운영 워커(`spawn_shell_op`)와 같은 조건이다
+    fn 셸_스레드에서<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::spawn(move || {
+            // 안전성: 이 스레드에서 초기화하고 성공했을 때만 같은 스레드에서 1회 해제한다
+            let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+            let out = work();
+            if initialized {
+                // 안전성: 위에서 성공한 초기화와 짝지은 1회 호출
+                unsafe { CoUninitialize() };
+            }
+            out
+        })
+        .join()
+        .expect("셸 스레드")
+    }
+
+    fn 없는_창() -> HwndSend {
+        HwndSend(0)
+    }
+
+    #[test]
+    fn 복사_결과에_생긴_경로가_실린다() {
+        let 원본 = 임시_폴더("copy_src");
+        let 대상 = 임시_폴더("copy_dst");
+        std::fs::write(원본.join("a.txt"), b"abc").expect("파일");
+        let (원본2, 대상2) = (원본.clone(), 대상.clone());
+        let 결과 = 셸_스레드에서(move || {
+            perform(
+                &대상2,
+                &[원본2.join("a.txt")],
+                &없는_창(),
+                Transfer::Copy,
+                조용히,
+            )
+        });
+        assert_eq!(결과.error, None);
+        assert_eq!(결과.applied.len(), 1, "{:?}", 결과.applied);
+        let 한건 = &결과.applied[0];
+        assert!(same_path(&한건.from, &원본.join("a.txt")));
+        assert!(same_path(&한건.to, &대상.join("a.txt")));
+        assert!(!한건.preexisting);
+        assert_eq!(한건.stamp.map(|stamp| stamp.len), Some(3), "도장이 실린다");
+    }
+
+    #[test]
+    fn 둘_다_유지로_번호가_붙은_경로가_실린다() {
+        let 폴더 = 임시_폴더("keep_both");
+        let 원본 = 폴더.join("src");
+        std::fs::create_dir_all(&원본).expect("폴더");
+        std::fs::write(원본.join("a.txt"), b"new").expect("파일");
+        std::fs::write(폴더.join("a.txt"), b"old").expect("있던 파일");
+        let 폴더2 = 폴더.clone();
+        let 결과 = 셸_스레드에서(move || {
+            perform(
+                &폴더2,
+                &[폴더2.join(r"src\a.txt")],
+                &없는_창(),
+                Transfer::Copy,
+                FILEOPERATION_FLAGS(조용히.0 | windows::Win32::UI::Shell::FOF_RENAMEONCOLLISION.0),
+            )
+        });
+        assert_eq!(결과.applied.len(), 1, "{:?}", 결과.applied);
+        let 한건 = &결과.applied[0];
+        assert!(
+            !same_path(&한건.to, &폴더.join("a.txt")),
+            "번호가 붙은 새 자리여야 한다: {}",
+            한건.to.display()
+        );
+        assert!(한건.to.exists());
+        assert!(!한건.preexisting, "새 자리는 있던 것이 아니다");
+        assert_eq!(std::fs::read(폴더.join("a.txt")).expect("읽기"), b"old");
+    }
+
+    #[test]
+    fn 있던_자리에_복사하면_preexisting_이다() {
+        let 폴더 = 임시_폴더("overwrite");
+        std::fs::create_dir_all(폴더.join("src")).expect("폴더");
+        std::fs::write(폴더.join(r"src\a.txt"), b"new").expect("파일");
+        std::fs::write(폴더.join("a.txt"), b"old").expect("있던 파일");
+        let 폴더2 = 폴더.clone();
+        let 결과 = 셸_스레드에서(move || {
+            perform(
+                &폴더2,
+                &[폴더2.join(r"src\a.txt")],
+                &없는_창(),
+                Transfer::Copy,
+                조용히,
+            )
+        });
+        assert_eq!(결과.applied.len(), 1, "{:?}", 결과.applied);
+        assert!(
+            결과.applied[0].preexisting,
+            "덮어쓴 자리는 되돌리기에서 빠져야 한다"
+        );
+    }
+
+    #[test]
+    fn 이동과_이름_바꾸기도_새_경로를_싣는다() {
+        let 폴더 = 임시_폴더("move_rename");
+        std::fs::create_dir_all(폴더.join("dst")).expect("폴더");
+        std::fs::write(폴더.join("m.txt"), b"m").expect("파일");
+        std::fs::write(폴더.join("r.txt"), b"r").expect("파일");
+        let 폴더2 = 폴더.clone();
+        let (이동, 이름) = 셸_스레드에서(move || {
+            let 이동 = perform(
+                &폴더2.join("dst"),
+                &[폴더2.join("m.txt")],
+                &없는_창(),
+                Transfer::Move,
+                조용히,
+            );
+            let 이름 = perform_rename(&폴더2.join("r.txt"), "s.txt", &없는_창(), 조용히);
+            (이동, 이름)
+        });
+        assert_eq!(이동.applied.len(), 1, "{:?}", 이동.applied);
+        assert!(same_path(&이동.applied[0].to, &폴더.join(r"dst\m.txt")));
+        assert_eq!(이름.applied.len(), 1, "{:?}", 이름.applied);
+        assert!(same_path(&이름.applied[0].to, &폴더.join("s.txt")));
+        assert!(!이름.applied[0].preexisting);
     }
 }
