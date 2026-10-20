@@ -30,12 +30,7 @@ impl ExplorerApp {
             // 받는 곳은 파일시스템이다 — 존재 확인은 워커 스레드가 한다
             // (AGENTS: UI 스레드에서 블로킹 I/O 금지)
             DropTarget::Local(dir) => {
-                let names: Vec<String> = drop
-                    .items
-                    .iter()
-                    .filter(|item| list_common::drop_direction(item, &drop.target).is_some())
-                    .map(DragItem::name)
-                    .collect();
+                let names = local_landing_names(&drop);
                 if names.is_empty() {
                     return;
                 }
@@ -260,6 +255,11 @@ impl ExplorerApp {
                 });
             }
             DropTarget::Local(local_dir) => {
+                // zip 항목은 워커가 그 폴더에 푼다 — 전송 큐에 들지 않는다 (FR-78)
+                if let Some(picks) = list_common::zip_picks(&drop) {
+                    self.start_zip_extract(picks);
+                    return;
+                }
                 let Some(site) = drop.source_site else {
                     return;
                 };
@@ -286,6 +286,20 @@ impl ExplorerApp {
             }
         }
     }
+}
+
+/// 로컬 폴더에 놓여 그 자리에 생길 최상위 이름들 — 같은 이름 확인(FR-55)이 견줄 것이다.
+///
+/// 받기(원격 → 로컬)와 zip 풀기(FR-78)가 센다 — 로컬끼리는 셸 복사라 여기 오지 않는다
+pub(super) fn local_landing_names(drop: &DropOutcome) -> Vec<String> {
+    drop.items
+        .iter()
+        .filter(|item| {
+            list_common::drop_direction(item, &drop.target).is_some()
+                || matches!(item, DragItem::Zip { .. })
+        })
+        .map(DragItem::name)
+        .collect()
 }
 
 /// 고른 최상위 항목 중 **대상에 이미 있는 이름**들 (FR-55).
@@ -551,5 +565,42 @@ mod tests {
         );
         // 갈래가 다르면 번호가 같아도 서로 다른 출처다 (종전의 번호 공간 분할이 하던 일)
         assert_ne!(ListSource::Conflict { id: 7 }, ListSource::Tree { seq: 7 });
+    }
+
+    fn zip_풀기(names: &[&str]) -> DropOutcome {
+        DropOutcome {
+            items: names
+                .iter()
+                .map(|name| DragItem::Zip {
+                    archive: PathBuf::from(r"D:\자료.zip"),
+                    path: format!("문서/{name}"),
+                    is_dir: false,
+                })
+                .collect(),
+            source_site: None,
+            target: DropTarget::Local(PathBuf::from(r"D:\받은 파일")),
+        }
+    }
+
+    #[test]
+    fn zip_항목도_같은_이름이면_묻는다() {
+        // FR-78 — zip 항목을 로컬에 풀 때도 받기와 같은 확인을 거친다: 대조할 이름에 들어가야 한다
+        let 풀기 = zip_풀기(&["a.txt", "b.txt"]);
+        assert_eq!(local_landing_names(&풀기), vec!["a.txt", "b.txt"]);
+        let 겹침 = conflict_names(&local_landing_names(&풀기), &["A.TXT".to_owned()], true);
+        assert_eq!(겹침, vec!["a.txt"]);
+        assert_eq!(
+            apply_conflict_choice(풀기, &겹침, ConflictDecision::NotAsked),
+            None,
+            "겹치는데 묻지 않고 풀었다"
+        );
+    }
+
+    #[test]
+    fn zip_항목_건너뛰기는_겹친_것만_뺀다() {
+        let 풀기 = zip_풀기(&["a.txt", "b.txt"]);
+        let 남은 = apply_conflict_choice(풀기, &["a.txt".to_owned()], ConflictDecision::Skip)
+            .expect("남는 것이 있다");
+        assert_eq!(이름들(&남은), vec!["b.txt"]);
     }
 }

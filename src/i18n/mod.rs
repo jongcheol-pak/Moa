@@ -896,6 +896,14 @@ pub mod dynamic {
         }
     }
 
+    /// zip 항목을 풀다 못 푼 것이 있을 때 (FR-78) — 몇 개인지와 첫 사유를 적는다
+    pub fn zip_extract_failed(count: usize, first: &str) -> String {
+        match current() {
+            Language::Korean => format!("zip 항목 {count}개를 풀지 못했습니다 — {first}"),
+            Language::English => format!("Could not extract {count} zip item(s) — {first}"),
+        }
+    }
+
     /// zip 안을 읽지 못했을 때 상태 줄 문구 (FR-78) — 자리는 그대로 지킨다
     pub fn zip_open_failed(error: &str) -> String {
         match current() {
@@ -2221,6 +2229,10 @@ mod tests {
             dynamic::zip_open_failed("깨짐"),
             "zip 을 열지 못했습니다 — 깨짐"
         );
+        assert_eq!(
+            dynamic::zip_extract_failed(2, "a.txt: 이유"),
+            "zip 항목 2개를 풀지 못했습니다 — a.txt: 이유"
+        );
 
         set_language(LanguageSetting::English);
         assert_eq!(zip_unsafe_name(), "The name points outside the zip");
@@ -2228,6 +2240,10 @@ mod tests {
         assert_eq!(
             dynamic::zip_open_failed("broken"),
             "Could not open the zip — broken"
+        );
+        assert_eq!(
+            dynamic::zip_extract_failed(1, "x"),
+            "Could not extract 1 zip item(s) — x"
         );
     }
 

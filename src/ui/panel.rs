@@ -1350,6 +1350,17 @@ impl PanelState {
         self.tabs.active().source.local_path()
     }
 
+    /// 활성 탭이 zip 안인가 (FR-78) — 읽기 전용이라 앱이 되돌리기(Ctrl+Z)를 걸지 않는다
+    pub fn is_zip(&self) -> bool {
+        self.tabs.active().source.zip_location().is_some()
+    }
+
+    /// 시험용 — 목차 워커를 거치지 않고 활성 탭을 zip 뿌리로 세운다 (FR-78)
+    #[cfg(test)]
+    pub(crate) fn enter_zip_for_test(&mut self, archive: PathBuf) {
+        self.tabs.active_mut().enter_zip(archive);
+    }
+
     /// 지난번에 거둔 뒤 실제로 옮겨 간 로컬 폴더 (FR-75) — 거두면 비워진다
     pub fn take_visited(&mut self) -> Option<PathBuf> {
         self.visited.take()

@@ -5432,6 +5432,27 @@ fn zip_탭의_local_dir은_없다() {
 }
 
 #[test]
+fn zip_탭은_local_dir이_없어_쓰기_대상이_아니다() {
+    // FR-78 — 붙여넣기·OS 드롭·새 폴더가 모두 이 값으로 가른다(앱 층 대입은 리뷰가 지키는 자리)
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\받은 파일"));
+    panel.enter_zip_for_test(std::path::PathBuf::from(r"C:\받은 파일\자료.zip"));
+    assert_eq!(panel.local_dir(), None);
+    assert!(!panel.is_remote());
+    assert!(panel.is_zip());
+}
+
+#[test]
+fn zip_탭에서_고른_것은_로컬_선택이_아니다() {
+    // 삭제·클립보드 담기·일괄 이름은 `selected_local()` 을 거친다 — zip 이면 빈 목록이다
+    let (mut panel, dir, ..) = entered_zip("selected");
+    for index in 0..shown(&panel).len() {
+        panel.list.toggle_select(index);
+    }
+    assert!(panel.selected_local().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn 로컬_탭의_local_dir은_그_폴더다() {
     let panel = PanelState::new(std::path::PathBuf::from(r"C:\테스트"));
     assert_eq!(panel.local_dir(), Some(std::path::Path::new(r"C:\테스트")));
