@@ -312,8 +312,8 @@ pub struct MenuState {
 impl MenuState {
     /// 그 자리가 눌릴 수 있는가.
     ///
-    /// 고른 것이 없으면 넷 다 뜻이 없고, `이름 바꾸기`는 **하나일 때만** 열린다
-    /// (새 이름은 하나뿐이라 여럿에 줄 수 없다 — 원격 메뉴의 같은 규칙)
+    /// 고른 것이 없으면 넷 다 뜻이 없고, `이름 바꾸기`는 **하나일 때만** 열린다 — 둘 이상이면
+    /// 앱 줄 `이름 한꺼번에 바꾸기…`(FR-73)가 그 자리다
     pub fn enabled(&self, action: MenuAction) -> bool {
         if self.selected == 0 {
             return false;
