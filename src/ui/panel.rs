@@ -152,6 +152,8 @@ struct OptimisticNav {
     /// 이미 캐시로 전부 그린 화면에 중간 배치를 반영하면 목록이 줄었다가 다시 늘어난다.
     /// 완료 조각이 오면 이 몫과 잔여분을 합쳐 한 번에 갈아 끼운다
     buffered: Vec<FileEntry>,
+    /// 이 이동이 「가 본 곳」인가 (FR-75) — 실제 결과로 확정될 때 남기고, 되돌리면 함께 버린다
+    visit: bool,
 }
 
 /// 목록을 읽지 못한 사유 — 그 자리에 적을 말이 이것으로 갈린다 (2026-08-17 사용자 결정).
@@ -315,6 +317,8 @@ pub struct PanelState {
     reload_buffer: Option<Vec<FileEntry>>,
     /// 캐시로 먼저 옮겨 둔 상태 — 되돌릴 것이 없으면 `None` (FR-68)
     optimistic: Option<OptimisticNav>,
+    /// 실제로 옮겨 간 로컬 폴더 (FR-75) — 앱이 `take_visited`로 거둬 최근 경로에 쌓는다
+    visited: Option<PathBuf>,
     /// 열거 실패 사유 — 성공 시 빈 문자열
     status: String,
     /// 이번 프레임에 열어 본 드라이브와 그 결과 `(경로, 닿았는가)` (T6).
@@ -431,6 +435,7 @@ impl PanelState {
             streamed: false,
             reload_buffer: None,
             optimistic: None,
+            visited: None,
             status: String::new(),
             observed_drive: None,
             blocked: None,
@@ -791,6 +796,7 @@ impl PanelState {
             prev_dir: self.dir().to_path_buf(),
             history: self.tabs.active().history.clone(),
             buffered: Vec::new(),
+            visit: self.pending_nav != PendingNav::None,
         });
         // 이른 커밋 — `pending_dir`을 비우지 않고 `pending_nav`만 내린다 (계획 D6)
         self.commit_navigation(&dir);
@@ -849,6 +855,7 @@ impl PanelState {
         }
         self.streamed = true;
         let dir = self.pending_dir.clone();
+        self.note_visit(&dir);
         self.commit_navigation(&dir);
         self.pending_nav = PendingNav::None;
         self.blocked = None;
@@ -920,6 +927,7 @@ impl PanelState {
                 // **배치로 이미 커밋했으면**(`streamed`) `pending_nav`가 `None`이라 이 재호출은
                 // 같은 경로의 `set_committed` 재적용뿐이다 — 히스토리는 한 번만 늘어난다(D6)
                 let dir = std::mem::take(&mut self.pending_dir);
+                self.note_visit(&dir);
                 self.commit_navigation(&dir);
                 self.blocked = None;
                 // 감시 대상도 이 시점에 맞춘다 — 읽어 낸 폴더만 감시한다
@@ -928,6 +936,9 @@ impl PanelState {
                     // 캐시로 그려 둔 화면을 실제 결과로 **한 번에** 갈아 끼운다 —
                     // 모아 둔 배치와 잔여분을 합쳐야 목록이 잘리지 않는다
                     Some(optimistic) if optimistic.target == dir => {
+                        if optimistic.visit {
+                            self.visited = Some(dir.clone());
+                        }
                         let mut all = optimistic.buffered;
                         all.extend(entries);
                         let entries = with_local_parent_first(&dir, all);
@@ -1193,6 +1204,19 @@ impl PanelState {
         // `F5`는 크기도 다시 잰다 — 그동안 폴더 안이 바뀌었을 수 있다 (FR-71)
         self.sizes.reset();
         self.start_load(dir, PendingNav::None, ctx);
+    }
+
+    /// 읽어 낸 폴더가 새 이동(뒤로·앞으로 포함)이면 「가 본 곳」으로 남긴다 (FR-75).
+    /// 같은 폴더를 다시 읽는 길(`PendingNav::None`)과 열지 못한 폴더(`block_list`)는 부르지 않는다
+    fn note_visit(&mut self, dir: &Path) {
+        if self.pending_nav != PendingNav::None {
+            self.visited = Some(dir.to_path_buf());
+        }
+    }
+
+    /// 지난번에 거둔 뒤 실제로 옮겨 간 로컬 폴더 (FR-75) — 거두면 비워진다
+    pub fn take_visited(&mut self) -> Option<PathBuf> {
+        self.visited.take()
     }
 
     /// 활성 탭의 보기 모드 — 상태 줄 보기 버튼이 현재 표시를 그리는 데 쓴다 (FR-23)

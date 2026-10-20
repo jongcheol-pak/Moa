@@ -97,9 +97,10 @@ pub fn to_session(
         dock: remote.dock,
         // 앱 설정과 즐겨찾기는 창·워크스페이스와 성격이 달라 이 함수가 받지 않는다 —
         // 부르는 쪽(`ExplorerApp::collect_session`)이 자기 값으로 덮어쓴다.
-        // 즐겨찾기를 덮는 것은 아래 `with_favorites`다
+        // 즐겨찾기·최근 경로를 덮는 것은 아래 `with_favorites`·`with_recent`다
         settings: Default::default(),
         favorites: Vec::new(),
+        recent: Vec::new(),
         workspaces: workspaces
             .iter()
             .map(|workspace| WorkspaceSession {
@@ -149,6 +150,19 @@ pub fn to_session(
 pub fn with_favorites(session: Session, favorites: &[PathBuf]) -> Session {
     Session {
         favorites: favorites
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        ..session
+    }
+}
+
+/// 최근에 가 본 폴더를 세션에 싣는다 (FR-75) — `with_favorites`와 같은 이유로 따로 덮는다.
+///
+/// **부르는 쪽이 스프레드라 이 한 줄을 빠뜨려도 컴파일이 통과한다** — 시험이 이 함수를 직접 부른다
+pub fn with_recent(session: Session, recent: &[PathBuf]) -> Session {
+    Session {
+        recent: recent
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
@@ -1175,5 +1189,29 @@ mod tests {
         let text = serde_json::to_string(&with).expect("직렬화");
         let back = crate::app::settings::parse_session(&text).expect("왕복");
         assert_eq!(back.favorites, with.favorites, "저장했다 읽으니 달라졌다");
+    }
+
+    #[test]
+    fn with_recent_는_최근_경로를_싣고_되읽힌다() {
+        let session = to_session(
+            window(),
+            SidebarSession::default(),
+            0,
+            &sample(),
+            empty_remote(),
+        );
+        assert!(session.recent.is_empty(), "`to_session`이 값을 지어냈다");
+
+        let recent = [PathBuf::from(r"D:\작업"), PathBuf::from(r"C:\Users")];
+        let with = with_recent(session, &recent);
+        assert_eq!(
+            with.recent,
+            vec![r"D:\작업", r"C:\Users"],
+            "차례가 뒤바뀌었다"
+        );
+
+        let text = serde_json::to_string(&with).expect("직렬화");
+        let back = crate::app::settings::parse_session(&text).expect("왕복");
+        assert_eq!(back.recent, with.recent, "저장했다 읽으니 달라졌다");
     }
 }

@@ -6,6 +6,7 @@ use crate::app::drives::DriveList;
 use crate::app::favorites::FavoriteStore;
 use crate::app::layout::TreeShape;
 use crate::app::layout::{LayoutTree, PanelId, Rect as LayoutRect, SplitDir, SplitPlace};
+use crate::app::recent::RecentPaths;
 use crate::app::settings::{
     AppSettings, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, Session,
     SidebarSession, WindowState, remote_refresh_secs,
@@ -604,6 +605,8 @@ pub struct ExplorerApp {
     sites: SiteStore,
     /// 폴더 트리 즐겨찾기 (FR-56) — 앱에 하나뿐이라 모든 패널·탭이 같은 목록을 본다
     favorites: FavoriteStore,
+    /// 최근에 가 본 로컬 폴더 (FR-75) — 빠른 이동 팔레트의 한 출처이며 세션에 담긴다
+    recent: RecentPaths,
     /// 트리의 드라이브 줄과 그 연결 상태 (T4) — 즐겨찾기와 같은 이유로 앱에 하나뿐이다.
     /// 값은 시작할 때 띄운 워커가 채우고, 사용자가 드라이브를 열어 볼 때 갱신된다
     drives: DriveList,
@@ -832,6 +835,7 @@ impl ExplorerApp {
             // 즐겨찾기 맨 위에 바탕 화면·다운로드가 선다 (FR-56). 셸에 물어 얻으므로
             // 그 폴더를 다른 드라이브로 옮겼어도 옮긴 자리를 가리킨다
             favorites: FavoriteStore::with_defaults(default_favorites, []),
+            recent: RecentPaths::new(),
             // 드라이브 줄은 **워커가 만든다** — 끊긴 네트워크 드라이브의 접근 판정이
             // 첫 시도에 2.8초까지 걸려(실측) UI 스레드에서는 할 수 없다 (T4)
             drives: DriveList::default(),
@@ -958,6 +962,7 @@ impl ExplorerApp {
             crate::fs::known_folders::default_favorites(&mut self.icons),
             session.favorites.iter().map(PathBuf::from),
         );
+        self.recent = RecentPaths::from_saved(&session.recent);
         self.queue = session::restore_queue(&session);
         self.dock = DockState::from_session(&session.dock);
         self.settings = session.settings.clone();
@@ -1015,7 +1020,7 @@ impl ExplorerApp {
         // 즐겨찾기만 `with_favorites`를 거치는 이유는 **이 자리가 스프레드**라는 데 있다 —
         // 필드를 빠뜨려도 컴파일이 통과하므로, 덮는 규칙을 순수 함수로 떼어 시험이 그것을
         // 직접 부르게 했다 (plan D7)
-        session::with_favorites(
+        let session = session::with_favorites(
             Session {
                 settings: self.settings.clone(),
                 ..session::to_session(
@@ -1034,7 +1039,9 @@ impl ExplorerApp {
                 )
             },
             self.favorites.paths(),
-        )
+        );
+        // 최근 경로도 같은 이유(스프레드)로 순수 함수를 거친다 (FR-75)
+        session::with_recent(session, self.recent.paths())
     }
 
     /// 셸 메뉴를 쓸 수 있는가 — COM STA와 창 핸들이 모두 있어야 한다
@@ -2834,6 +2841,12 @@ impl eframe::App for ExplorerApp {
             // 패널은 서로 독립이라 각자 자기 열거 결과만 처리한다
             for panel in view.panels.values_mut() {
                 panel.poll(ctx, &mut self.icons, &mut self.dir_cache);
+                // 옮겨 간 폴더를 최근 경로에 쌓는다 (FR-75). **이 대입은 리뷰가 지키는 자리다** —
+                // `ExplorerApp`은 시험에서 만들 수 없다. 앞뒤 층은 시험이 덮는다: 패널이 세우는
+                // 것(`ui/panel/tests.rs`), 쌓는 규칙(`app::recent`), 저장(`ui::session::with_recent`)
+                if let Some(dir) = panel.take_visited() {
+                    self.recent.visit(&dir);
+                }
             }
         }
         self.frame_timer.mark("panels_poll");

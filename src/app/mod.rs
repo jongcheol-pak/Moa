@@ -8,6 +8,7 @@ pub mod favorites;
 pub mod fonts;
 pub mod layout;
 pub mod licenses;
+pub mod recent;
 pub mod session_saver;
 pub mod settings;
 pub mod single_instance;

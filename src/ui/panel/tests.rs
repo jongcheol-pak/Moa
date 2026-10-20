@@ -4924,3 +4924,76 @@ fn 새_폴더를_만들면_경로가_올라온다() {
     assert!(stamp.is_some(), "도장은 워커가 잰다");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn 폴더로_옮기면_가_본_곳이_남는다() {
+    // FR-75 — 빠른 이동 팔레트의 최근 경로는 실제로 옮겨 간 폴더다. 한 번 거두면 비워진다
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let target = std::path::PathBuf::from(r"C:\간곳");
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\처음곳"));
+    panel.start_load(target.clone(), PendingNav::Push, &ctx);
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["a.txt"])),
+        &mut icons,
+        &mut cache,
+        &ctx,
+    );
+    assert_eq!(panel.take_visited(), Some(target.clone()));
+    assert_eq!(panel.take_visited(), None, "거둔 뒤에도 남았다");
+
+    // 캐시로 먼저 옮긴 이동은 실제 결과가 와서 확정될 때 남는다
+    let cached = std::path::PathBuf::from(r"C:\캐시곳");
+    cache.put(&cached, &batch(&["..", "b.txt"]));
+    panel.start_load(cached.clone(), PendingNav::Push, &ctx);
+    panel.try_cache_hit(&mut icons, &mut cache);
+    assert_eq!(panel.take_visited(), None, "확정 전에 남겼다");
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["b.txt"])),
+        &mut icons,
+        &mut cache,
+        &ctx,
+    );
+    assert_eq!(panel.take_visited(), Some(cached));
+}
+
+#[test]
+fn 새로_고침은_가_본_곳을_남기지_않는다() {
+    // 같은 폴더를 다시 읽는 길(F5·감시)은 이동이 아니다
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\처음곳"));
+    panel.pending_dir = std::path::PathBuf::from(r"C:\처음곳");
+    panel.pending_nav = PendingNav::None;
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["a.txt"])),
+        &mut icons,
+        &mut cache,
+        &ctx,
+    );
+    assert_eq!(panel.take_visited(), None);
+}
+
+#[test]
+fn 열지_못한_폴더는_가_본_곳이_아니다() {
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\처음곳"));
+    panel.start_load(
+        std::path::PathBuf::from(r"C:\막힌곳"),
+        PendingNav::Push,
+        &ctx,
+    );
+    panel.apply_enumerated(EnumOutcome::AccessDenied, &mut icons, &mut cache, &ctx);
+    assert_eq!(panel.take_visited(), None);
+}
+
+#[test]
+fn 캐시로_먼저_옮긴_뒤_되돌리면_가_본_곳이_아니다() {
+    // FR-68 의 되돌리기 — 없는 폴더로 판명나 직전 폴더로 돌아갔으면 남기지 않는다
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let ghost = std::path::PathBuf::from(r"C:\사라진곳");
+    cache.put(&ghost, &batch(&["a.txt"]));
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\처음곳"));
+    panel.start_load(ghost, PendingNav::Push, &ctx);
+    panel.try_cache_hit(&mut icons, &mut cache);
+    panel.apply_enumerated(EnumOutcome::NotFound, &mut icons, &mut cache, &ctx);
+    assert_eq!(panel.take_visited(), None);
+}
