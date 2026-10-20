@@ -330,6 +330,8 @@ strings! {
     column_modified => "수정한 날짜" / "Date modified";
     column_permissions => "권한" / "Permissions";
     column_owner => "소유자" / "Owner";
+    /// 하위 폴더 검색 결과에만 서는 열 — 검색 시작 폴더 기준 상대 폴더 (FR-70)
+    column_location => "경로" / "Path";
     /// 상태 표시줄의 큐 토글 (인벤토리 #53)
     status_queue => "전송 큐" / "Transfer queue";
     /// 실패 알약의 낱말 (인벤토리 #57) — 건수는 `dynamic::status_failed_count`가 붙인다

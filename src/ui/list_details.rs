@@ -47,6 +47,8 @@ pub enum ColumnKind {
     Modified,
     Permissions,
     Owner,
+    /// 하위 폴더 검색 결과에서만 서는 열 — 검색 시작 폴더 기준 상대 폴더 (FR-70)
+    Location,
 }
 
 impl ColumnKind {
@@ -59,6 +61,7 @@ impl ColumnKind {
             ColumnKind::Modified => crate::i18n::column_modified(),
             ColumnKind::Permissions => crate::i18n::column_permissions(),
             ColumnKind::Owner => crate::i18n::column_owner(),
+            ColumnKind::Location => crate::i18n::column_location(),
         }
     }
 
@@ -71,6 +74,7 @@ impl ColumnKind {
             ColumnKind::Modified => 3,
             ColumnKind::Permissions => 4,
             ColumnKind::Owner => 5,
+            ColumnKind::Location => 6,
         }
     }
 
@@ -84,13 +88,16 @@ impl ColumnKind {
             ColumnKind::Size => Some(SortKey::Size),
             ColumnKind::Type => Some(SortKey::Type),
             ColumnKind::Modified => Some(SortKey::Modified),
-            ColumnKind::Permissions | ColumnKind::Owner => None,
+            ColumnKind::Permissions | ColumnKind::Owner | ColumnKind::Location => None,
         }
     }
 
     /// 끌 수 없는 열인가 — 앞 넷은 열 메뉴에서 항상 체크된 채 비활성이다 (인벤토리 #23~26)
     pub fn is_fixed(self) -> bool {
-        !matches!(self, ColumnKind::Permissions | ColumnKind::Owner)
+        !matches!(
+            self,
+            ColumnKind::Permissions | ColumnKind::Owner | ColumnKind::Location
+        )
     }
 
     /// 세션에 담는 키 (FR-4) — `SortKey::as_key`·`ViewMode::as_key`와 같은 방식이다.
@@ -105,6 +112,7 @@ impl ColumnKind {
             ColumnKind::Modified => "modified",
             ColumnKind::Permissions => "permissions",
             ColumnKind::Owner => "owner",
+            ColumnKind::Location => "location",
         }
     }
 
@@ -115,7 +123,18 @@ impl ColumnKind {
 }
 
 /// 열 메뉴에 보이는 순서 (원본 `FileExplorer-FTP.dc.html:890-897`)
-pub const ALL_COLUMNS: [ColumnKind; 6] = [
+pub const ALL_COLUMNS: [ColumnKind; 7] = [
+    ColumnKind::Name,
+    ColumnKind::Size,
+    ColumnKind::Type,
+    ColumnKind::Modified,
+    ColumnKind::Permissions,
+    ColumnKind::Owner,
+    ColumnKind::Location,
+];
+
+/// 머리글 열 메뉴에 서는 열 — `경로`는 검색 결과가 정하는 열이라 켜고 끄지 않는다 (FR-70)
+pub const MENU_COLUMNS: [ColumnKind; 6] = [
     ColumnKind::Name,
     ColumnKind::Size,
     ColumnKind::Type,
@@ -129,6 +148,10 @@ pub const ALL_COLUMNS: [ColumnKind; 6] = [
 pub struct ColumnFlags {
     pub permissions: bool,
     pub owner: bool,
+    /// 하위 폴더 검색 결과를 그리는 중인가 — 참이면 `경로` 열이 선다 (FR-70).
+    ///
+    /// 사용자가 켜고 끄는 값이 아니라 목록이 그릴 때마다 채운다(`toggle`이 건드리지 않는다)
+    pub location: bool,
 }
 
 impl ColumnFlags {
@@ -137,6 +160,7 @@ impl ColumnFlags {
         match kind {
             ColumnKind::Permissions => self.permissions,
             ColumnKind::Owner => self.owner,
+            ColumnKind::Location => self.location,
             _ => true,
         }
     }
@@ -151,7 +175,7 @@ impl ColumnFlags {
     }
 }
 
-/// 자세히 보기의 열 폭 — **여섯 열 몫을 늘 들고**, 그중 보이는 것만 그린다.
+/// 자세히 보기의 열 폭 — **일곱 열 몫을 늘 들고**, 그중 보이는 것만 그린다.
 ///
 /// **모든 열이 고정 폭을 갖는다.** 종전에는 마지막 열이 "남는 폭 전부"였는데, 그러면 콘텐츠
 /// 폭이 뷰포트 폭에 의존해 가로 스크롤과 순환한다(스크롤 폭을 정하려면 콘텐츠 폭이 필요한데
@@ -165,7 +189,7 @@ pub struct Columns {
     ///
     /// **`Vec`이 아니라 고정 배열인 이유**(D11): 이 구조체가 `Copy`라 `to_saved(self)`가
     /// 값으로 받는데, `Vec`을 넣으면 그 파생이 깨져 호출부가 컴파일되지 않는다.
-    /// 언제나 `ALL_COLUMNS` 여섯을 한 번씩 담는다(`apply_saved_order`가 그것을 지킨다)
+    /// 언제나 `ALL_COLUMNS` 일곱을 한 번씩 담는다(`apply_saved_order`가 그것을 지킨다)
     order: [ColumnKind; Columns::COUNT],
 }
 
@@ -176,10 +200,10 @@ impl Default for Columns {
 }
 
 impl Columns {
-    pub const COUNT: usize = 6;
+    pub const COUNT: usize = 7;
     /// 기본 폭 — 앞 넷은 종전 값을 그대로 잇는다.
     /// 권한은 `rwxr-xr-x` 아홉 글자가, 소유자는 흔한 계정 이름이 잘리지 않을 만큼 잡았다
-    const DEFAULT: [f32; Columns::COUNT] = [320.0, 90.0, 150.0, 150.0, 100.0, 110.0];
+    const DEFAULT: [f32; Columns::COUNT] = [320.0, 90.0, 150.0, 150.0, 100.0, 110.0, 220.0];
 
     pub fn new() -> Columns {
         Columns {
@@ -219,12 +243,11 @@ impl Columns {
     pub fn visible(&self, is_remote: bool, flags: ColumnFlags) -> Vec<ColumnKind> {
         self.order
             .into_iter()
-            .filter(|kind| {
-                if kind.is_fixed() {
-                    true
-                } else {
-                    is_remote && flags.shows(*kind)
-                }
+            .filter(|kind| match kind {
+                // 검색 결과는 로컬에만 있다 — 원격 여부와 무관하게 깃발 하나로 정한다
+                ColumnKind::Location => flags.shows(*kind),
+                _ if kind.is_fixed() => true,
+                _ => is_remote && flags.shows(*kind),
             })
             .collect()
     }
@@ -264,7 +287,7 @@ impl Columns {
 
     /// 그 열이 `order` 배열의 몇째 자리인가 — 화면에 보이는 차례를 배열 자리로 옮길 때 쓴다.
     ///
-    /// `order`는 언제나 여섯 열을 한 번씩 담으므로 못 찾는 경우가 없다(못 찾으면 맨 앞으로 본다)
+    /// `order`는 언제나 일곱 열을 한 번씩 담으므로 못 찾는 경우가 없다(못 찾으면 맨 앞으로 본다)
     pub fn order_index(&self, kind: ColumnKind) -> usize {
         self.order
             .iter()
@@ -290,7 +313,7 @@ impl Columns {
         self.order[to] = moved;
     }
 
-    /// 세션에 저장할 차례 — 열 키 여섯 개다 (FR-4)
+    /// 세션에 저장할 차례 — 열 키 일곱 개다 (FR-4)
     pub fn order_saved(self) -> Vec<String> {
         self.order
             .iter()
@@ -301,7 +324,7 @@ impl Columns {
     /// 저장된 차례로 되살린다.
     ///
     /// **모르는 키와 겹친 키는 버리고, 빠진 키는 기본 차례대로 뒤에 채운다** — 열이 늘어난
-    /// 판에서 돌아온 파일이나 손으로 고친 파일에서도 여섯 열이 하나도 빠지지 않는다
+    /// 판에서 돌아온 파일이나 손으로 고친 파일에서도 일곱 열이 하나도 빠지지 않는다
     pub fn apply_saved_order(&mut self, saved: &[String]) {
         let mut order: Vec<ColumnKind> = Vec::with_capacity(Columns::COUNT);
         for key in saved {
@@ -367,6 +390,8 @@ pub struct DetailsInput<'a, R: ListRow> {
     pub local_paths: bool,
     /// 이름 뒤 확장자를 보일지 (FR-52) — 표시에만 쓴다(경로·정렬은 원래 이름)
     pub show_extensions: bool,
+    /// 이번 프레임에 이 행이 보이게 스크롤한다 — 검색 결과를 열고 옮겨 간 폴더에서 쓴다 (FR-70)
+    pub scroll_to: Option<usize>,
 }
 
 /// 이번 프레임에 일어난 조작 — 목록 상태 변경은 호출부가 한다
@@ -425,11 +450,18 @@ pub fn show<R: ListRow>(
         is_remote,
         column_flags,
         local_paths,
+        scroll_to,
     } = input;
     // 보일 열은 패널 종류와 토글로 정해진다 — 로컬 패널에는 권한·소유자가 아예 없다
     let visible = columns.visible(is_remote, column_flags);
 
-    let scroll = egui::ScrollArea::both().auto_shrink([false, false]);
+    let mut scroll = egui::ScrollArea::both().auto_shrink([false, false]);
+    if let Some(index) = scroll_to {
+        // 그 행을 위에서 몇 줄 아래에 둔다 — 맨 위에 붙이면 머리글 바로 밑이라 눈에 덜 띈다
+        let rows_above = 3.0;
+        let offset = (index as f32 - rows_above).max(0.0) * ROW_HEIGHT;
+        scroll = scroll.vertical_scroll_offset(offset);
+    }
     let output = scroll.show_viewport(ui, |ui, viewport| {
         // 뷰포트 폭은 **스크롤 영역 안에서** 잰다 — 바깥의 `available_width`는 세로 스크롤 막대
         // 폭을 빼지 않아, 그만큼 마지막 열이 넓어져 늘 가로 스크롤이 생긴다
@@ -543,7 +575,7 @@ pub fn show<R: ListRow>(
             // 잘라내기로 담긴 항목도 흐리게 (FR-64). **표시가 하나도 없으면 경로를 짓지
             // 않는다** — 그 문자열 만들기가 보이는 행마다 붙는데 대부분의 프레임에서 헛일이다
             let cut =
-                local_paths && !cut_marks.is_empty() && cut_marks.contains(&dir.join(entry.name()));
+                local_paths && !cut_marks.is_empty() && cut_marks.contains(&entry.path_in(dir));
             let text_color =
                 cut_text_color(cut).unwrap_or_else(|| dim_if_hidden(theme::TEXT, dimmed));
             let editing = rename.as_ref().is_some_and(|edit| edit.index == index);
@@ -693,6 +725,10 @@ fn cell_text<R: ListRow>(
         // 서버가 주지 않았으면 빈칸이다 — 없는 값을 지어내지 않는다 (plan Edge Case)
         ColumnKind::Permissions => entry.permissions().unwrap_or_default(),
         ColumnKind::Owner => entry.owner().unwrap_or_default().to_owned(),
+        ColumnKind::Location => entry
+            .location()
+            .map(|sub| sub.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     }
 }
 
@@ -884,7 +920,88 @@ mod tests {
     }
 
     #[test]
-    fn 기본_폭은_여섯_열_모두_양수다() {
+    fn 검색_중에만_경로_열이_뒤에_선다() {
+        // FR-70 — 검색 결과가 아니면 로컬·원격 어디에도 서지 않는다
+        let columns = Columns::new();
+        assert!(
+            !columns
+                .visible(false, ColumnFlags::default())
+                .contains(&ColumnKind::Location)
+        );
+        assert!(
+            !columns
+                .visible(true, ColumnFlags::default())
+                .contains(&ColumnKind::Location)
+        );
+        let searching = ColumnFlags {
+            location: true,
+            ..ColumnFlags::default()
+        };
+        assert_eq!(
+            columns.visible(false, searching),
+            vec![
+                ColumnKind::Name,
+                ColumnKind::Size,
+                ColumnKind::Type,
+                ColumnKind::Modified,
+                ColumnKind::Location,
+            ]
+        );
+    }
+
+    #[test]
+    fn 옛_세션의_여섯_폭과_여섯_키를_그대로_읽는다() {
+        // 열이 여섯이던 판의 세션 — 맞춘 폭은 지키고 `경로` 열만 기본값으로 채운다
+        let columns = Columns::from_saved(&[200.0, 60.0, 120.0, 90.0, 80.0, 70.0]);
+        assert_eq!(columns.widths_of(&[ColumnKind::Name])[0], 200.0);
+        assert_eq!(
+            columns.widths_of(&[ColumnKind::Location])[0],
+            Columns::new().widths_of(&[ColumnKind::Location])[0]
+        );
+        let mut columns = Columns::new();
+        let old: Vec<String> = ["size", "name", "type", "modified", "permissions", "owner"]
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect();
+        columns.apply_saved_order(&old);
+        assert_eq!(
+            columns.order_saved().last().map(String::as_str),
+            Some("location")
+        );
+        assert_eq!(columns.order_saved()[0], "size");
+    }
+
+    #[test]
+    fn 경로_열은_끄고_켜거나_정렬하지_않고_메뉴에도_없다() {
+        let mut flags = ColumnFlags::default();
+        flags.toggle(ColumnKind::Location);
+        assert!(
+            !flags.shows(ColumnKind::Location),
+            "메뉴 뒤집기로 경로 열이 켜졌다"
+        );
+        assert_eq!(ColumnKind::Location.sort_key(), None);
+        assert!(!MENU_COLUMNS.contains(&ColumnKind::Location));
+    }
+
+    #[test]
+    fn 경로_열_칸은_검색_시작_폴더_기준_상대_폴더다() {
+        let mut wide: Vec<u16> = "a.txt".encode_utf16().collect();
+        wide.push(0);
+        let mut row = crate::fs::enumerate::FileEntry {
+            name: wide.into(),
+            is_dir: false,
+            size: 0,
+            modified: 0,
+            attributes: 0,
+            location: None,
+        };
+        assert_eq!(cell_text(&row, "", ColumnKind::Location, true), "");
+        row.location = Some(std::sync::Arc::from(Path::new(r"sub\deep")));
+        assert_eq!(cell_text(&row, "", ColumnKind::Location, true), r"sub\deep");
+    }
+
+    #[test]
+    fn 기본_폭은_모든_열이_양수다() {
         let columns = Columns::new();
         for kind in ALL_COLUMNS {
             let width = columns.widths_of(&[kind])[0];
@@ -959,7 +1076,7 @@ mod tests {
 
     #[test]
     fn 저장된_폭을_되살린다() {
-        let saved = vec![200.0, 60.0, 120.0, 90.0, 80.0, 70.0];
+        let saved = vec![200.0, 60.0, 120.0, 90.0, 80.0, 70.0, 240.0];
         assert_eq!(Columns::from_saved(&saved).to_saved(), saved);
     }
 
@@ -1172,7 +1289,7 @@ mod tests {
     #[test]
     fn 모르는_키와_빠진_키는_기본_차례로_채운다() {
         // Acceptance ⓔ — 열이 늘어난 판에서 돌아온 파일·손으로 고친 파일 대비.
-        // 여섯 열이 하나도 빠지지 않아야 목록이 온전히 그려진다
+        // 일곱 열이 하나도 빠지지 않아야 목록이 온전히 그려진다
         let mut columns = Columns::new();
         columns.apply_saved_order(&[
             "owner".to_owned(),
@@ -1182,7 +1299,15 @@ mod tests {
         ]);
         assert_eq!(
             columns.order_saved(),
-            vec!["owner", "name", "size", "type", "modified", "permissions"]
+            vec![
+                "owner",
+                "name",
+                "size",
+                "type",
+                "modified",
+                "permissions",
+                "location"
+            ]
         );
     }
 
@@ -1194,6 +1319,7 @@ mod tests {
         let 권한만 = ColumnFlags {
             permissions: true,
             owner: false,
+            location: false,
         };
         let visible = columns.visible(true, 권한만);
         assert!(
@@ -1205,6 +1331,7 @@ mod tests {
         let 둘_다 = ColumnFlags {
             permissions: true,
             owner: true,
+            location: false,
         };
         assert_eq!(
             columns.visible(true, 둘_다).first(),
@@ -1230,6 +1357,7 @@ mod tests {
         let 켠_상태 = ColumnFlags {
             permissions: true,
             owner: true,
+            location: false,
         };
         for flags in [ColumnFlags::default(), 켠_상태] {
             let visible = Columns::new().visible(false, flags);
@@ -1258,6 +1386,7 @@ mod tests {
             ColumnFlags {
                 permissions: true,
                 owner: false,
+                location: false,
             },
         );
         assert_eq!(권한만.last(), Some(&ColumnKind::Permissions));
@@ -1268,6 +1397,7 @@ mod tests {
             ColumnFlags {
                 permissions: true,
                 owner: true,
+                location: false,
             },
         );
         assert_eq!(둘_다.len(), 6);

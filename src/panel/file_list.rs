@@ -169,6 +169,24 @@ pub trait ListRow {
 
     /// 소유자 — **원격 항목만** 갖는다. 서버가 이름을 주지 않으면 숫자 uid 그대로다
     fn owner(&self) -> Option<&str>;
+
+    /// 목록 폴더 아래 어느 하위 폴더에 있는가 — **하위 폴더 검색 결과만** 갖는다 (FR-70).
+    ///
+    /// 목록 폴더 기준 상대 경로다. 목록 폴더 바로 아래 항목은 `None`이다
+    fn location(&self) -> Option<&std::path::Path> {
+        None
+    }
+
+    /// 이 행의 로컬 전체 경로 — 목록 폴더 `dir`에 하위 폴더(`location`)와 이름을 잇는다.
+    ///
+    /// 이름만 이으면 검색 결과의 하위 폴더 항목이 엉뚱한 경로를 가리킨다 — 경로를 짓는 자리는
+    /// 모두 이것을 쓴다
+    fn path_in(&self, dir: &std::path::Path) -> std::path::PathBuf {
+        match self.location() {
+            Some(sub) => dir.join(sub).join(self.name()),
+            None => dir.join(self.name()),
+        }
+    }
 }
 
 /// 유닉스 초(UTC) → FILETIME 눈금. 두 목록이 같은 자로 정렬되게 맞춘다
@@ -233,6 +251,10 @@ impl ListRow for FileEntry {
 
     fn owner(&self) -> Option<&str> {
         None
+    }
+
+    fn location(&self) -> Option<&std::path::Path> {
+        self.location.as_deref()
     }
 }
 

@@ -184,11 +184,11 @@ pub fn show<R: ListRow>(
             // 잘라내기 표시 (FR-64). **표시가 하나도 없으면 경로를 짓지 않는다** —
             // 그 문자열 만들기가 보이는 칸마다 붙는데 대부분의 프레임에서 헛일이다
             let cut =
-                local_paths && !cut_marks.is_empty() && cut_marks.contains(&dir.join(entry.name()));
+                local_paths && !cut_marks.is_empty() && cut_marks.contains(&entry.path_in(dir));
             let editing = rename.as_ref().is_some_and(|edit| edit.index == index);
             // 썸네일은 파일만 — 폴더는 폴더 아이콘이 맞다
             let thumb = if wants_thumbnails && !entry.is_dir() {
-                let path = dir.join(entry.name());
+                let path = entry.path_in(dir);
                 let ready = thumbnails.get(&path).map(CellArt::thumbnail);
                 // **텍스처가 이미 있어도 담는다** — 이 목록은 "요청 대상"이자 "지금 화면에
                 // 보인다"는 신호다. 없을 때만 담으면 텍스처가 올라간 뒤로는 최근 사용
@@ -287,7 +287,7 @@ pub(super) fn resolve_icon<R: ListRow>(
     match icon_indices[index] {
         Some(cached) => cached,
         None => {
-            let full = local_paths.then(|| dir.join(entry.name()).to_string_lossy().into_owned());
+            let full = local_paths.then(|| entry.path_in(dir).to_string_lossy().into_owned());
             // 도장을 함께 넘긴다 — 같은 이름의 exe가 새 내용으로 바뀌면 다시 묻는다
             let looked_up = icons.icon_index(
                 &entry.extension(),
