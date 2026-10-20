@@ -572,6 +572,8 @@ impl PanelState {
                     site: *site,
                     path: path.clone(),
                 },
+                // zip 탭은 zip 이 있는 폴더로 담는다 — 세션 스키마를 바꾸지 않는다 (FR-78)
+                TabSource::Zip { archive, .. } => TabSpec::Local(zip_folder(archive)),
             })
             .collect()
     }
@@ -1331,7 +1333,7 @@ impl PanelState {
     pub fn active_conn(&self) -> Option<ConnectionId> {
         match &self.tabs.active().source {
             TabSource::Remote { conn, .. } => *conn,
-            TabSource::Local(_) => None,
+            TabSource::Local(_) | TabSource::Zip { .. } => None,
         }
     }
 
@@ -1340,7 +1342,7 @@ impl PanelState {
     pub fn active_site(&self) -> Option<SiteId> {
         match &self.tabs.active().source {
             TabSource::Remote { site, .. } => Some(*site),
-            TabSource::Local(_) => None,
+            TabSource::Local(_) | TabSource::Zip { .. } => None,
         }
     }
 
@@ -1926,7 +1928,7 @@ impl PanelState {
                     .get(index)
                     .and_then(|source| match source {
                         TabSource::Remote { conn, .. } => *conn,
-                        TabSource::Local(_) => None,
+                        TabSource::Local(_) | TabSource::Zip { .. } => None,
                     });
                 if let CloseOutcome::Removed(_) = self.tabs.close(index) {
                     if was_active {
@@ -1955,6 +1957,8 @@ impl PanelState {
                 let path = match self.tabs.active().source.clone() {
                     TabSource::Local(path) => path,
                     TabSource::Remote { .. } => crate::ui::app::start_dir(),
+                    // zip 안은 복제하지 않는다 — zip 이 있는 폴더를 연다 (FR-78)
+                    TabSource::Zip { archive, .. } => zip_folder(&archive),
                 };
                 self.tabs.add(TabState::new(path));
                 // `start_load`를 곧바로 부르지 않는다 — 새 탭도 **활성 탭이 바뀌는 길**이라
@@ -2001,6 +2005,7 @@ impl PanelState {
                         self.set_remote_path(parent);
                     }
                 }
+                TabSource::Zip { .. } => {}
             },
             NavAction::Goto(path) => self.navigate(path, ctx),
             // 주소로 여는 일은 앱이 한다 — 여기서는 값만 받아 둔다
@@ -2216,6 +2221,12 @@ impl PanelState {
                 AddressTarget::Remote(path),
                 tab.remote_history.can_back(),
                 tab.remote_history.can_forward(),
+            ),
+            // zip 뿌리에서도 뒤로 갈 수 있다 — zip 이 있는 폴더로 나온다 (FR-78)
+            TabSource::Zip { archive, inner } => (
+                AddressTarget::Zip { archive, inner },
+                true,
+                tab.zip_history.can_forward(),
             ),
         };
         let address = self
@@ -2472,7 +2483,7 @@ impl PanelState {
         // 단계를 먼저 떼어 둔다 — 아래에서 목록(`&mut self.list`)을 그리는 동안 탭을 빌릴 수 없다
         let phase = match &self.tabs.active().source {
             TabSource::Remote { phase, .. } => Some(phase.clone()),
-            TabSource::Local(_) => None,
+            TabSource::Local(_) | TabSource::Zip { .. } => None,
         };
         // 붙을 곳을 아는 탭인가 — 세션에서 되살아난 탭은 사이트를 알고 연결만 없다.
         // 사이트가 지워졌으면 알 수 없으므로 종전 안내를 그대로 보인다
@@ -2606,7 +2617,7 @@ impl PanelState {
             let remote_dir = source.remote_path().cloned();
             let source_site = match source {
                 TabSource::Remote { site, .. } => Some(*site),
-                TabSource::Local(_) => None,
+                TabSource::Local(_) | TabSource::Zip { .. } => None,
             };
             (
                 self.list.drag_items(index, remote_dir.as_ref()),
@@ -2712,6 +2723,7 @@ impl PanelState {
                 site: *site,
                 dir: path.clone(),
             },
+            TabSource::Zip { .. } => return None,
         };
         Some(DropOutcome {
             items: drag.items.clone(),
@@ -2719,6 +2731,14 @@ impl PanelState {
             target,
         })
     }
+}
+
+/// zip 이 있는 폴더 — 부모가 없으면(드라이브 뿌리 자체를 zip 으로 줄 수는 없지만) 시작 폴더다
+fn zip_folder(archive: &Path) -> PathBuf {
+    archive
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(crate::ui::app::start_dir)
 }
 
 /// 원격 목록의 첫 줄을 언제나 상위 이동(`..`)으로 맞춘다.

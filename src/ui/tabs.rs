@@ -211,7 +211,7 @@ fn show_tabs(
                         TabSource::Remote { phase, .. } => {
                             site.map(|record| (phase, record.protocol))
                         }
-                        TabSource::Local(_) => None,
+                        TabSource::Local(_) | TabSource::Zip { .. } => None,
                     };
                     let hit = show_tab(ui, index, &title, badge, active, tab_icon(tab.id, targets));
                     if hit.close {

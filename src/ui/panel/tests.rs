@@ -1834,7 +1834,7 @@ fn 연결_단계는_그_연결을_쓰는_모든_탭에_퍼진다() {
         .iter()
         .filter_map(|source| match source {
             TabSource::Remote { phase, .. } => Some(phase.clone()),
-            TabSource::Local(_) => None,
+            TabSource::Local(_) | TabSource::Zip { .. } => None,
         })
         .collect();
     assert_eq!(
@@ -5092,5 +5092,37 @@ fn 재읽기_뒤에도_미리보기_대상이_남는다() {
         ),
         "{:?}",
         panel.preview_target()
+    );
+}
+
+/// zip 에 들어간 패널 — 목차 워커를 거치지 않고 탭 모델만 zip 으로 세운다(세션·새 탭 시험용)
+fn zipped_panel(inner: &str) -> PanelState {
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\받은 파일"));
+    let tab = panel.tabs.active_mut();
+    tab.enter_zip(std::path::PathBuf::from(r"C:\받은 파일\자료.zip"));
+    if !inner.is_empty() {
+        tab.set_zip_inner(inner.to_owned());
+    }
+    panel
+}
+
+#[test]
+fn zip_탭은_세션에_zip이_있는_폴더로_저장된다() {
+    // FR-78 — 세션 스키마를 바꾸지 않는다: 다시 띄우면 zip 이 있는 폴더의 로컬 탭이다
+    let panel = zipped_panel("문서");
+    assert_eq!(
+        panel.tab_specs(),
+        vec![TabSpec::Local(std::path::PathBuf::from(r"C:\받은 파일"))]
+    );
+}
+
+#[test]
+fn zip_탭에서_새_탭은_zip이_있는_폴더다() {
+    let ctx = egui::Context::default();
+    let mut panel = zipped_panel("문서");
+    panel.new_tab(&ctx);
+    assert_eq!(
+        panel.tabs.active().source,
+        TabSource::Local(std::path::PathBuf::from(r"C:\받은 파일"))
     );
 }
