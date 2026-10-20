@@ -121,6 +121,8 @@ pub enum Command {
     /// 대상은 아니지만 **파일 목록이 키를 가졌을 때만** 나간다(사용자 답 Q3) — 주소창·이름
     /// 편집의 `Ctrl+Z`(글자 되돌리기)와 겹치지 않게 한다
     Undo,
+    /// 빠른 이동 팔레트를 연다 (FR-75) — `Ctrl+P`. 고른 항목이 아니라 앱 전체가 대상이다
+    QuickOpen,
 }
 
 /// 패널 메뉴 항목의 활성/비활성을 가르는 현재 상태
@@ -432,7 +434,8 @@ fn targets_file_list(command: Command) -> bool {
         | Command::CheckUpdate
         | Command::StartUpdate
         | Command::OpenReleaseNotes
-        | Command::OpenSiteTab(_) => false,
+        | Command::OpenSiteTab(_)
+        | Command::QuickOpen => false,
         // 고른 항목이 대상이다 — 파일 목록이 키를 쥔 때만 나간다
         Command::Rename
         | Command::Delete { .. }
@@ -481,7 +484,7 @@ pub fn poll_shortcuts(ctx: &egui::Context, owner: KeyOwner) -> Option<Command> {
 ///
 /// **이 표가 유일한 대응이며 사용자가 바꿀 길을 두지 않는다** — 키 매핑 설정 화면도,
 /// 그것을 담을 설정 항목도 만들지 않았다(요청에 없다 — plan T10 Design ④)
-fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 19] {
+fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 20] {
     let ctrl_shift = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
     let ctrl_alt = egui::Modifiers::CTRL | egui::Modifiers::ALT;
     [
@@ -526,6 +529,7 @@ fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 19] {
         (egui::Modifiers::CTRL, egui::Key::W, Command::CloseTab),
         (egui::Modifiers::CTRL, egui::Key::B, Command::ToggleSidebar),
         (egui::Modifiers::CTRL, egui::Key::Z, Command::Undo),
+        (egui::Modifiers::CTRL, egui::Key::P, Command::QuickOpen),
         (egui::Modifiers::ALT, egui::Key::ArrowLeft, Command::Back),
         (
             egui::Modifiers::ALT,
@@ -881,6 +885,17 @@ mod tests {
             .find(|(modifiers, key, _)| *modifiers == egui::Modifiers::CTRL && *key == egui::Key::Z)
             .map(|(_, _, command)| command);
         assert_eq!(찾은, Some(Command::Undo));
+    }
+
+    #[test]
+    fn ctrl_p_는_빠른_이동이다() {
+        // FR-75 — 파일 목록이 키를 갖지 않아도(사이드바를 누른 뒤에도) 열린다
+        let 찾은 = shortcut_table()
+            .into_iter()
+            .find(|(modifiers, key, _)| *modifiers == egui::Modifiers::CTRL && *key == egui::Key::P)
+            .map(|(_, _, command)| command);
+        assert_eq!(찾은, Some(Command::QuickOpen));
+        assert!(!targets_file_list(Command::QuickOpen));
     }
 
     #[test]

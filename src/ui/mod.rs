@@ -20,6 +20,7 @@ pub mod list_grid;
 pub mod log_panel;
 pub mod menu;
 pub mod paint_guard;
+pub mod palette;
 pub mod panel;
 pub mod queue_panel;
 pub mod remote_menu;

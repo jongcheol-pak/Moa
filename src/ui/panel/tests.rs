@@ -4997,3 +4997,36 @@ fn 캐시로_먼저_옮긴_뒤_되돌리면_가_본_곳이_아니다() {
     panel.apply_enumerated(EnumOutcome::NotFound, &mut icons, &mut cache, &ctx);
     assert_eq!(panel.take_visited(), None);
 }
+
+#[test]
+fn switch_tab_은_그_탭으로_바꾼다() {
+    // FR-75 — 팔레트에서 고른 탭으로 간다
+    let ctx = egui::Context::default();
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\첫탭"));
+    panel.open_local_tab(std::path::PathBuf::from(r"C:\둘째탭"), &ctx);
+    assert_eq!(panel.active_tab(), 1);
+    panel.switch_tab(0, &ctx);
+    assert_eq!(panel.active_tab(), 0, "고른 탭으로 바뀌지 않았다");
+}
+
+#[test]
+fn navigate_to_는_히스토리에_남는다() {
+    // FR-75 — 팔레트에서 고른 경로는 주소창 이동과 같아 뒤로 가기로 돌아올 수 있다
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let start = std::path::PathBuf::from(r"C:\처음곳");
+    let target = std::path::PathBuf::from(r"C:\고른곳");
+    let mut panel = PanelState::new(start.clone());
+    panel.navigate_to(target.clone(), &ctx);
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["a.txt"])),
+        &mut icons,
+        &mut cache,
+        &ctx,
+    );
+    assert_eq!(panel.dir(), target);
+    assert_eq!(
+        panel.tabs.active_mut().history.back().cloned(),
+        Some(start),
+        "히스토리에 남지 않았다"
+    );
+}

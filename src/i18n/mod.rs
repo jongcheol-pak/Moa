@@ -397,6 +397,15 @@ strings! {
     bulk_block_exists => "이미 있는 이름입니다" / "Name already exists";
     bulk_block_pattern => "정규식이 잘못됐습니다" / "Invalid pattern";
     bulk_apply => "적용" / "Apply";
+    /// 빠른 이동 팔레트(`Ctrl+P`, FR-75)의 입력란 안내
+    palette_placeholder => "가 본 곳·즐겨찾기·탭·워크스페이스 찾기" / "Go to a recent folder, favorite, tab or workspace";
+    /// 팔레트에 걸리는 후보가 없을 때
+    palette_empty => "찾은 곳이 없습니다" / "No matches";
+    /// 팔레트 줄 오른쪽의 출처 표시 — 넷
+    palette_source_recent => "최근" / "Recent";
+    palette_source_favorite => "즐겨찾기" / "Favorite";
+    palette_source_tab => "탭" / "Tab";
+    palette_source_workspace => "워크스페이스" / "Workspace";
     /// 앱 안에서 Shift 를 든 채 끄는 동안 그림 옆에 붙는 표시 (FR-60 — 놓으면 이동한다)
     drag_moving => "이동" / "Move";
     /// `Ctrl+Z`를 눌렀는데 되돌릴 기록이 없을 때 (FR-74)
@@ -2162,5 +2171,25 @@ mod tests {
         let _guard = LanguageGuard::lock(LanguageSetting::Korean);
         CURRENT.store(99, Ordering::Relaxed);
         assert_eq!(current(), Language::Korean);
+    }
+
+    #[test]
+    fn 팔레트_문구는_두_언어를_모두_낸다() {
+        // FR-75 — 기대값은 원문 리터럴이고 언어를 잠근다
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(palette_empty(), "찾은 곳이 없습니다");
+        assert_eq!(palette_source_recent(), "최근");
+        assert_eq!(palette_source_favorite(), "즐겨찾기");
+        assert_eq!(palette_source_tab(), "탭");
+        assert_eq!(palette_source_workspace(), "워크스페이스");
+        assert!(palette_placeholder().starts_with("가 본 곳"));
+
+        set_language(LanguageSetting::English);
+        assert_eq!(palette_empty(), "No matches");
+        assert_eq!(palette_source_recent(), "Recent");
+        assert_eq!(palette_source_favorite(), "Favorite");
+        assert_eq!(palette_source_tab(), "Tab");
+        assert_eq!(palette_source_workspace(), "Workspace");
+        assert!(palette_placeholder().starts_with("Go to"));
     }
 }

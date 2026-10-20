@@ -225,6 +225,33 @@ pub struct WorkspaceView {
 }
 
 impl WorkspaceView {
+    /// 그 패널을 활성으로 하고 그 자리의 탭으로 바꾼다 (FR-75 — 팔레트에서 고른 탭).
+    /// 그 패널이나 자리가 없으면(닫혔다) 아무것도 하지 않고 거짓이다
+    fn focus_tab(&mut self, panel: PanelId, index: usize, ctx: &egui::Context) -> bool {
+        let Some(state) = self.panels.get_mut(&panel) else {
+            return false;
+        };
+        if index >= state.tabs().len() {
+            return false;
+        }
+        self.active = panel;
+        state.switch_tab(index, ctx);
+        true
+    }
+
+    /// 활성 패널에서 그 로컬 폴더로 간다 (FR-75 — 팔레트에서 고른 경로).
+    /// 활성 탭이 로컬이면 그 탭에서 옮기고, 원격이면 원격 탭을 덮지 않고 새 로컬 탭을 연다
+    fn open_path(&mut self, path: PathBuf, ctx: &egui::Context) {
+        let Some(state) = self.panels.get_mut(&self.active) else {
+            return;
+        };
+        if state.is_remote() {
+            state.open_local_tab(path, ctx);
+        } else {
+            state.navigate_to(path, ctx);
+        }
+    }
+
     fn new(start: PathBuf) -> WorkspaceView {
         let (layout, first) = LayoutTree::new();
         let mut panels = HashMap::new();
@@ -579,6 +606,8 @@ pub struct ExplorerApp {
     about_dialog: AboutDialog,
     /// 일괄 이름 바꾸기 대화 (FR-73) — 둘 이상 고르고 `F2`·우클릭 메뉴 줄이 연다
     bulk_rename: crate::ui::bulk_rename_dialog::BulkRenameDialog,
+    /// 빠른 이동 팔레트 (FR-75) — `Ctrl+P`가 연다
+    quick_open: crate::ui::palette::QuickOpen,
     /// 고를 수 있는 글꼴 목록 (FR-48) — 워커가 만든다. 앱이 시작할 때 한 번만 읽는다
     font_scan: FontScan,
     /// 알림 영역 아이콘 (FR-50) — `종료` 토글이 켜져 있을 때만 있다. 없애면 아이콘이 사라진다
@@ -857,6 +886,7 @@ impl ExplorerApp {
             license_dialog: LicenseDialog::new(),
             about_dialog: AboutDialog::new(),
             bulk_rename: crate::ui::bulk_rename_dialog::BulkRenameDialog::new(),
+            quick_open: crate::ui::palette::QuickOpen::new(),
             font_scan: FontScan::new(),
             tray: None,
             tray_rx,
@@ -1042,6 +1072,87 @@ impl ExplorerApp {
         );
         // 최근 경로도 같은 이유(스프레드)로 순수 함수를 거친다 (FR-75)
         session::with_recent(session, self.recent.paths())
+    }
+
+    /// 빠른 이동 팔레트를 연다 (FR-75) — 후보는 지금 한 번 모은다.
+    ///
+    /// 열린 탭은 이번 실행에서 연 워크스페이스(`views`)의 **로컬 탭만**이다 — 저장 상태로만 있는
+    /// 워크스페이스(`restored`)는 탭이 아직 없다. `views`는 해시라 사이드바·패널·탭 차례로 세운다
+    fn open_quick_open(&mut self) {
+        let mut tabs = Vec::new();
+        for workspace in self.workspaces.items() {
+            let Some(view) = self.views.get(&workspace.id) else {
+                continue;
+            };
+            let mut panels: Vec<(&PanelId, &PanelState)> = view.panels.iter().collect();
+            panels.sort_by_key(|(id, _)| id.0);
+            for (panel, state) in panels {
+                for (index, tab) in state.tabs().iter().enumerate() {
+                    if let Some(path) = tab.source.local_path() {
+                        tabs.push(crate::app::palette::TabInfo {
+                            workspace: workspace.id,
+                            workspace_name: workspace.name.clone(),
+                            panel: *panel,
+                            index,
+                            path: path.to_path_buf(),
+                        });
+                    }
+                }
+            }
+        }
+        let favorites: Vec<(PathBuf, Option<String>)> = self
+            .favorites
+            .entries()
+            .into_iter()
+            .map(|entry| (entry.path, entry.label))
+            .collect();
+        let workspaces: Vec<(WorkspaceId, String)> = self
+            .workspaces
+            .items()
+            .iter()
+            .map(|workspace| (workspace.id, workspace.name.clone()))
+            .collect();
+        self.quick_open.open(crate::app::palette::collect(
+            self.recent.paths(),
+            &favorites,
+            &tabs,
+            &workspaces,
+        ));
+    }
+
+    /// 팔레트에서 고른 곳으로 간다 (FR-75).
+    ///
+    /// **이 갈래 배선은 리뷰가 지키는 자리다** — `ExplorerApp`은 시험에서 만들 수 없다. 갈래 안의
+    /// 판정(없는 패널·로컬/원격)은 `WorkspaceView::focus_tab`·`open_path`로 내려 시험이 덮는다
+    fn go_to_palette_target(&mut self, target: crate::app::palette::Target, ctx: &egui::Context) {
+        use crate::app::palette::Target;
+        match target {
+            Target::Path(path) => self.ensure_active_view().open_path(path, ctx),
+            Target::Tab {
+                workspace,
+                panel,
+                index,
+            } => {
+                let Some(position) = self.workspace_index(workspace) else {
+                    return;
+                };
+                self.workspaces.set_active(position);
+                self.ensure_active_view().focus_tab(panel, index, ctx);
+            }
+            Target::Workspace(workspace) => {
+                if let Some(position) = self.workspace_index(workspace) {
+                    self.workspaces.set_active(position);
+                }
+            }
+        }
+    }
+
+    /// 그 워크스페이스의 사이드바 자리
+    fn workspace_index(&self, id: WorkspaceId) -> Option<usize> {
+        self.workspaces
+            .items()
+            .iter()
+            .position(|item| item.id == id)
     }
 
     /// 셸 메뉴를 쓸 수 있는가 — COM STA와 창 핸들이 모두 있어야 한다
@@ -2021,6 +2132,7 @@ impl ExplorerApp {
             Command::ClipboardPaste => self.clipboard_paste(target),
             // 기록이 앱 전체 하나라 대상 패널을 보지 않는다 (plan D7)
             Command::Undo => self.undo_last(ctx.input(|input| input.time)),
+            Command::QuickOpen => self.open_quick_open(),
             // 이 셋은 연결(`manager`)에 닿아야 해서 패널만 빌리는 아래 묶음에 들어갈 수 없다
             Command::OpenSiteTab(site) => self.open_site_tab_here(site, target),
             Command::Refresh => self.refresh_panel(target, ctx),
@@ -2978,6 +3090,7 @@ impl eframe::App for ExplorerApp {
                     || self.pending_site_remove.is_some()
                     || self.hostkey.is_open()
                     || self.site_manager.is_open()
+                    || self.quick_open.is_open()
                 {
                     None
                 } else {
@@ -3162,6 +3275,10 @@ impl eframe::App for ExplorerApp {
         // 일괄 이름 바꾸기 (FR-73) — `적용`을 누른 프레임에만 셸에 건다
         if let Some(pairs) = self.bulk_rename.show(&ctx) {
             self.start_rename_many(pairs);
+        }
+        // 빠른 이동 팔레트 (FR-75) — 고른 프레임에 그곳으로 간다
+        if let Some(target) = self.quick_open.show(&ctx) {
+            self.go_to_palette_target(target, &ctx);
         }
         // 정보 대화 (FR-58) — 마찬가지로 상태를 저장하지 않는다
         self.about_dialog.show(&ctx);
@@ -3653,6 +3770,91 @@ mod tests {
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> LayoutRect {
         LayoutRect { x, y, w, h }
+    }
+
+    #[test]
+    fn focus_tab_은_그_패널을_활성으로_하고_탭을_바꾼다() {
+        // FR-75 — 팔레트에서 고른 탭은 그 패널의 그 자리다
+        let ctx = egui::Context::default();
+        let area = rect(0, 0, 1200, 800);
+        let mut view = WorkspaceView::new(PathBuf::from(r"C:\"));
+        let left = view.active;
+        let right = view
+            .layout
+            .split(left, SplitDir::Horizontal, SplitPlace::After, area)
+            .unwrap();
+        let mut panel = PanelState::new(PathBuf::from(r"D:\"));
+        panel.open_local_tab(PathBuf::from(r"D:\둘째"), &ctx);
+        view.panels.insert(right, panel);
+        view.active = left;
+
+        assert!(view.focus_tab(right, 0, &ctx));
+        assert_eq!(view.active, right, "그 패널이 활성이 되지 않았다");
+        assert_eq!(
+            view.panels[&right].active_tab(),
+            0,
+            "그 탭으로 바뀌지 않았다"
+        );
+    }
+
+    #[test]
+    fn 없는_패널이나_자리면_focus_tab_은_아무것도_하지_않는다() {
+        let ctx = egui::Context::default();
+        let mut view = WorkspaceView::new(PathBuf::from(r"C:\"));
+        let active = view.active;
+        assert!(!view.focus_tab(PanelId(99), 0, &ctx));
+        assert!(!view.focus_tab(active, 5, &ctx));
+        assert_eq!(view.active, active);
+    }
+
+    #[test]
+    fn open_path_는_로컬_탭이면_그_자리에서_옮긴다() {
+        // 실제로 읽히는 폴더(임시 폴더)로 보내 열거가 끝나 커밋되는 것까지 본다
+        let ctx = egui::Context::default();
+        let target = std::env::temp_dir();
+        let mut view = WorkspaceView::new(PathBuf::from(r"C:\"));
+        let active = view.active;
+        let mut icons = crate::fs::icons::IconCache::new();
+        let mut cache = crate::panel::dir_cache::DirCache::new();
+        // 첫 poll 이 미뤄 둔 시작 폴더 열거를 건다 — 그 뒤에 고른 경로가 그것을 대신한다
+        view.panels
+            .get_mut(&active)
+            .expect("패널")
+            .poll(&ctx, &mut icons, &mut cache);
+        view.open_path(target.clone(), &ctx);
+        let panel = view.panels.get_mut(&active).expect("패널");
+        for _ in 0..500 {
+            panel.poll(&ctx, &mut icons, &mut cache);
+            if panel.dir() == target {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(panel.dir(), target, "그 탭에서 옮겨 가지 않았다");
+        assert_eq!(panel.tabs().len(), 1, "새 탭을 열었다");
+    }
+
+    #[test]
+    fn open_path_는_원격_탭이면_새_로컬_탭을_연다() {
+        let ctx = egui::Context::default();
+        let mut view = WorkspaceView::new(PathBuf::from(r"C:\"));
+        let active = view.active;
+        view.panels
+            .get_mut(&active)
+            .expect("패널")
+            .open_remote_tab(SiteId(1), RemotePath::new("/pub"));
+        view.open_path(PathBuf::from(r"C:\고른곳"), &ctx);
+        let panel = &view.panels[&active];
+        assert_eq!(
+            panel.tabs().len(),
+            3,
+            "원격 탭을 덮었거나 새 탭을 열지 않았다"
+        );
+        assert!(!panel.is_remote(), "새 로컬 탭이 활성이 아니다");
+        assert_eq!(
+            panel.tabs()[2].source.local_path(),
+            Some(std::path::Path::new(r"C:\고른곳"))
+        );
     }
 
     #[test]

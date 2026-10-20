@@ -1214,6 +1214,16 @@ impl PanelState {
         }
     }
 
+    /// 그 자리의 탭으로 바꾼다 (FR-75 — 팔레트에서 고른 탭). 탭 스트립 클릭과 같은 길이다
+    pub fn switch_tab(&mut self, index: usize, ctx: &egui::Context) {
+        self.handle_tab(TabAction::Switch(index), ctx);
+    }
+
+    /// 활성 탭에서 그 로컬 폴더로 옮긴다 (FR-75) — 주소창 이동과 같아 히스토리에 남는다
+    pub fn navigate_to(&mut self, path: PathBuf, ctx: &egui::Context) {
+        self.navigate(path, ctx);
+    }
+
     /// 지난번에 거둔 뒤 실제로 옮겨 간 로컬 폴더 (FR-75) — 거두면 비워진다
     pub fn take_visited(&mut self) -> Option<PathBuf> {
         self.visited.take()
