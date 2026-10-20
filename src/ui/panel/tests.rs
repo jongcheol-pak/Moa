@@ -5030,3 +5030,40 @@ fn navigate_to_는_히스토리에_남는다() {
         "히스토리에 남지 않았다"
     );
 }
+
+#[test]
+fn 감시_재읽기_뒤에도_포커스_행이_남는다() {
+    // FR-77 — 같은 폴더를 다시 읽어도(감시·F5) 화살표는 옮기던 자리에서 잇는다
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let docs = std::path::PathBuf::from(r"C:\Docs");
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\Users"));
+    panel.pending_dir = docs.clone();
+    panel.pending_nav = PendingNav::None;
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["b.txt", "c.txt", "d.txt"])),
+        &mut icons,
+        &mut cache,
+        &ctx,
+    );
+    // `..` 다음 b → c 로 옮긴다
+    panel.move_selection(true, false);
+    panel.move_selection(true, false);
+    panel.move_selection(true, false);
+    assert_eq!(panel.selected_local(), vec![(docs.join("c.txt"), false)]);
+
+    // 앞에 새 파일이 생겨 다시 읽힌다
+    panel.pending_dir = docs.clone();
+    panel.pending_nav = PendingNav::None;
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["a.txt", "b.txt", "c.txt", "d.txt"])),
+        &mut icons,
+        &mut cache,
+        &ctx,
+    );
+    panel.move_selection(true, false);
+    assert_eq!(
+        panel.selected_local(),
+        vec![(docs.join("d.txt"), false)],
+        "포커스 행을 잃어 다른 자리에서 시작했다"
+    );
+}

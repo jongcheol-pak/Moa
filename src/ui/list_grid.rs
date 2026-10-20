@@ -12,7 +12,7 @@ use crate::ui::list_common::{
     elided_galley_rows, rename_editor,
 };
 use crate::ui::theme;
-use crate::ui::view_mode::{GRID_NAME_ROWS, ViewMode, grid_metrics};
+use crate::ui::view_mode::{Flow, GRID_NAME_ROWS, ViewMode, grid_metrics};
 use eframe::egui;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -60,6 +60,8 @@ pub struct GridInput<'a, R: ListRow> {
     pub local_paths: bool,
     /// 이름 뒤 확장자를 보일지 (FR-52)
     pub show_extensions: bool,
+    /// 이번 그리기에서 이 칸이 보이게 굴린다 (FR-77 — 화살표로 옮긴 칸)
+    pub scroll_to: Option<usize>,
 }
 
 /// 이번 프레임에 일어난 조작 — 목록 상태 변경은 호출부가 한다
@@ -72,6 +74,9 @@ pub struct GridOutcome {
     pub drag_started: Option<usize>,
     /// 이름 편집이 이번 프레임에 끝난 방식 (FR-64) — 상태를 접는 것은 호출부가 한다
     pub rename_end: Option<RenameEnd>,
+    /// 화살표 `↑`·`↓` 한 걸음의 칸 수 (FR-77) — 가로로 흐르는 격자는 그린 한 행의 칸 수다.
+    /// 세로로 흐르는 목록 보기·한 줄 하나인 보기는 다음 칸이 곧 아래 칸이라 1이다
+    pub row_step: usize,
 }
 
 /// 격자 보기를 그린다.
@@ -99,6 +104,7 @@ pub fn show<R: ListRow>(
         thumbnails,
         visible,
         local_paths,
+        scroll_to,
     } = input;
     let wants_thumbnails = local_paths && mode.uses_thumbnails();
     let count = entries.len();
@@ -112,6 +118,10 @@ pub fn show<R: ListRow>(
         .auto_shrink([false, false]);
     let output = scroll.show_viewport(ui, |ui, viewport| {
         let metrics = grid_metrics(mode, viewport.size(), count);
+        outcome.row_step = match mode.flow() {
+            Flow::Horizontal => metrics.columns.max(1),
+            Flow::Vertical | Flow::Rows => 1,
+        };
         let content = metrics.content_size();
         // 콘텐츠 전체를 한 번에 잡는다 — 스크롤 막대의 범위가 이 크기에서 나온다.
         // 항목이 뷰포트보다 적어도 뷰포트만큼은 잡아 빈 영역 클릭이 먹히게 한다
@@ -120,6 +130,9 @@ pub fn show<R: ListRow>(
             content.y.max(viewport.height()),
         ));
         let origin = area.min.to_vec2();
+        if let Some(index) = scroll_to.filter(|&index| index < count) {
+            ui.scroll_to_rect(metrics.item_rect(index).translate(origin), None);
+        }
         // 항목 밖 빈 영역 클릭 — 선택 해제, 우클릭이면 폴더 배경 메뉴 (자세히 보기와 같은 규칙).
         //
         // **칸보다 먼저 등록한다.** egui는 겹친 위젯 중 **나중에 등록된 것**을 위로 보므로
@@ -708,6 +721,7 @@ mod tests {
                     thumbnails: &textures,
                     visible: &mut visible,
                     local_paths: true,
+                    scroll_to: None,
                 },
                 &mut icons,
                 &mut icon_textures,
@@ -856,6 +870,7 @@ mod tests {
                     thumbnails: &textures,
                     visible: &mut visible,
                     local_paths: true,
+                    scroll_to: None,
                 },
                 &mut icons,
                 &mut icon_textures,
@@ -1025,6 +1040,7 @@ mod tests {
                     thumbnails: &textures,
                     visible: &mut visible,
                     local_paths: false,
+                    scroll_to: None,
                 },
                 &mut icons,
                 &mut icon_textures,

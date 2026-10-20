@@ -2133,6 +2133,11 @@ impl ExplorerApp {
             // 기록이 앱 전체 하나라 대상 패널을 보지 않는다 (plan D7)
             Command::Undo => self.undo_last(ctx.input(|input| input.time)),
             Command::QuickOpen => self.open_quick_open(),
+            Command::MoveSelection { down, extend } => {
+                if let Some(panel) = self.command_panel_mut(target) {
+                    panel.move_selection(down, extend);
+                }
+            }
             // 이 셋은 연결(`manager`)에 닿아야 해서 패널만 빌리는 아래 묶음에 들어갈 수 없다
             Command::OpenSiteTab(site) => self.open_site_tab_here(site, target),
             Command::Refresh => self.refresh_panel(target, ctx),

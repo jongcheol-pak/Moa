@@ -1214,6 +1214,11 @@ impl PanelState {
         }
     }
 
+    /// 목록의 포커스 행을 한 걸음 옮긴다 (FR-77) — 원격 목록에서는 아무 일도 하지 않는다
+    pub fn move_selection(&mut self, down: bool, extend: bool) {
+        self.list.move_selection(down, extend);
+    }
+
     /// 그 자리의 탭으로 바꾼다 (FR-75 — 팔레트에서 고른 탭). 탭 스트립 클릭과 같은 길이다
     pub fn switch_tab(&mut self, index: usize, ctx: &egui::Context) {
         self.handle_tab(TabAction::Switch(index), ctx);
