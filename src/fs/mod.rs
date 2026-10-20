@@ -12,6 +12,7 @@ pub mod file_dialog;
 pub mod file_op;
 pub mod icons;
 pub mod known_folders;
+pub mod preview;
 pub mod search;
 pub mod shell_menu;
 pub mod shell_menu_worker;
