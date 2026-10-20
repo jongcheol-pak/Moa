@@ -392,6 +392,8 @@ pub struct DetailsInput<'a, R: ListRow> {
     pub show_extensions: bool,
     /// 이번 프레임에 이 행이 보이게 스크롤한다 — 검색 결과를 열고 옮겨 간 폴더에서 쓴다 (FR-70)
     pub scroll_to: Option<usize>,
+    /// 행마다의 비교 표시 (FR-79) — `entries`와 같은 인덱스, 비교 중이 아니면 비었다
+    pub compare: &'a [Option<crate::app::compare::Mark>],
 }
 
 /// 이번 프레임에 일어난 조작 — 목록 상태 변경은 호출부가 한다
@@ -452,6 +454,7 @@ pub fn show<R: ListRow>(
         column_flags,
         local_paths,
         scroll_to,
+        compare,
     } = input;
     // 보일 열은 패널 종류와 토글로 정해진다 — 로컬 패널에는 권한·소유자가 아예 없다
     let visible = columns.visible(is_remote, column_flags);
@@ -562,6 +565,10 @@ pub fn show<R: ListRow>(
             let painter = ui.painter();
             if index % 2 == 1 {
                 painter.rect_filled(rect, 0.0, stripe);
+            }
+            // 비교 표시는 선택·hover 아래에 깐다 — 골라도 어느 쪽이었는지 비친다 (FR-79)
+            if let Some(mark) = compare.get(index).copied().flatten() {
+                painter.rect_filled(rect, 0.0, theme::compare_fill(mark));
             }
             if selection.contains(&index) {
                 painter.rect_filled(rect, 0.0, sel_bg);
@@ -1592,6 +1599,16 @@ mod tests {
         rows: &[crate::fs::enumerate::FileEntry],
         known: &std::collections::HashMap<PathBuf, u64>,
     ) -> (Vec<String>, Vec<PathBuf>) {
+        let (texts, wanted, _) = draw_local_marked(rows, known, &[]);
+        (texts, wanted)
+    }
+
+    /// `draw_local`에 비교 표시를 얹어 그리고, 칠한 사각형의 채움색도 함께 돌려준다 (FR-79)
+    fn draw_local_marked(
+        rows: &[crate::fs::enumerate::FileEntry],
+        known: &std::collections::HashMap<PathBuf, u64>,
+        compare: &[Option<crate::app::compare::Mark>],
+    ) -> (Vec<String>, Vec<PathBuf>, Vec<egui::Color32>) {
         let ctx = egui::Context::default();
         let mut icons = IconCache::new();
         let mut textures = IconTextures::inline();
@@ -1624,6 +1641,7 @@ mod tests {
                         local_paths: true,
                         show_extensions: true,
                         scroll_to: None,
+                        compare,
                     },
                     &mut icons,
                     &mut textures,
@@ -1632,12 +1650,35 @@ mod tests {
             });
         });
         let mut texts = Vec::new();
+        let mut fills = Vec::new();
         for clipped in &output.shapes {
-            if let egui::Shape::Text(text) = &clipped.shape {
-                texts.push(text.galley.text().to_owned());
+            match &clipped.shape {
+                egui::Shape::Text(text) => texts.push(text.galley.text().to_owned()),
+                egui::Shape::Rect(rect) => fills.push(rect.fill),
+                _ => {}
             }
         }
-        (texts, sizes.wanted)
+        (texts, sizes.wanted, fills)
+    }
+
+    #[test]
+    fn 비교_강조는_자세히_보기_행에_칠해진다() {
+        // FR-79 — 한쪽에만·다름이 각자의 색으로 깔린다
+        use crate::app::compare::Mark;
+        let rows = [
+            local_row("a.txt", false, 1),
+            local_row("b.txt", false, 1),
+            local_row("c.txt", false, 1),
+        ];
+        let (_, _, plain) = draw_local_marked(&rows, &Default::default(), &[]);
+        assert!(
+            !plain.contains(&theme::COMPARE_ONLY),
+            "비교 중이 아닌데 칠했다"
+        );
+        let marks = [Some(Mark::OnlyHere), None, Some(Mark::Differs)];
+        let (_, _, fills) = draw_local_marked(&rows, &Default::default(), &marks);
+        assert!(fills.contains(&theme::COMPARE_ONLY), "{fills:?}");
+        assert!(fills.contains(&theme::COMPARE_DIFF), "{fills:?}");
     }
 
     #[test]

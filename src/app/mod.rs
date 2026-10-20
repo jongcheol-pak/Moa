@@ -3,6 +3,7 @@
 //! 화면은 `ui`가 그린다 — 이 모듈에는 창을 만들거나 소유하는 코드가 없다.
 pub mod autostart;
 pub mod bulk_rename;
+pub mod compare;
 pub mod drives;
 pub mod favorites;
 pub mod fonts;

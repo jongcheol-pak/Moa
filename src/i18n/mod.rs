@@ -412,6 +412,14 @@ strings! {
     preview_binary => "미리볼 수 없는 형식입니다" / "This file can't be previewed";
     preview_failed => "읽지 못했습니다" / "Couldn't read this file";
     preview_loading => "읽는 중…" / "Loading…";
+    /// 패널 메뉴 — 다른 로컬 패널과 견준다 (FR-79)
+    menu_compare => "비교" / "Compare";
+    /// 패널 메뉴 — 비교 결과에서 이 패널에만 있는 항목을 고른다 (FR-79)
+    menu_compare_select_only => "한쪽에만 있는 것 선택" / "Select items only here";
+    /// zip 항목을 풀지 못한 사유 (FR-78) — 이름이 zip 바깥(`..`·절대 경로)을 가리킨다
+    zip_unsafe_name => "zip 바깥을 가리키는 이름입니다" / "The name points outside the zip";
+    /// zip 항목을 풀지 못한 사유 (FR-78) — Windows 파일 이름에 쓸 수 없는 글자가 있다
+    zip_bad_name => "Windows에서 쓸 수 없는 이름입니다" / "The name isn't valid on Windows";
     /// 앱 안에서 Shift 를 든 채 끄는 동안 그림 옆에 붙는 표시 (FR-60 — 놓으면 이동한다)
     drag_moving => "이동" / "Move";
     /// `Ctrl+Z`를 눌렀는데 되돌릴 기록이 없을 때 (FR-74)
@@ -889,6 +897,32 @@ pub mod dynamic {
                 format!("새 {kind}{particle} 만들지 못했습니다 — {error}")
             }
             Language::English => format!("Could not create the new {kind} — {error}"),
+        }
+    }
+
+    /// 두 패널 비교 중일 때 상태 줄 요약 (FR-79) — 차이가 없으면 그렇다고 적는다
+    pub fn compare_summary(only: usize, differs: usize) -> String {
+        match (current(), only + differs) {
+            (Language::Korean, 0) => "비교 · 차이 없음".to_owned(),
+            (Language::English, 0) => "Compare · no differences".to_owned(),
+            (Language::Korean, _) => format!("비교 · 한쪽에만 {only} · 다름 {differs}"),
+            (Language::English, _) => format!("Compare · only here {only} · differ {differs}"),
+        }
+    }
+
+    /// zip 항목을 풀다 못 푼 것이 있을 때 (FR-78) — 몇 개인지와 첫 사유를 적는다
+    pub fn zip_extract_failed(count: usize, first: &str) -> String {
+        match current() {
+            Language::Korean => format!("zip 항목 {count}개를 풀지 못했습니다 — {first}"),
+            Language::English => format!("Could not extract {count} zip item(s) — {first}"),
+        }
+    }
+
+    /// zip 안을 읽지 못했을 때 상태 줄 문구 (FR-78) — 자리는 그대로 지킨다
+    pub fn zip_open_failed(error: &str) -> String {
+        match current() {
+            Language::Korean => format!("zip 을 열지 못했습니다 — {error}"),
+            Language::English => format!("Could not open the zip — {error}"),
         }
     }
 
@@ -2197,6 +2231,53 @@ mod tests {
         assert_eq!(palette_source_tab(), "Tab");
         assert_eq!(palette_source_workspace(), "Workspace");
         assert!(palette_placeholder().starts_with("Go to"));
+    }
+
+    #[test]
+    fn 비교_문구는_두_언어를_모두_낸다() {
+        // FR-79 — 기대값은 원문 리터럴이고 언어를 잠근다
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(menu_compare(), "비교");
+        assert_eq!(menu_compare_select_only(), "한쪽에만 있는 것 선택");
+        assert_eq!(dynamic::compare_summary(0, 0), "비교 · 차이 없음");
+        assert_eq!(dynamic::compare_summary(2, 1), "비교 · 한쪽에만 2 · 다름 1");
+
+        set_language(LanguageSetting::English);
+        assert_eq!(menu_compare(), "Compare");
+        assert_eq!(menu_compare_select_only(), "Select items only here");
+        assert_eq!(dynamic::compare_summary(0, 0), "Compare · no differences");
+        assert_eq!(
+            dynamic::compare_summary(2, 1),
+            "Compare · only here 2 · differ 1"
+        );
+    }
+
+    #[test]
+    fn zip_문구는_두_언어를_모두_낸다() {
+        // FR-78 — 기대값은 원문 리터럴이고 언어를 잠근다
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(zip_unsafe_name(), "zip 바깥을 가리키는 이름입니다");
+        assert_eq!(zip_bad_name(), "Windows에서 쓸 수 없는 이름입니다");
+        assert_eq!(
+            dynamic::zip_open_failed("깨짐"),
+            "zip 을 열지 못했습니다 — 깨짐"
+        );
+        assert_eq!(
+            dynamic::zip_extract_failed(2, "a.txt: 이유"),
+            "zip 항목 2개를 풀지 못했습니다 — a.txt: 이유"
+        );
+
+        set_language(LanguageSetting::English);
+        assert_eq!(zip_unsafe_name(), "The name points outside the zip");
+        assert_eq!(zip_bad_name(), "The name isn't valid on Windows");
+        assert_eq!(
+            dynamic::zip_open_failed("broken"),
+            "Could not open the zip — broken"
+        );
+        assert_eq!(
+            dynamic::zip_extract_failed(1, "x"),
+            "Could not extract 1 zip item(s) — x"
+        );
     }
 
     #[test]

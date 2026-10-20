@@ -62,6 +62,8 @@ pub struct GridInput<'a, R: ListRow> {
     pub show_extensions: bool,
     /// 이번 그리기에서 이 칸이 보이게 굴린다 (FR-77 — 화살표로 옮긴 칸)
     pub scroll_to: Option<usize>,
+    /// 칸마다의 비교 표시 (FR-79) — `entries`와 같은 인덱스, 비교 중이 아니면 비었다
+    pub compare: &'a [Option<crate::app::compare::Mark>],
 }
 
 /// 이번 프레임에 일어난 조작 — 목록 상태 변경은 호출부가 한다
@@ -105,6 +107,7 @@ pub fn show<R: ListRow>(
         visible,
         local_paths,
         scroll_to,
+        compare,
     } = input;
     let wants_thumbnails = local_paths && mode.uses_thumbnails();
     let count = entries.len();
@@ -186,6 +189,11 @@ pub fn show<R: ListRow>(
                     index: Some(index),
                     pos,
                 };
+            }
+            // 비교 표시는 선택·hover 아래에 깐다 (FR-79)
+            if let Some(mark) = compare.get(index).copied().flatten() {
+                ui.painter()
+                    .rect_filled(cell, 2.0, theme::compare_fill(mark));
             }
             if selection.contains(&index) {
                 ui.painter().rect_filled(cell, 2.0, sel_bg);
@@ -722,6 +730,7 @@ mod tests {
                     visible: &mut visible,
                     local_paths: true,
                     scroll_to: None,
+                    compare: &[],
                 },
                 &mut icons,
                 &mut icon_textures,
@@ -871,6 +880,7 @@ mod tests {
                     visible: &mut visible,
                     local_paths: true,
                     scroll_to: None,
+                    compare: &[],
                 },
                 &mut icons,
                 &mut icon_textures,
@@ -878,6 +888,57 @@ mod tests {
         });
         assert_eq!(visible.len(), 1, "폴더까지 요청했다: {visible:?}");
         assert!(visible[0].0.ends_with("사진.jpg"));
+    }
+
+    #[test]
+    fn 비교_강조는_격자_칸에_칠해진다() {
+        // FR-79 — 자세히 보기와 같은 색이 칸 배경에 깔린다
+        use crate::app::compare::Mark;
+        let dir = PathBuf::from(r"C:\테스트");
+        let ctx = egui::Context::default();
+        let entries = vec![entry("a.txt", false), entry("b.txt", false)];
+        let mut icon_indices = vec![None; entries.len()];
+        let type_names = vec!["파일".to_owned(), "파일".to_owned()];
+        let selection = BTreeSet::new();
+        let mut visible = Vec::new();
+        let textures = ThumbnailTextures::new();
+        let mut icons = IconCache::new();
+        let mut icon_textures = IconTextures::inline();
+        let marks = [Some(Mark::Differs), Some(Mark::OnlyHere)];
+
+        let output = ctx.run_ui(Default::default(), |ui| {
+            show(
+                ui,
+                GridInput {
+                    rename: None,
+                    cut_marks: &HashSet::new(),
+                    dir: &dir,
+                    entries: &entries,
+                    icon_indices: &mut icon_indices,
+                    selection: &selection,
+                    type_names: &type_names,
+                    show_extensions: true,
+                    mode: ViewMode::MediumIcons,
+                    thumbnails: &textures,
+                    visible: &mut visible,
+                    local_paths: true,
+                    scroll_to: None,
+                    compare: &marks,
+                },
+                &mut icons,
+                &mut icon_textures,
+            );
+        });
+        let fills: Vec<egui::Color32> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) => Some(rect.fill),
+                _ => None,
+            })
+            .collect();
+        assert!(fills.contains(&theme::COMPARE_ONLY), "{fills:?}");
+        assert!(fills.contains(&theme::COMPARE_DIFF), "{fills:?}");
     }
 
     #[test]
@@ -1040,6 +1101,7 @@ mod tests {
                     thumbnails: &textures,
                     visible: &mut visible,
                     local_paths: false,
+                    compare: &[],
                     scroll_to: None,
                 },
                 &mut icons,

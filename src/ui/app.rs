@@ -57,6 +57,7 @@ use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 
 mod autosave;
+mod compare;
 mod remote;
 mod shell_menu;
 mod transfer_conflict;
@@ -222,6 +223,8 @@ pub struct WorkspaceView {
     last_local_tab: Option<TabId>,
     /// 같은 규칙의 원격 쪽 — **올리기 목적지**다 (FR-54)
     last_remote_tab: Option<TabId>,
+    /// 두 패널 비교 짝 (FR-79) — 세션에 담지 않는다(다시 켜면 꺼진 채 시작한다)
+    compare: Option<compare::ComparePair>,
 }
 
 impl WorkspaceView {
@@ -263,6 +266,7 @@ impl WorkspaceView {
             // 전송 대상은 첫 조회에서 폴백 규칙이 정한다 (FR-54)
             last_local_tab: None,
             last_remote_tab: None,
+            compare: None,
         }
     }
 
@@ -286,8 +290,7 @@ impl WorkspaceView {
         let start = self
             .panels
             .get(&target)
-            .map(|p| p.dir().to_path_buf())
-            .filter(|dir| !dir.as_os_str().is_empty())
+            .and_then(|p| p.local_dir().map(Path::to_path_buf))
             .unwrap_or_else(start_dir);
         // 공간이 부족하면 나눌 수 없다 (사용자는 창을 키우면 된다)
         let new_id = self.layout.split(target, dir, place, area).ok()?;
@@ -348,6 +351,7 @@ impl WorkspaceView {
             // 세션에 담지 않는 값이라 되살릴 것이 없다 — 첫 조회의 폴백이 정한다 (FR-54)
             last_local_tab: None,
             last_remote_tab: None,
+            compare: None,
         }
     }
 
@@ -391,8 +395,21 @@ impl WorkspaceView {
         let id = state.active_tab_id();
         if state.is_remote() {
             self.last_remote_tab = Some(id);
-        } else {
+        } else if state.local_dir().is_some() {
+            // zip 탭은 받기 대상이 아니다 — 받은 파일을 놓을 로컬 폴더가 없다 (FR-78)
             self.last_local_tab = Some(id);
+        }
+    }
+
+    /// 탐색기에서 끌어온 것을 그 패널에 놓으면 어디로 가는가 (FR-61) — 받지 않는 자리면 `None`
+    fn os_drop_landing(&self, panel: PanelId) -> Option<OsDropTarget> {
+        let panel = self.panels.get(&panel)?;
+        match (panel.active_site(), panel.remote_dir()) {
+            (Some(site), Some(dir)) => Some(OsDropTarget::Remote { site, dir }),
+            // zip 탭은 받지 않는다 — 로컬 폴더가 없다 (FR-78)
+            _ => panel
+                .local_dir()
+                .map(|dir| OsDropTarget::Local(dir.to_path_buf())),
         }
     }
 
@@ -413,8 +430,16 @@ impl WorkspaceView {
     /// 폴백이 활성 탭만 보는 이유: 아무 배경 탭이나 집으면 화면에서 아이콘을 찾기 어렵고,
     /// 올리기 원본도 활성 탭의 선택에서만 나온다
     fn resolve_target(&self, current: Option<TabId>, remote: bool) -> Option<TabId> {
+        // 그 탭이 아직 그 종류인가 — 받기 대상 탭이 zip 에 들어가면 로컬 폴더가 없다 (FR-78)
+        let still_fits = |source: &TabSource| {
+            if remote {
+                source.is_remote()
+            } else {
+                source.local_path().is_some()
+            }
+        };
         if let Some(id) = current
-            && self.tab_source(id).is_some()
+            && self.tab_source(id).is_some_and(still_fits)
         {
             return Some(id);
         }
@@ -422,7 +447,13 @@ impl WorkspaceView {
             .panel_ids()
             .into_iter()
             .filter_map(|id| self.panels.get(&id))
-            .find(|panel| panel.is_remote() == remote)
+            .find(|panel| {
+                if remote {
+                    panel.is_remote()
+                } else {
+                    panel.local_dir().is_some()
+                }
+            })
             .map(PanelState::active_tab_id)
     }
 
@@ -731,6 +762,9 @@ pub struct ExplorerApp {
     /// 워커가 여럿 돌 수 있어 채널 하나를 나눠 쓴다
     copy_tx: std::sync::mpsc::Sender<crate::fs::file_op::CopyOutcome>,
     copy_rx: std::sync::mpsc::Receiver<crate::fs::file_op::CopyOutcome>,
+    /// zip 풀기의 결과를 받는 자리 (FR-78) — `pump_zip_extract`가 프레임마다 거둔다
+    zip_extract_tx: std::sync::mpsc::Sender<crate::fs::zip_archive::ExtractOutcome>,
+    zip_extract_rx: std::sync::mpsc::Receiver<crate::fs::zip_archive::ExtractOutcome>,
     /// OS에서 끌어온 경로의 폴더 여부를 워커가 재 보낸 결과 (FR-61) —
     /// `(사이트, 놓인 원격 폴더, 항목들)`. 로컬 대상은 재 볼 것이 없어 이 통로를 쓰지 않는다
     os_drop_tx: std::sync::mpsc::Sender<(
@@ -813,6 +847,7 @@ impl ExplorerApp {
         let (expand_tx, expand_rx) = std::sync::mpsc::channel();
         let (conflict_tx, conflict_rx) = std::sync::mpsc::channel();
         let (copy_tx, copy_rx) = std::sync::mpsc::channel();
+        let (zip_extract_tx, zip_extract_rx) = std::sync::mpsc::channel();
         let (file_op_tx, file_op_rx) = std::sync::mpsc::channel();
         let (undo_tx, undo_rx) = std::sync::mpsc::channel();
         let (os_drop_tx, os_drop_rx) = std::sync::mpsc::channel();
@@ -924,6 +959,8 @@ impl ExplorerApp {
             pending_show_more: None,
             copy_tx,
             copy_rx,
+            zip_extract_tx,
+            zip_extract_rx,
             os_drop_tx,
             os_drop_rx,
             conflict_tx,
@@ -2133,9 +2170,28 @@ impl ExplorerApp {
             Command::ClipboardCopy => self.clipboard_put(target, false),
             Command::ClipboardCut => self.clipboard_put(target, true),
             Command::ClipboardPaste => self.clipboard_paste(target),
-            // 기록이 앱 전체 하나라 대상 패널을 보지 않는다 (plan D7)
-            Command::Undo => self.undo_last(ctx.input(|input| input.time)),
+            // 기록이 앱 전체 하나라 대상 패널을 보지 않는다 (plan D7) — 단 zip 탭(읽기 전용)에서
+            // 누른 것은 걸지 않는다: 그 화면에서 보이지 않는 곳의 파일이 바뀐다 (FR-78)
+            Command::Undo => {
+                if !self
+                    .command_panel_mut(target)
+                    .is_some_and(|panel| panel.is_zip())
+                {
+                    self.undo_last(ctx.input(|input| input.time));
+                }
+            }
             Command::QuickOpen => self.open_quick_open(),
+            Command::CompareWith(other) => {
+                let view = self.ensure_active_view();
+                let me = target.unwrap_or(view.active);
+                view.start_compare(me, other);
+            }
+            Command::CompareOff => self.ensure_active_view().stop_compare(),
+            Command::SelectCompareOnly => {
+                if let Some(panel) = self.command_panel_mut(target) {
+                    panel.select_compare_only();
+                }
+            }
             Command::TogglePreview => self.preview.toggle(),
             Command::MoveSelection { down, extend } => {
                 if let Some(panel) = self.command_panel_mut(target) {
@@ -2235,7 +2291,8 @@ impl ExplorerApp {
             .iter()
             .map(|item| match item {
                 list_common::DragItem::Local { path, .. } => Some(path.clone()),
-                list_common::DragItem::Remote { .. } => None,
+                // zip 항목은 탐색기로 내보내지 않는다 — 실제 경로가 없다(FR-78 범위 밖)
+                list_common::DragItem::Remote { .. } | list_common::DragItem::Zip { .. } => None,
             })
             .collect::<Option<Vec<std::path::PathBuf>>>()
         else {
@@ -2299,11 +2356,7 @@ impl ExplorerApp {
         let landed = self
             .views
             .get(&self.workspaces.active().id)
-            .and_then(|view| view.panels.get(&target))
-            .map(|panel| match (panel.active_site(), panel.remote_dir()) {
-                (Some(site), Some(dir)) => OsDropTarget::Remote { site, dir },
-                _ => OsDropTarget::Local(panel.dir().to_path_buf()),
-            });
+            .and_then(|view| view.os_drop_landing(target));
         match landed {
             // 원격 탭 — 폴더 여부를 워커가 재고 그 결과로 전송을 건다
             Some(OsDropTarget::Remote { site, dir }) => self.spawn_os_drop_scan(site, dir, dropped),
@@ -2417,6 +2470,38 @@ impl ExplorerApp {
         }
     }
 
+    /// zip 항목을 그 로컬 폴더에 푼다 (FR-78) — 워커가 풀고 결과는 채널로 온다.
+    ///
+    /// 같은 이름 확인(FR-55)은 이미 지났다 — 덮어쓰기를 골랐으면 그대로 덮고(임시 이름에 다 쓴 뒤
+    /// 바꿔 놓는다), 건너뛰기를 골랐으면 겹친 것은 이미 빠졌다. 되돌리기(Ctrl+Z)에 담지 않는다 —
+    /// 셸 작업이 아니다
+    pub(super) fn start_zip_extract(&mut self, picks: list_common::ZipPicks) {
+        let tx = self.zip_extract_tx.clone();
+        let wake = self.repaint.clone();
+        std::thread::spawn(move || {
+            let outcome =
+                crate::fs::zip_archive::extract(&picks.archive, &picks.paths, &picks.dest);
+            if tx.send(outcome).is_ok() {
+                wake();
+            }
+        });
+    }
+
+    /// 끝난 zip 풀기에 못 푼 것이 있으면 알린다 (FR-78) — 다 풀렸으면 놓인 폴더에 항목이
+    /// 나타나는 것(변경 감시)이 곧 확인이라 따로 알리지 않는다
+    fn pump_zip_extract(&mut self, now: f64) {
+        while let Ok(outcome) = self.zip_extract_rx.try_recv() {
+            let Some((path, reason)) = outcome.failed.first() else {
+                continue;
+            };
+            let text = crate::i18n::dynamic::zip_extract_failed(
+                outcome.failed.len(),
+                &format!("{path}: {reason}"),
+            );
+            self.notice = Some((text, now + NOTICE_SECS));
+        }
+    }
+
     /// 고른 것을 지운다 (FR-12·FR-64) — 확인 대화는 셸이 띄운다.
     ///
     /// 고른 것이 없으면 아무 일도 하지 않는다 — `Delete`를 헛눌렀을 때 대화만 뜨는 것보다
@@ -2492,11 +2577,10 @@ impl ExplorerApp {
         let Some(panel) = self.command_panel_mut(target) else {
             return;
         };
-        // 원격 탭에는 붙여넣을 로컬 폴더가 없다 (plan Out of Scope — 전송은 큐가 담당한다)
-        if panel.is_remote() {
+        // 원격·zip 탭에는 붙여넣을 로컬 폴더가 없다 (전송은 큐가 담당한다 · zip 은 읽기 전용 — FR-78)
+        let Some(dest) = panel.local_dir().map(Path::to_path_buf) else {
             return;
-        }
-        let dest = panel.dir().to_path_buf();
+        };
         let started = if files.cut {
             crate::fs::file_op::move_into(
                 dest,
@@ -2936,6 +3020,7 @@ impl eframe::App for ExplorerApp {
         self.drain_conflict_checks();
         // 셸 복사가 끝났으면 그 사실을 알린다 (FR-60)
         self.pump_local_copy(now);
+        self.pump_zip_extract(now);
         self.pump_file_op(now);
         self.pump_undo(now);
         // 폴더 여부를 다 잰 OS 드롭을 전송으로 보낸다 (FR-61)
@@ -2969,6 +3054,8 @@ impl eframe::App for ExplorerApp {
                     self.recent.visit(&dir);
                 }
             }
+            // 두 패널 비교 — 이번 프레임에 목록이 바뀌었으면 다시 견준다 (FR-79)
+            view.sync_compare(ctx);
         }
         self.frame_timer.mark("panels_poll");
         self.sync_subtitle();
@@ -3149,6 +3236,7 @@ impl eframe::App for ExplorerApp {
                     // 전송 대상은 **그리기 전에** 정한다 — 아이콘이 가리키는 곳과 실제로 가는
                     // 곳이 같은 값에서 나와야 한다 (FR-54)
                     let targets = view.transfer_targets();
+                    let compare = view.compare_pair();
                     let outcome = splitter::show_layout(
                         ui,
                         &ctx,
@@ -3170,6 +3258,7 @@ impl eframe::App for ExplorerApp {
                         targets,
                         &self.favorites.entries(),
                         self.drives.rows(),
+                        compare,
                     );
                     // 이번 프레임에 눌린 패널이 다음 전송의 대상이 된다 — 팝업에 가린 클릭은
                     // 여기 오지 않는다(`pressed_panel` 설명). 메뉴 실행보다 **앞서** 반영해야
@@ -3226,7 +3315,12 @@ impl eframe::App for ExplorerApp {
                                 .and_then(|shell| shell.cursor_client_pos(ctx.pixels_per_point()))
                         })
                         .flatten();
+                    // 받지 않는 패널(zip 탭)은 두르지 않는다 — 놓아도 아무 일이 없다 (FR-78)
                     if let Some(target) = drop_highlight(hovering, cursor, &pane_rects)
+                        && self
+                            .views
+                            .get(&self.workspaces.active().id)
+                            .is_some_and(|view| view.os_drop_landing(target).is_some())
                         && let Some((_, rect)) = pane_rects.iter().find(|(id, _)| *id == target)
                     {
                         splitter::draw_drop_highlight(ui, *rect);
@@ -4256,5 +4350,57 @@ mod tests {
         let targets = view.transfer_targets();
         assert_eq!(targets.download, None);
         assert!(!targets.can_download);
+    }
+
+    #[test]
+    fn zip_탭이_활성인_패널은_받기_쓰기_대상이_아니다() {
+        // FR-78 — zip 탭은 읽기 전용이라 받기 아이콘이 붙지 않는다
+        let mut view = WorkspaceView::new(PathBuf::from(r"C:"));
+        let only = view.active;
+        let mut panel = local_panel(r"D:\받은 파일");
+        panel.enter_zip_for_test(PathBuf::from(r"D:\받은 파일\자료.zip"));
+        view.panels.insert(only, panel);
+        view.note_pressed(only);
+        let targets = view.transfer_targets();
+        assert_eq!(targets.download, None, "zip 탭이 받기 대상이 됐다");
+        assert!(!targets.can_download);
+    }
+
+    #[test]
+    fn 받기_대상_탭이_zip에_들어가면_다른_로컬_탭으로_되돌아간다() {
+        let area = rect(0, 0, 1200, 800);
+        let mut view = WorkspaceView::new(PathBuf::from(r"C:"));
+        let left = view.active;
+        view.panels.insert(left, local_panel(r"D:\받은 파일"));
+        let right = view
+            .layout
+            .split(left, SplitDir::Horizontal, SplitPlace::After, area)
+            .unwrap();
+        view.panels.insert(right, local_panel(r"E:\둘째"));
+        view.note_pressed(left);
+        view.panels
+            .get_mut(&left)
+            .unwrap()
+            .enter_zip_for_test(PathBuf::from(r"D:\받은 파일\자료.zip"));
+        let targets = view.transfer_targets();
+        assert_eq!(targets.download, Some(view.panels[&right].active_tab_id()));
+        assert_eq!(view.download_dir(), Some(PathBuf::from(r"E:\둘째")));
+    }
+
+    #[test]
+    fn zip_탭이_활성이면_쓰기_대상_폴더가_없다() {
+        // FR-78 — 탐색기에서 끌어온 것을 zip 탭에 놓아도 어디에도 쓰지 않는다
+        let mut view = WorkspaceView::new(PathBuf::from(r"C:"));
+        let only = view.active;
+        let mut panel = local_panel(r"D:\받은 파일");
+        panel.enter_zip_for_test(PathBuf::from(r"D:\받은 파일\자료.zip"));
+        view.panels.insert(only, panel);
+        assert!(view.os_drop_landing(only).is_none());
+        // 로컬 탭이면 그 폴더다
+        view.panels.insert(only, local_panel(r"D:\받은 파일"));
+        assert!(matches!(
+            view.os_drop_landing(only),
+            Some(OsDropTarget::Local(dir)) if dir == Path::new(r"D:\받은 파일")
+        ));
     }
 }

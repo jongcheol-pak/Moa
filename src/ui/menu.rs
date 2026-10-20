@@ -6,7 +6,7 @@
 //!
 //! 이 모듈은 상태를 바꾸지 않는다 — 무엇을 하라는 **명령만 값으로 돌려주고**,
 //! 실행은 `ui::app`이 한다(패널·워크스페이스 소유자가 거기이기 때문).
-use crate::app::layout::{SplitDir, SplitPlace};
+use crate::app::layout::{PanelId, SplitDir, SplitPlace};
 use crate::remote::types::SiteId;
 use crate::ui::list_details::{ColumnFlags, ColumnKind, MENU_COLUMNS};
 use crate::ui::queue_panel::QueueColumnKind;
@@ -132,13 +132,48 @@ pub enum Command {
     /// 미리보기 창을 켜고 끈다 (FR-76) — `Space`. 창은 앱에 하나라 고른 항목을 바꾸지 않아
     /// 파일 대상 명령이 아니다(사이드바가 키를 가져도 듣는다)
     TogglePreview,
+    /// 이 패널(명령의 대상)을 그 패널과 비교한다 (FR-79) — 패널 메뉴의 `비교`
+    CompareWith(PanelId),
+    /// 두 패널 비교를 끈다 (FR-79) — 켜진 `비교`를 다시 누르면 나온다
+    CompareOff,
+    /// 비교 결과에서 이 패널에만 있는 항목을 고른다 (FR-79)
+    SelectCompareOnly,
+}
+
+/// 패널 메뉴의 `비교` 줄이 무엇을 하는가 (FR-79) — 트리를 아는 `ui::splitter`가 정해 내려 준다
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CompareMenu {
+    /// 비교할 다른 로컬 패널이 없다(또는 이 패널이 로컬 폴더를 보고 있지 않다) — 흐린 줄
+    #[default]
+    Unavailable,
+    /// 다른 로컬 패널이 하나뿐이다 — 누르면 곧바로 그것과 비교한다
+    With(PanelId),
+    /// 다른 로컬 패널이 여럿이다 — 하위 메뉴에서 고른다 (패널 id, 그 패널의 폴더 이름)
+    Pick(Vec<(PanelId, String)>),
+    /// 이 패널이 비교 중이다 — 체크된 줄이고 누르면 끈다
+    On,
+}
+
+impl CompareMenu {
+    /// 줄을 누르면 곧바로 나갈 명령 — 하위 메뉴·흐린 줄이면 `None`
+    pub fn direct_command(&self) -> Option<Command> {
+        match self {
+            CompareMenu::With(other) => Some(Command::CompareWith(*other)),
+            CompareMenu::On => Some(Command::CompareOff),
+            CompareMenu::Unavailable | CompareMenu::Pick(_) => None,
+        }
+    }
 }
 
 /// 패널 메뉴 항목의 활성/비활성을 가르는 현재 상태
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanelMenuState {
     /// 패널이 2개 이상인가 — 마지막 하나는 닫을 수 없다 (FR-2)
     pub can_close_panel: bool,
+    /// 활성 탭이 로컬 폴더인가 — zip 탭(읽기 전용)이면 새 파일·새 폴더가 흐리다 (FR-78)
+    pub can_write: bool,
+    /// `비교` 줄의 상태 (FR-79)
+    pub compare: CompareMenu,
 }
 
 impl PanelMenuState {
@@ -150,6 +185,8 @@ impl PanelMenuState {
     pub fn for_panes(pane_count: usize) -> PanelMenuState {
         PanelMenuState {
             can_close_panel: pane_count > 1,
+            can_write: true,
+            compare: CompareMenu::Unavailable,
         }
     }
 }
@@ -158,7 +195,7 @@ impl PanelMenuState {
 ///
 /// 항목 순서·구분선 위치는 plan `## 시각 요소 분해`의 인벤토리 표 13행 그대로다.
 /// 진입점이 이 메뉴 하나뿐이므로, 여기서 빠진 기능은 마우스로 닿을 수 없게 된다
-pub fn panel_menu_items(ui: &mut egui::Ui, state: PanelMenuState, out: &mut Option<Command>) {
+pub fn panel_menu_items(ui: &mut egui::Ui, state: &PanelMenuState, out: &mut Option<Command>) {
     // 보기 모드는 여기 두지 않는다 — 상태 줄의 보기 버튼이 진입점이다(2026-09-29 사용자 요청)
     split_items(ui, out);
     ui.separator();
@@ -170,12 +207,13 @@ pub fn panel_menu_items(ui: &mut egui::Ui, state: PanelMenuState, out: &mut Opti
         Command::Refresh,
         out,
     );
+    compare_items(ui, &state.compare, out);
     ui.separator();
     item(
         ui,
         crate::i18n::menu_new_file(),
         "",
-        true,
+        state.can_write,
         Command::NewFile,
         out,
     );
@@ -183,7 +221,7 @@ pub fn panel_menu_items(ui: &mut egui::Ui, state: PanelMenuState, out: &mut Opti
         ui,
         crate::i18n::menu_new_folder(),
         "",
-        true,
+        state.can_write,
         Command::NewFolder,
         out,
     );
@@ -196,6 +234,41 @@ pub fn panel_menu_items(ui: &mut egui::Ui, state: PanelMenuState, out: &mut Opti
         Command::ClosePanel,
         out,
     );
+}
+
+/// `비교` 줄과, 켜져 있으면 `한쪽에만 있는 것 선택` 줄 (FR-79)
+fn compare_items(ui: &mut egui::Ui, compare: &CompareMenu, out: &mut Option<Command>) {
+    let label = crate::i18n::menu_compare();
+    match compare {
+        CompareMenu::Pick(candidates) => {
+            // 하위 메뉴는 부모 스타일을 잇지 않는 별도 `Area`라 여기서 다시 세운다
+            ui.menu_button(label, |ui| {
+                theme::menu_style(ui);
+                for (panel, name) in candidates {
+                    item(ui, name, "", true, Command::CompareWith(*panel), out);
+                }
+            });
+        }
+        _ => {
+            let on = *compare == CompareMenu::On;
+            let button = egui::Button::new(label).selected(on);
+            let response = ui.add_enabled(compare.direct_command().is_some(), button);
+            if response.clicked() {
+                *out = compare.direct_command();
+                ui.close();
+            }
+        }
+    }
+    if *compare == CompareMenu::On {
+        item(
+            ui,
+            crate::i18n::menu_compare_select_only(),
+            "",
+            true,
+            Command::SelectCompareOnly,
+            out,
+        );
+    }
 }
 
 /// 열 메뉴 — 목록 머리글 우클릭으로 열린다 (인벤토리 #22~28).
@@ -445,7 +518,11 @@ fn targets_file_list(command: Command) -> bool {
         | Command::OpenReleaseNotes
         | Command::OpenSiteTab(_)
         | Command::QuickOpen
-        | Command::TogglePreview => false,
+        | Command::TogglePreview
+        // 비교는 패널 메뉴에서만 나간다 — 고른 항목이 아니라 패널이 대상이다 (FR-79)
+        | Command::CompareWith(_)
+        | Command::CompareOff
+        | Command::SelectCompareOnly => false,
         // 고른 항목이 대상이다 — 파일 목록이 키를 쥔 때만 나간다
         Command::Rename
         | Command::Delete { .. }
@@ -1311,7 +1388,7 @@ mod tests {
     fn menu_labels(state: PanelMenuState) -> Vec<String> {
         drawn_labels(|ui| {
             let mut command = None;
-            panel_menu_items(ui, state, &mut command);
+            panel_menu_items(ui, &state, &mut command);
         })
     }
 
@@ -1350,6 +1427,7 @@ mod tests {
             crate::i18n::menu_split_up(),
             crate::i18n::menu_split_down(),
             crate::i18n::menu_refresh(),
+            crate::i18n::menu_compare(),
             crate::i18n::menu_new_file(),
             crate::i18n::menu_new_folder(),
             crate::i18n::close(),
@@ -1506,5 +1584,115 @@ mod tests {
             submenu_pos(screen, egui::Rangef::new(100.0, 1100.0), 700.0, sub),
             egui::pos2(950.0, 600.0)
         );
+    }
+
+    #[test]
+    fn 비교_줄은_후보가_하나면_바로_켠다() {
+        // FR-79 — 다른 로컬 패널이 하나뿐이면 고를 것 없이 곧바로 비교한다
+        assert_eq!(
+            CompareMenu::With(PanelId(2)).direct_command(),
+            Some(Command::CompareWith(PanelId(2)))
+        );
+    }
+
+    #[test]
+    fn 비교_줄은_후보가_여럿이면_하위_메뉴다() {
+        let _guard =
+            crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+        let pick = CompareMenu::Pick(vec![
+            (PanelId(1), "문서".to_owned()),
+            (PanelId(2), "사진".to_owned()),
+        ]);
+        assert_eq!(pick.direct_command(), None, "고르기 전에 비교를 걸었다");
+        let state = PanelMenuState {
+            compare: pick,
+            ..PanelMenuState::for_panes(3)
+        };
+        let labels = menu_labels(state);
+        assert!(
+            labels
+                .iter()
+                .any(|label| label == crate::i18n::menu_compare())
+        );
+    }
+
+    #[test]
+    fn 비교_줄은_후보가_없으면_흐리다() {
+        let _guard =
+            crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+        assert_eq!(CompareMenu::Unavailable.direct_command(), None);
+        // 줄 자체는 선다 — 사라지면 그 기능이 있는지조차 알 수 없다
+        let labels = menu_labels(PanelMenuState::for_panes(1));
+        assert!(
+            labels
+                .iter()
+                .any(|label| label == crate::i18n::menu_compare())
+        );
+    }
+
+    #[test]
+    fn zip_탭이면_새_파일_새_폴더가_흐리다() {
+        // D23 — 눌러도 아무 일이 없는 켜진 줄을 두지 않는다. 흐림은 글자의 칠 속성으로 잰다
+        let _guard =
+            crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+        fn look(state: PanelMenuState, label: &str) -> Option<(egui::Color32, u32)> {
+            let ctx = egui::Context::default();
+            crate::ui::app::install_fonts(&ctx, None);
+            let output = ctx.run_ui(Default::default(), |ui| {
+                let mut command = None;
+                panel_menu_items(ui, &state, &mut command);
+            });
+            output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some((text.fallback_color, text.opacity_factor.to_bits()))
+                    }
+                    _ => None,
+                })
+        }
+        for label in [crate::i18n::menu_new_file(), crate::i18n::menu_new_folder()] {
+            let writable = look(PanelMenuState::for_panes(2), label).expect("쓰기 가능 줄");
+            let zip = look(
+                PanelMenuState {
+                    can_write: false,
+                    ..PanelMenuState::for_panes(2)
+                },
+                label,
+            )
+            .expect("zip 탭 줄");
+            assert_ne!(writable, zip, "{label} 줄이 zip 탭에서도 켜져 보인다");
+        }
+    }
+
+    #[test]
+    fn 비교가_켜지면_한쪽에만_있는_것_선택이_선다() {
+        let _guard =
+            crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+        assert_eq!(CompareMenu::On.direct_command(), Some(Command::CompareOff));
+        let on = menu_labels(PanelMenuState {
+            compare: CompareMenu::On,
+            ..PanelMenuState::for_panes(2)
+        });
+        assert!(
+            on.iter()
+                .any(|label| label == crate::i18n::menu_compare_select_only())
+        );
+        let off = menu_labels(PanelMenuState {
+            compare: CompareMenu::With(PanelId(1)),
+            ..PanelMenuState::for_panes(2)
+        });
+        assert!(
+            !off.iter()
+                .any(|label| label == crate::i18n::menu_compare_select_only())
+        );
+    }
+
+    #[test]
+    fn 비교_명령은_파일_대상이_아니다() {
+        assert!(!targets_file_list(Command::CompareWith(PanelId(1))));
+        assert!(!targets_file_list(Command::CompareOff));
+        assert!(!targets_file_list(Command::SelectCompareOnly));
     }
 }

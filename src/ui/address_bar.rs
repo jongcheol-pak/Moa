@@ -32,6 +32,11 @@ const ADDRESS_MIN_WIDTH: f32 = 120.0;
 pub enum AddressTarget<'a> {
     Local(&'a Path),
     Remote(&'a RemotePath),
+    /// zip 안 (FR-78) — `inner`는 `/`로 잇는 zip 안 경로다(뿌리 `""`)
+    Zip {
+        archive: &'a Path,
+        inner: &'a str,
+    },
 }
 
 /// 주소창이 상위(패널)에 돌려주는 탐색 요청
@@ -65,6 +70,13 @@ impl<'a> AddressTarget<'a> {
         match self {
             AddressTarget::Local(path) => path.to_string_lossy(),
             AddressTarget::Remote(path) => Cow::Borrowed(path.as_str()),
+            // 안 경로는 Windows 구분자로 잇는다 — 주소칸이 로컬 경로처럼 읽히게 한다
+            AddressTarget::Zip { archive, inner: "" } => archive.to_string_lossy(),
+            AddressTarget::Zip { archive, inner } => Cow::Owned(format!(
+                "{}\\{}",
+                archive.to_string_lossy(),
+                inner.replace('/', "\\")
+            )),
         }
     }
 
@@ -76,6 +88,8 @@ impl<'a> AddressTarget<'a> {
         match self {
             AddressTarget::Local(path) => path.parent().is_some(),
             AddressTarget::Remote(path) => path.parent().is_some(),
+            // zip 뿌리의 위는 zip 이 있는 폴더다
+            AddressTarget::Zip { .. } => true,
         }
     }
 
@@ -92,6 +106,10 @@ impl<'a> AddressTarget<'a> {
             AddressTarget::Local(current) => normalize_input(current, input).map(NavAction::Goto),
             AddressTarget::Remote(current) => {
                 normalize_remote_input(current, input).map(NavAction::GotoRemotePath)
+            }
+            // 친 글자는 로컬 이동이다 — 상대 경로는 zip 이 있는 폴더 기준이다
+            AddressTarget::Zip { archive, .. } => {
+                normalize_input(archive.parent().unwrap_or(archive), input).map(NavAction::Goto)
             }
         }
     }
@@ -466,5 +484,31 @@ mod tests {
         // 빈 입력은 양쪽 다 아무것도 확정하지 않는다
         assert_eq!(원격.resolve_input("   "), None);
         assert_eq!(로컬.resolve_input("   "), None);
+    }
+
+    #[test]
+    fn zip_주소는_zip_경로_뒤에_안_경로를_잇는다() {
+        let archive = Path::new(r"C:\받은 파일\자료.zip");
+        let 뿌리 = AddressTarget::Zip { archive, inner: "" };
+        assert_eq!(뿌리.display_text(), r"C:\받은 파일\자료.zip");
+        let 안 = AddressTarget::Zip {
+            archive,
+            inner: "문서/사진",
+        };
+        assert_eq!(안.display_text(), r"C:\받은 파일\자료.zip\문서\사진");
+        // 친 글자는 로컬 이동이다 — 상대 경로는 zip 이 있는 폴더 기준이다
+        assert_eq!(
+            안.resolve_input("다른 폴더"),
+            Some(NavAction::Goto(PathBuf::from(r"C:\받은 파일\다른 폴더")))
+        );
+    }
+
+    #[test]
+    fn zip_주소는_뿌리에서도_위로_갈_수_있다() {
+        let zip = AddressTarget::Zip {
+            archive: Path::new(r"C:\자료.zip"),
+            inner: "",
+        };
+        assert!(zip.can_go_up(), "zip 뿌리의 위는 zip 이 있는 폴더다");
     }
 }

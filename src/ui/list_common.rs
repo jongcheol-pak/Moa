@@ -52,13 +52,21 @@ pub enum DragItem {
         is_dir: bool,
         size: u64,
     },
+    /// zip 안 항목 (FR-78) — `path`는 `/`로 잇는 zip 안 경로다. 앱의 로컬 패널에 놓으면 풀린다
+    Zip {
+        archive: std::path::PathBuf,
+        path: String,
+        is_dir: bool,
+    },
 }
 
 impl DragItem {
     /// 폴더인가 — 로컬·원격 어느 쪽이든 같은 물음이다
     pub fn is_dir(&self) -> bool {
         match self {
-            DragItem::Local { is_dir, .. } | DragItem::Remote { is_dir, .. } => *is_dir,
+            DragItem::Local { is_dir, .. }
+            | DragItem::Remote { is_dir, .. }
+            | DragItem::Zip { is_dir, .. } => *is_dir,
         }
     }
 
@@ -70,6 +78,7 @@ impl DragItem {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             DragItem::Remote { path, .. } => path.file_name().unwrap_or_default().to_owned(),
+            DragItem::Zip { path, .. } => path.rsplit('/').next().unwrap_or_default().to_owned(),
         }
     }
 }
@@ -172,7 +181,7 @@ pub fn local_drop(drop: &DropOutcome, shift: bool) -> Option<LocalDrop> {
     for item in &drop.items {
         match item {
             DragItem::Local { path, .. } => paths.push(path.clone()),
-            DragItem::Remote { .. } => return None,
+            DragItem::Remote { .. } | DragItem::Zip { .. } => return None,
         }
     }
     let sources = outside_of(paths, dir);
@@ -187,6 +196,47 @@ pub fn local_drop(drop: &DropOutcome, shift: bool) -> Option<LocalDrop> {
         } else {
             crate::fs::file_op::Transfer::Copy
         },
+    })
+}
+
+/// zip 에서 끌어 로컬 패널에 놓은 것 — 워커가 `dest` 에 푼다 (FR-78)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZipPicks {
+    pub archive: PathBuf,
+    /// 고른 zip 안 경로들(`/` 로 잇는다)
+    pub paths: Vec<String>,
+    pub dest: PathBuf,
+}
+
+/// 이 드롭이 **zip 항목을 로컬 폴더에 푸는 것**인가 (FR-78).
+///
+/// 항목이 전부 같은 zip 의 것이고 놓인 자리가 로컬일 때만 성립한다 — 원격 패널·탐색기로는
+/// 나가지 않는다(범위 밖). 다른 종류가 섞이면 `None` 이다
+pub fn zip_picks(drop: &DropOutcome) -> Option<ZipPicks> {
+    let DropTarget::Local(dest) = &drop.target else {
+        return None;
+    };
+    let mut archive: Option<&PathBuf> = None;
+    let mut paths = Vec::with_capacity(drop.items.len());
+    for item in &drop.items {
+        let DragItem::Zip {
+            archive: from,
+            path,
+            ..
+        } = item
+        else {
+            return None;
+        };
+        if archive.is_some_and(|first| first != from) {
+            return None;
+        }
+        archive = Some(from);
+        paths.push(path.clone());
+    }
+    Some(ZipPicks {
+        archive: archive?.clone(),
+        paths,
+        dest: dest.clone(),
     })
 }
 
@@ -719,5 +769,67 @@ mod tests {
                 assert!(drawn <= rows, "폭 {width}·{rows}줄: 허용 줄 수를 넘겼다");
             }
         }
+    }
+
+    fn zip_item(path: &str) -> DragItem {
+        DragItem::Zip {
+            archive: std::path::PathBuf::from(r"C:\받은 파일\자료.zip"),
+            path: path.to_owned(),
+            is_dir: false,
+        }
+    }
+
+    #[test]
+    fn zip_항목을_로컬에_놓으면_풀_것이_선다() {
+        // FR-78 — 같은 zip 의 항목들을 놓인 폴더에 푼다
+        let drop = DropOutcome {
+            items: vec![zip_item("문서/a.txt"), zip_item("문서/사진")],
+            source_site: None,
+            target: local_target(),
+        };
+        assert_eq!(
+            zip_picks(&drop),
+            Some(ZipPicks {
+                archive: std::path::PathBuf::from(r"C:\받은 파일\자료.zip"),
+                paths: vec!["문서/a.txt".to_owned(), "문서/사진".to_owned()],
+                dest: std::path::PathBuf::from(r"C:\down"),
+            })
+        );
+    }
+
+    #[test]
+    fn zip_항목을_원격에_놓으면_아무것도_없다() {
+        let drop = DropOutcome {
+            items: vec![zip_item("a.txt")],
+            source_site: None,
+            target: remote_target(),
+        };
+        assert_eq!(zip_picks(&drop), None);
+        // 다른 종류가 섞인 드롭도 zip 풀기가 아니다
+        let mixed = DropOutcome {
+            items: vec![zip_item("a.txt"), local_item()],
+            source_site: None,
+            target: local_target(),
+        };
+        assert_eq!(zip_picks(&mixed), None);
+    }
+
+    #[test]
+    fn zip_항목은_로컬_복사가_아니다() {
+        // 셸 복사·이동(FR-60)으로 흘러가면 없는 경로를 셸에 넘긴다
+        let drop = DropOutcome {
+            items: vec![zip_item("a.txt")],
+            source_site: None,
+            target: local_target(),
+        };
+        assert_eq!(local_drop(&drop, false), None);
+        assert_eq!(local_drop(&drop, true), None);
+    }
+
+    #[test]
+    fn zip_항목은_전송_방향이_없다() {
+        // 전송 큐에 들면 안 된다 — 서버와 오가는 것이 아니다
+        assert_eq!(drop_direction(&zip_item("a.txt"), &local_target()), None);
+        assert_eq!(drop_direction(&zip_item("a.txt"), &remote_target()), None);
     }
 }

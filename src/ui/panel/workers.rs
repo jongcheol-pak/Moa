@@ -438,6 +438,97 @@ fn spawn_size_worker(
     });
 }
 
+/// zip 목차 한 번의 답 — 세대, (목록 | 실패 사유), 미리 물어 둔 확장자 정보
+type ZipReply = (u64, Result<Vec<FileEntry>, String>, Vec<ExtInfo>);
+
+/// zip 안 목차 읽기 상태 (FR-78) — `DirLoad`와 같은 방식(워커 + 세대 + 채널)이다.
+///
+/// 목차는 조각으로 나누지 않고 한 번에 보낸다 — 머리글만 읽어 열거보다 짧고, 조각으로 나누면
+/// 「이어 붙이기」 갈래가 zip 에도 생긴다
+pub(super) struct ZipLoad {
+    generation: u64,
+    pending: Option<Receiver<ZipReply>>,
+    ext_infos: Vec<ExtInfo>,
+    /// 지금까지 받은 확장자 — `DirLoad::known_exts` 와 같은 구실이다
+    known_exts: HashSet<String>,
+}
+
+impl ZipLoad {
+    pub(super) fn new() -> ZipLoad {
+        ZipLoad {
+            generation: 0,
+            pending: None,
+            ext_infos: Vec::new(),
+            known_exts: HashSet::new(),
+        }
+    }
+
+    /// 기다리던 답을 버린다 — 세대를 올려 이미 채널에 실린 답도 폐기한다
+    pub(super) fn cancel(&mut self) {
+        self.generation += 1;
+        self.pending = None;
+    }
+
+    /// 워커 스레드에서 `archive` 의 `inner` 바로 아래를 읽는다. 앞선 요청의 답은 세대로 버려진다
+    pub(super) fn start(&mut self, archive: PathBuf, inner: String, ctx: &egui::Context) {
+        self.generation += 1;
+        let generation = self.generation;
+        let (tx, rx) = channel();
+        self.pending = Some(rx);
+        let ctx = ctx.clone();
+        let mut seen = self.known_exts.clone();
+        std::thread::spawn(move || {
+            let listed = crate::fs::zip_archive::list(&archive, &inner).map_err(|e| e.to_string());
+            // 종류 문자열은 셸(COM)에 묻는다 — `DirLoad`와 같은 이유로 이 스레드에서 연다.
+            // 안전성: 이 스레드에서 열고 물은 뒤 짝을 맞춰 닫는다
+            let infos = match &listed {
+                Ok(entries) => {
+                    let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+                    let infos = new_ext_infos(entries, &mut seen);
+                    if com {
+                        // 안전성: 위에서 성공한 초기화와 짝을 맞춘다
+                        unsafe { CoUninitialize() };
+                    }
+                    infos
+                }
+                Err(_) => Vec::new(),
+            };
+            if tx.send((generation, listed, infos)).is_ok() {
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// 도착한 답 — 아직이거나 옛 요청의 것이면 `None`
+    pub(super) fn poll(&mut self) -> Option<Result<Vec<FileEntry>, String>> {
+        let rx = self.pending.as_ref()?;
+        match rx.try_recv() {
+            Ok((generation, listed, infos)) => {
+                self.pending = None;
+                // 확장자 정보는 세대와 무관하게 받는다 — 확장자에 매인 값이라 늦게 온 것도 틀리지 않는다
+                self.known_exts
+                    .extend(infos.iter().map(|info| info.ext.clone()));
+                self.ext_infos.extend(infos);
+                (generation == self.generation).then_some(listed)
+            }
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                self.pending = None;
+                None
+            }
+        }
+    }
+
+    pub(super) fn is_loading(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// 워커가 미리 물어 둔 확장자 정보를 꺼낸다 — 목록을 세우기 전에 UI 캐시에 넣는다
+    pub(super) fn take_ext_infos(&mut self) -> Vec<ExtInfo> {
+        std::mem::take(&mut self.ext_infos)
+    }
+}
+
 /// 이 조각에서 처음 보는 파일 확장자를 셸에 묻는다 — 폴더는 `IconCache`가 이미 안다
 fn new_ext_infos(entries: &[FileEntry], seen: &mut HashSet<String>) -> Vec<ExtInfo> {
     entries
@@ -615,5 +706,68 @@ mod tests {
         );
         sizes.accept(generation, dir.clone(), Some(2));
         assert_eq!(sizes.known().get(&dir), Some(&2));
+    }
+
+    /// `a.txt` 하나와 `sub/b.txt` 를 담은 시험 zip
+    fn small_zip(tag: &str) -> (PathBuf, PathBuf) {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("moa_zipload_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("시험 폴더");
+        let archive = dir.join("a.zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).expect("zip"));
+        let options = zip::write::SimpleFileOptions::default();
+        for name in ["a.txt", "sub/b.txt"] {
+            writer.start_file(name, options).expect("항목");
+            writer.write_all(b"x").expect("본문");
+        }
+        writer.finish().expect("zip 닫기");
+        (dir, archive)
+    }
+
+    fn wait(load: &mut ZipLoad) -> Option<Result<Vec<FileEntry>, String>> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if let Some(reply) = load.poll() {
+                return Some(reply);
+            }
+            if !load.is_loading() {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        None
+    }
+
+    #[test]
+    fn zip_목차_워커가_답을_낸다() {
+        let (dir, archive) = small_zip("reply");
+        let ctx = egui::Context::default();
+        let mut load = ZipLoad::new();
+        load.start(archive, String::new(), &ctx);
+        let reply = wait(&mut load).expect("답이 오지 않았다");
+        let mut names: Vec<String> = reply
+            .expect("목차")
+            .iter()
+            .map(FileEntry::name_string)
+            .collect();
+        names.sort();
+        assert_eq!(names, ["a.txt", "sub"]);
+        assert!(!load.is_loading());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 옛_zip_요청의_답은_버린다() {
+        // 연달아 옮기면 먼저 건 요청의 답이 나중에 올 수 있다 — 마지막 요청의 답만 받는다
+        let (dir, archive) = small_zip("stale");
+        let ctx = egui::Context::default();
+        let mut load = ZipLoad::new();
+        load.start(archive.clone(), String::new(), &ctx);
+        load.start(archive, "sub".to_owned(), &ctx);
+        let reply = wait(&mut load).expect("답이 오지 않았다").expect("목차");
+        let names: Vec<String> = reply.iter().map(FileEntry::name_string).collect();
+        assert_eq!(names, ["b.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

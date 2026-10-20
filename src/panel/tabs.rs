@@ -36,11 +36,15 @@ impl TabId {
 ///
 /// 커밋된 위치를 `PathBuf`가 아니라 `TabSource`로 드는 이유는 아래 `TabSource` 설명 참조.
 ///
-/// **히스토리를 둘로 나눠 든다** — 로컬 탭은 `history`를, 원격 탭은 `remote_history`를 쓴다.
-/// 하나로 합치지 않는 이유는 담는 타입이 다르기 때문이고(`RemotePath`를 `PathBuf`에 실으면
-/// Windows의 경로 의미가 섞인다), 열거형으로 가르지 않는 이유는 **탭의 종류가 생성 후
-/// 바뀌지 않아**(`set_committed`의 단언) 쓰이지 않는 쪽이 빈 `Vec` 하나로 남을 뿐이기 때문이다.
-/// 가르면 기존 `tab.history.push/back/forward` 호출부가 전부 분기를 타야 한다
+/// **히스토리를 셋으로 나눠 든다** — 로컬 탭은 `history`를, 원격 탭은 `remote_history`를,
+/// zip 탭은 `zip_history`를 쓴다. 하나로 합치지 않는 이유는 담는 타입이 다르기 때문이다
+/// (`RemotePath`를 `PathBuf`에 실으면 Windows의 경로 의미가 섞인다). 열거형으로 가르지 않는
+/// 이유는 쓰이지 않는 쪽이 빈 `Vec` 하나로 남을 뿐이고, 가르면 기존 `tab.history.push/back/forward`
+/// 호출부가 전부 분기를 타야 하기 때문이다.
+///
+/// **원격 탭은 생성 후 종류가 바뀌지 않는다**(`set_committed`의 단언). 로컬 탭은 zip 에
+/// 들어가면 zip 탭이 되고 나오면 다시 로컬 탭이 된다(FR-78) — 그동안 로컬 `history`는
+/// 그대로라, 그 현재 칸이 곧 zip 이 있는 폴더다
 pub struct TabState {
     /// 이 탭의 신원 — 생성자가 스스로 매긴다(호출부는 넘기지 않는다)
     pub id: TabId,
@@ -49,6 +53,8 @@ pub struct TabState {
     pub history: History<PathBuf>,
     /// 원격 탭의 탐색 히스토리 — 로컬 탭에서는 쓰이지 않는다
     pub remote_history: History<RemotePath>,
+    /// zip 안 탐색 히스토리 (FR-78) — 로컬·원격 탭에서는 쓰이지 않는다. zip 에 들어갈 때마다 새로 선다
+    pub zip_history: History<String>,
 }
 
 impl TabState {
@@ -58,6 +64,7 @@ impl TabState {
             history: History::new(path.clone()),
             // 로컬 탭에서는 쓰이지 않는다 — 루트 한 칸으로 세워 둔다
             remote_history: History::new(RemotePath::root()),
+            zip_history: History::new(String::new()),
             source: TabSource::Local(path),
         }
     }
@@ -69,6 +76,7 @@ impl TabState {
             // 로컬 히스토리는 원격 탭에서 쓰이지 않는다
             history: History::new(PathBuf::new()),
             remote_history: History::new(path.clone()),
+            zip_history: History::new(String::new()),
             source: TabSource::Remote {
                 site,
                 conn: None,
@@ -86,15 +94,34 @@ impl TabState {
 
     /// 로컬 위치를 옮긴다.
     ///
-    /// **로컬 탭에만 쓴다** — 원격 탭에 부르면 연결·원격 경로가 조용히 사라지고 로컬 탭으로
-    /// 둔갑한다. 부르는 곳은 로컬 열거가 성공한 자리뿐이며, 오용을 개발 중에 드러내려고
-    /// 단언을 둔다(배포 빌드에서는 사라진다)
+    /// **로컬·zip 탭에만 쓴다** — 원격 탭에 부르면 연결·원격 경로가 조용히 사라지고 로컬
+    /// 탭으로 둔갑한다. 부르는 곳은 로컬 열거가 성공한 자리뿐이며, 오용을 개발 중에 드러내려고
+    /// 단언을 둔다(배포 빌드에서는 사라진다). zip 탭에 부르면 zip 에서 나와 로컬 탭이 된다(FR-78)
     pub fn set_committed(&mut self, path: PathBuf) {
         debug_assert!(
             !self.source.is_remote(),
             "원격 탭에 로컬 경로를 커밋하려 했다"
         );
         self.source = TabSource::Local(path);
+    }
+
+    /// zip 뿌리로 들어간다 (FR-78) — zip 히스토리를 새로 세우고 로컬 히스토리는 그대로 둔다
+    pub fn enter_zip(&mut self, archive: PathBuf) {
+        debug_assert!(!self.source.is_remote(), "원격 탭에서 zip 에 들어가려 했다");
+        self.zip_history = History::new(String::new());
+        self.source = TabSource::Zip {
+            archive,
+            inner: String::new(),
+        };
+    }
+
+    /// zip 안에서 자리를 옮긴다 (FR-78) — **zip 탭에만 쓴다**(히스토리는 부르는 쪽이 고친다)
+    pub fn set_zip_inner(&mut self, inner: String) {
+        if let TabSource::Zip { inner: at, .. } = &mut self.source {
+            *at = inner;
+        } else {
+            debug_assert!(false, "zip 탭이 아닌데 zip 안 경로를 옮기려 했다");
+        }
     }
 }
 
@@ -121,7 +148,7 @@ pub enum TabPhase {
 /// 소스를 패널이 아니라 **탭**에 두는 이유: 연결의 단위가 탭이라(README §4), 패널 단위로 두면
 /// 한 패널에 로컬 탭과 원격 탭을 섞을 수 없어 FR-33(모든 패널에서 사이트를 새 탭으로)이 성립하지 않는다.
 ///
-/// 트레이트 객체로 만들지 않는다 — 종류가 둘뿐이고 열거형이 분기를 한눈에 보이게 한다.
+/// 트레이트 객체로 만들지 않는다 — 종류가 셋뿐이고 열거형이 분기를 한눈에 보이게 한다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabSource {
     Local(PathBuf),
@@ -131,6 +158,14 @@ pub enum TabSource {
         conn: Option<ConnectionId>,
         path: RemotePath,
         phase: TabPhase,
+    },
+    /// zip 파일 안 — 읽기 전용이다 (FR-78).
+    ///
+    /// `inner`는 `/`로 잇는 zip 안 상대 경로다(뿌리 `""`, 앞뒤 `/` 없음). 로컬 경로가 아니라
+    /// `local_path()`가 `None`이므로, 로컬 폴더에 쓰는 일(새 폴더·붙여넣기·드롭)은 저절로 비켜 간다
+    Zip {
+        archive: PathBuf,
+        inner: String,
     },
 }
 
@@ -145,6 +180,11 @@ impl TabSource {
             TabSource::Remote { .. } => site_name
                 .unwrap_or(crate::i18n::tabs_missing_site())
                 .to_owned(),
+            // 뿌리면 zip 파일 이름, 안이면 마지막 조각 — 로컬 폴더 탭과 같은 규칙이다
+            TabSource::Zip { archive, inner } => match inner.rsplit('/').next() {
+                Some(last) if !last.is_empty() => last.to_owned(),
+                _ => tab_title(archive),
+            },
         }
     }
 
@@ -152,27 +192,35 @@ impl TabSource {
         matches!(self, TabSource::Remote { .. })
     }
 
-    /// 로컬 탭의 경로 — 원격 탭이면 `None`.
-    /// 열거·감시·썸네일처럼 **로컬에만 있는 일**이 이것으로 갈린다
+    /// 로컬 탭의 경로 — 원격·zip 탭이면 `None`.
+    /// 열거·감시·썸네일·쓰기처럼 **로컬 폴더에만 있는 일**이 이것으로 갈린다
     pub fn local_path(&self) -> Option<&Path> {
         match self {
             TabSource::Local(path) => Some(path),
-            TabSource::Remote { .. } => None,
+            TabSource::Remote { .. } | TabSource::Zip { .. } => None,
         }
     }
 
-    /// 원격 탭의 위치 — 로컬 탭이면 `None`
+    /// 원격 탭의 위치 — 로컬·zip 탭이면 `None`
     pub fn remote_path(&self) -> Option<&RemotePath> {
         match self {
-            TabSource::Local(_) => None,
+            TabSource::Local(_) | TabSource::Zip { .. } => None,
             TabSource::Remote { path, .. } => Some(path),
         }
     }
 
     pub fn site(&self) -> Option<SiteId> {
         match self {
-            TabSource::Local(_) => None,
+            TabSource::Local(_) | TabSource::Zip { .. } => None,
             TabSource::Remote { site, .. } => Some(*site),
+        }
+    }
+
+    /// zip 탭의 zip 파일과 그 안 경로 — 로컬·원격 탭이면 `None` (FR-78)
+    pub fn zip_location(&self) -> Option<(&Path, &str)> {
+        match self {
+            TabSource::Zip { archive, inner } => Some((archive, inner)),
+            TabSource::Local(_) | TabSource::Remote { .. } => None,
         }
     }
 }
@@ -511,6 +559,62 @@ mod tests {
         assert_eq!(remote.local_path(), None);
         assert_eq!(remote.remote_path().map(|p| p.as_str()), Some("/pub"));
         assert_eq!(remote.site(), Some(SiteId(7)));
+    }
+
+    fn zip_source(inner: &str) -> TabSource {
+        TabSource::Zip {
+            archive: PathBuf::from(r"C:\받은 파일\자료.zip"),
+            inner: inner.to_owned(),
+        }
+    }
+
+    #[test]
+    fn zip_탭_제목은_뿌리면_파일_이름이다() {
+        assert_eq!(zip_source("").title(None), "자료.zip");
+    }
+
+    #[test]
+    fn zip_탭_제목은_안이면_마지막_조각이다() {
+        assert_eq!(zip_source("문서/사진").title(Some("무시")), "사진");
+    }
+
+    #[test]
+    fn zip_탭은_로컬도_원격도_아니다() {
+        let zip = zip_source("문서");
+        assert!(!zip.is_remote());
+        // 로컬 전용 일(열거·감시·쓰기)은 이 `None`으로 zip 탭을 비켜 간다
+        assert_eq!(zip.local_path(), None);
+        assert_eq!(zip.remote_path(), None);
+        assert_eq!(zip.site(), None);
+        assert_eq!(
+            zip.zip_location(),
+            Some((Path::new(r"C:\받은 파일\자료.zip"), "문서"))
+        );
+        assert_eq!(TabSource::Local(PathBuf::from(r"C:\")).zip_location(), None);
+    }
+
+    #[test]
+    fn zip에_들어가면_zip_히스토리가_새로_선다() {
+        let mut state = tab(r"C:\받은 파일");
+        state.enter_zip(PathBuf::from(r"C:\받은 파일\자료.zip"));
+        assert_eq!(state.source, zip_source(""));
+        assert_eq!(state.zip_history.current(), "");
+        assert!(!state.zip_history.can_back());
+        // 로컬 히스토리는 건드리지 않는다 — 그 현재 칸이 곧 zip 이 있는 폴더다
+        assert_eq!(state.history.current(), Path::new(r"C:\받은 파일"));
+        state.set_zip_inner("문서".to_owned());
+        assert_eq!(state.source, zip_source("문서"));
+    }
+
+    #[test]
+    fn zip에서_로컬로_커밋하면_로컬_탭이다() {
+        let mut state = tab(r"C:\받은 파일");
+        state.enter_zip(PathBuf::from(r"C:\받은 파일\자료.zip"));
+        state.set_committed(PathBuf::from(r"C:\받은 파일"));
+        assert_eq!(
+            state.source,
+            TabSource::Local(PathBuf::from(r"C:\받은 파일"))
+        );
     }
 
     #[test]
