@@ -114,6 +114,9 @@
 - [2026-08-15] **죽은 `pub` 함수·상수를 `cargo clippy --all-targets -- -D warnings`가 잡지 못한다** — `src/lib.rs`가 `pub mod ui;` 등으로 재수출하는 bin+lib 구성이라 lib의 공개 표면은 dead_code 대상이 아니다(2026-08-27까지 실행 경로 밖 Win32 구현이 남은 채 린트가 통과해 온 이유다 — 그 코드는 지금 삭제됐지만 이 성질은 그대로다). 반대로 **비공개(`const`·`fn`)는 여전히 경고 대상**이라, 시험만 참조하게 되는 비공개 상수를 남기면 `-D warnings`가 깨진다. 즉 호출부가 사라지는 심볼은 계획이 직접 제거 여부를 정해야 한다
 
 - [2026-10-19] 「열어 둔 파일은 지우지 못한다」에 기대는 시험은 `std::fs::File::open`으로 열면 성립하지 않는다 — Rust 표준은 Windows에서 FILE_SHARE_DELETE를 허용해 열린 채로도 지워진다. 지우기 실패를 결정적으로 만들려면 `std::os::windows::fs::OpenOptionsExt::share_mode(0)`으로 연다(`remote::transfer`의 `.part` 재시도 시험 선례) (실측)
+- [2026-10-20] **`src/ui/panel/tests.rs`는 `mod tests { }`로 감싸지 않은 파일이다** — 다른 시험 파일처럼 「끝 `}`를 떼고 시험을 붙인 뒤 `}`를 다시 단다」로 덧붙이면 새 시험이 **마지막 시험 함수 안에** 들어가 한 번도 돌지 않는다. 빌드·clippy·시험 모두 통과하고 남는 것은 `warning: cannot test inner items` 한 줄뿐이다(변이 확인에서 드러났다). 그 파일에는 맨 끝에 그대로 덧붙인다 (실측)
+- [2026-10-20] **이 PC의 Git Bash에서 `git grep`은 한글 패턴에 0건을 낸다** — `git grep -n '하위 폴더를 훑는' docs/prd.md`가 0인데 `grep -c` 는 1이었다. 0을 「없다」로 읽으면 계획의 착수값과 잔존 확인이 틀린다. 한글 리터럴의 계수·잔존 확인은 `grep -c`(또는 `rg`)로 한다 (실측)
+- [2026-10-20] **verify-moa에서 Karina `click --modifiers CmdOrCtrl|Shift`는 MOA에 수식 키로 닿지 않는다** — 두 번 모두 단일 클릭으로 처리돼 선택이 바뀌기만 했다. 여러 항목을 고른 화면은 화면 조작으로 만들 수 없으니, 그 규칙은 패널 시험(`toggle_select`로 고른 뒤 프레임을 그려 글자를 재는 형태)으로 잰다. 병렬 두 클릭 더블클릭도 직전 `shot.ps1`의 창 올리기 바로 뒤에는 선택만 됐다 — 빈 자리를 한 번 누르고 0.8초 쉰 뒤 120ms 간격으로 띄우면 열렸다 (실측)
 
 ## conventions — egui·화면 계층
 
