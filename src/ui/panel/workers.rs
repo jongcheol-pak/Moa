@@ -1,4 +1,4 @@
-//! 패널이 워커 스레드에 맡기는 일 — 폴더 열거·하위 폴더 검색과 새 폴더·새 파일 만들기.
+//! 패널이 워커 스레드에 맡기는 일 — 폴더 열거·하위 폴더 검색·폴더 크기와 새 폴더·새 파일 만들기.
 //!
 //! 둘 다 **UI 스레드에서 부르면 안 되는 블로킹 I/O**라 같은 방식(워커 + 채널 + 다시 그리기 요청)으로
 //! 감싼다. 본체(`ui::panel`)의 자식 모듈이며, 상태를 들고 결과를 거두는 일만 한다.
@@ -7,11 +7,11 @@ use crate::fs::enumerate::{EnumChunk, EnumOutcome, FileEntry, enumerate_dir_batc
 use crate::fs::icons::{ExtInfo, lookup_ext};
 use crate::fs::search::{SearchEvent, SearchRules, search_tree};
 use eframe::egui;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 
 /// 한 번에 흘려보낼 항목 수 — 이만큼 모은 **뒤에도 더 있을 때만** 중간 결과가 나간다 (FR-69).
@@ -274,6 +274,132 @@ impl TreeSearch {
     }
 }
 
+/// 폴더 크기 계산 상태 (FR-71) — 패널마다 워커 하나가 요청을 **차례로** 계산한다.
+///
+/// 보이는 폴더 행만 요청되므로 스크롤할 때마다 요청이 는다 — 한 줄로 세워야 같은 디스크를
+/// 여러 스레드가 동시에 긁지 않는다. 세대는 워커와 나눠 들어, 폴더를 옮기면 **계산 중인 것도**
+/// 그 자리에서 멈춘다. 값은 세션에 담지 않는다
+pub(super) struct FolderSizes {
+    generation: Arc<AtomicU64>,
+    /// 요청 통로 — 첫 요청 때 워커와 함께 만든다. 패널이 사라져 이것이 버려지면 워커도 끝난다
+    requests: Option<Sender<(u64, PathBuf)>>,
+    results: Option<Receiver<(u64, PathBuf, Option<u64>)>>,
+    known: HashMap<PathBuf, u64>,
+    /// 이 세대에 이미 요청한 경로 — 계산 중·실패·네트워크인 것도 다시 묻지 않는다
+    requested: HashSet<PathBuf>,
+    /// 이 세대에서 아직 답이 오지 않은 요청 수
+    waiting: usize,
+}
+
+impl FolderSizes {
+    pub(super) fn new() -> FolderSizes {
+        FolderSizes {
+            generation: Arc::new(AtomicU64::new(0)),
+            requests: None,
+            results: None,
+            known: HashMap::new(),
+            requested: HashSet::new(),
+            waiting: 0,
+        }
+    }
+
+    /// 지금까지의 값과 진행 중인 계산을 버린다 — 폴더를 옮겼거나 `F5`를 눌렀을 때
+    pub(super) fn reset(&mut self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        self.known.clear();
+        self.requested.clear();
+        self.waiting = 0;
+    }
+
+    /// 알려진 폴더 크기 — 자세히 보기가 크기 칸에 쓴다
+    pub(super) fn known(&self) -> &HashMap<PathBuf, u64> {
+        &self.known
+    }
+
+    /// 아직 요청하지 않은 폴더만 워커에 넘긴다. 새로 넘긴 수를 돌려준다
+    pub(super) fn request(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) -> usize {
+        let mut sent = 0;
+        for path in paths {
+            if !self.requested.insert(path.clone()) {
+                continue;
+            }
+            let generation = self.generation.load(Ordering::Relaxed);
+            let tx = self.requests.get_or_insert_with(|| {
+                let (tx, rx) = channel();
+                let (done_tx, done_rx) = channel();
+                spawn_size_worker(rx, done_tx, Arc::clone(&self.generation), ctx.clone());
+                self.results = Some(done_rx);
+                tx
+            });
+            if tx.send((generation, path)).is_ok() {
+                self.waiting += 1;
+                sent += 1;
+            }
+        }
+        sent
+    }
+
+    /// 도착한 결과를 거둔다
+    pub(super) fn poll(&mut self) {
+        let mut done = Vec::new();
+        if let Some(rx) = self.results.as_ref() {
+            while let Ok(result) = rx.try_recv() {
+                done.push(result);
+            }
+        }
+        for (generation, path, size) in done {
+            self.accept(generation, path, size);
+        }
+    }
+
+    /// 결과 하나를 반영한다 — 옛 세대의 것은 버린다(폴더를 옮기기 전에 끝난 계산)
+    fn accept(&mut self, generation: u64, path: PathBuf, size: Option<u64>) {
+        if generation != self.generation.load(Ordering::Relaxed) {
+            return;
+        }
+        self.waiting = self.waiting.saturating_sub(1);
+        if let Some(size) = size {
+            self.known.insert(path, size);
+        }
+    }
+
+    /// 아직 답을 기다리는 계산이 있는가 — 시험이 기다릴 때 쓴다
+    #[cfg(test)]
+    pub(super) fn is_waiting(&self) -> bool {
+        self.waiting > 0
+    }
+}
+
+/// 폴더 크기 워커 — 요청 통로가 닫힐 때까지(패널이 사라질 때까지) 요청을 차례로 계산한다.
+///
+/// 네트워크 너머의 폴더는 계산하지 않는다(FR-71) — 수만 항목을 네트워크로 훑으면 분 단위가 걸리고
+/// 그동안 다른 폴더의 요청이 뒤에서 기다린다. 판정도 Win32 호출이라 여기서 한다
+fn spawn_size_worker(
+    requests: Receiver<(u64, PathBuf)>,
+    results: Sender<(u64, PathBuf, Option<u64>)>,
+    generation: Arc<AtomicU64>,
+    ctx: egui::Context,
+) {
+    std::thread::spawn(move || {
+        while let Ok((asked, path)) = requests.recv() {
+            if asked != generation.load(Ordering::Relaxed) {
+                continue;
+            }
+            let size = if crate::fs::drives::is_network_path(&path) {
+                None
+            } else {
+                crate::fs::dir_size::folder_size(&path, || {
+                    generation.load(Ordering::Relaxed) != asked
+                })
+            };
+            if results.send((asked, path, size)).is_err() {
+                return;
+            }
+            ctx.request_repaint();
+        }
+    });
+}
+
 /// 이 조각에서 처음 보는 파일 확장자를 셸에 묻는다 — 폴더는 `IconCache`가 이미 안다
 fn new_ext_infos(entries: &[FileEntry], seen: &mut HashSet<String>) -> Vec<ExtInfo> {
     entries
@@ -344,5 +470,54 @@ impl CreateOp {
     #[cfg(test)]
     pub(super) fn is_running(&self) -> bool {
         self.pending.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 같은_폴더는_한_번만_요청한다() {
+        let ctx = egui::Context::default();
+        let mut sizes = FolderSizes::new();
+        let dir = std::env::temp_dir();
+        assert_eq!(sizes.request(vec![dir.clone(), dir.clone()], &ctx), 1);
+        assert_eq!(
+            sizes.request(vec![dir], &ctx),
+            0,
+            "이미 요청한 폴더를 다시 보냈다"
+        );
+    }
+
+    #[test]
+    fn 비운_뒤에_도착한_옛_결과는_버린다() {
+        // 폴더를 옮기기 전에 끝난 계산이 새 폴더의 같은 이름 자리에 서면 안 된다
+        let mut sizes = FolderSizes::new();
+        let old = sizes.generation.load(Ordering::Relaxed);
+        sizes.reset();
+        sizes.accept(old, PathBuf::from(r"C:\옛\사진"), Some(10));
+        assert!(sizes.known().is_empty());
+        let now = sizes.generation.load(Ordering::Relaxed);
+        sizes.accept(now, PathBuf::from(r"C:\새\사진"), Some(20));
+        assert_eq!(sizes.known().get(&PathBuf::from(r"C:\새\사진")), Some(&20));
+    }
+
+    #[test]
+    fn 워커가_잰_크기가_돌아온다() {
+        let dir = std::env::temp_dir().join(format!("fe_sizes_worker_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join(r"sub\a.bin"), vec![0u8; 7]).unwrap();
+        let ctx = egui::Context::default();
+        let mut sizes = FolderSizes::new();
+        sizes.request(vec![dir.clone()], &ctx);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while sizes.is_waiting() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            sizes.poll();
+        }
+        assert_eq!(sizes.known().get(&dir), Some(&7));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

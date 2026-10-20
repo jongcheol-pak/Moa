@@ -28,9 +28,9 @@ use crate::ui::address_bar::{AddressBar, AddressTarget, NavAction};
 use crate::ui::drag_preview;
 use crate::ui::file_list::{FileListAction, FileListView};
 use crate::ui::icon_tex::{IconTextures, ThumbnailTextures};
-use crate::ui::list_common::{DropOutcome, DropTarget, FileDrag};
+use crate::ui::list_common::{DirSizes, DropOutcome, DropTarget, FileDrag};
 use crate::ui::menu::{Command, PanelMenuState, clamp_menu_pos};
-use crate::ui::panel::workers::{CreateOp, DirLoad, TreeSearch};
+use crate::ui::panel::workers::{CreateOp, DirLoad, FolderSizes, TreeSearch};
 use crate::ui::remote_menu::{self, RemoteMenuAction, RemoteTarget};
 use crate::ui::remote_states::{self, FailedAction, RemoteView};
 use crate::ui::session::PanelTabs;
@@ -376,6 +376,8 @@ pub struct PanelState {
     drag_preview: Option<crate::ui::list_common::DragItem>,
     /// 하위 폴더 이름 검색 (FR-70) — 결과를 보이는 중인지는 목록(`is_searching`)이 든다
     search: TreeSearch,
+    /// 자세히 보기에서 보이는 폴더 행의 크기 (FR-71) — 폴더를 옮기면 비운다
+    sizes: FolderSizes,
     /// 검색 결과를 열어 옮겨 가는 폴더와 거기서 고를 이름(널 종단 UTF-16) (FR-70).
     ///
     /// 그 폴더의 목록이 서면(캐시 적중·완료 조각) 그 이름을 고르고, 완료 조각에서 비운다
@@ -442,6 +444,7 @@ impl PanelState {
             remote_seq: 0,
             drag_preview: None,
             search: TreeSearch::new(),
+            sizes: FolderSizes::new(),
             pending_select: None,
             thumbs: ThumbnailCache::new(),
             thumb_textures: ThumbnailTextures::new(),
@@ -575,6 +578,7 @@ impl PanelState {
         }
         self.poll_load(ctx, icons, cache);
         self.poll_search(icons);
+        self.sizes.poll();
         self.poll_watch(ctx);
         self.poll_create(ctx);
         if let Some(delay) = self.poll_thumbnails(ctx) {
@@ -747,6 +751,8 @@ impl PanelState {
         // 이 해제는 세대를 올리는 지점이기도 해서, 늦게 도착한 이전 폴더의 결과도 함께 걸러진다
         if self.thumbs.set_folder(dir) {
             self.thumb_textures.clear();
+            // 폴더 크기도 그 폴더의 것이다 — 옛 폴더의 계산은 멈춘다 (FR-71)
+            self.sizes.reset();
         }
     }
 
@@ -1179,6 +1185,8 @@ impl PanelState {
             return;
         };
         let dir = dir.to_path_buf();
+        // `F5`는 크기도 다시 잰다 — 그동안 폴더 안이 바뀌었을 수 있다 (FR-71)
+        self.sizes.reset();
         self.start_load(dir, PendingNav::None, ctx);
     }
 
@@ -1386,6 +1394,7 @@ impl PanelState {
         };
         self.abandon_local_load();
         let (show_hidden, show_system) = self.list.hidden_rules();
+        self.sizes.reset();
         self.list.begin_search(root.clone());
         self.search.start(
             root,
@@ -2477,9 +2486,21 @@ impl PanelState {
         // 유일한 지점이다(그리기는 텍스처만 보고 픽셀 캐시를 건드리지 않는다)
         let mut visible = Vec::new();
         let list_rect = ui.available_rect_before_wrap();
-        let interaction = self
-            .list
-            .show(ui, icons, textures, &self.thumb_textures, &mut visible);
+        let mut sizes = DirSizes {
+            known: self.sizes.known(),
+            wanted: Vec::new(),
+        };
+        let interaction = self.list.show(
+            ui,
+            icons,
+            textures,
+            &self.thumb_textures,
+            &mut visible,
+            &mut sizes,
+        );
+        // 보이는 폴더 행 중 크기를 모르는 것만 요청한다 (FR-71)
+        let wanted = sizes.wanted;
+        self.sizes.request(wanted, ui.ctx());
         // 도장이 바뀐 파일(같은 이름의 새 내용)은 `request`가 다시 만든다
         for (path, stamp) in visible {
             self.thumbs.request(&path, stamp);

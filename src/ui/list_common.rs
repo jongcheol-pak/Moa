@@ -4,7 +4,18 @@
 //! 배치 규칙을 쓴다. 한쪽에 두고 다른 쪽이 참조하면 두 렌더 모듈이 서로를 알게 되므로
 //! 공용 조각만 여기로 모은다.
 use eframe::egui;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+
+/// 자세히 보기가 한 프레임에 주고받는 폴더 크기 (FR-71).
+///
+/// 알려진 값은 패널의 크기 워커가 들고, 그리는 쪽은 **보이는 폴더 행 중 값이 없는 것**을
+/// `wanted`에 담아 돌려준다 — 계산을 요청하는 것은 패널이다
+pub struct DirSizes<'a> {
+    pub known: &'a HashMap<PathBuf, u64>,
+    pub wanted: Vec<PathBuf>,
+}
 
 /// 목록이 상위(패널)에 돌려주는 사용자 조작.
 /// 즉시 모드라 콜백을 등록하지 않고 이번 프레임의 조작을 값으로 반환한다

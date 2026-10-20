@@ -4821,3 +4821,28 @@ fn 여러_폴더에_걸친_선택의_셸_메뉴는_첫_항목의_폴더로_좁�
     );
     assert_eq!(dirs, vec![false, true]);
 }
+
+#[test]
+fn 다른_폴더로_옮기면_폴더_크기를_버린다() {
+    // FR-71 — 세션에 담지 않고, 그 폴더를 떠나면 값도 계산도 버린다
+    let mut icons = IconCache::new();
+    let mut panel = docs_panel(&mut icons);
+    let ctx = egui::Context::default();
+    panel
+        .sizes
+        .request(vec![std::path::PathBuf::from(r"C:\Docs\사진")], &ctx);
+    assert_eq!(
+        panel
+            .sizes
+            .request(vec![std::path::PathBuf::from(r"C:\Docs\사진")], &ctx),
+        0
+    );
+    commit_dir(&mut panel, r"C:\Other", &mut icons);
+    assert_eq!(
+        panel
+            .sizes
+            .request(vec![std::path::PathBuf::from(r"C:\Docs\사진")], &ctx),
+        1,
+        "옮긴 뒤에도 옛 폴더의 요청 기록이 남았다"
+    );
+}

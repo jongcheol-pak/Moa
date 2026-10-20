@@ -7,7 +7,7 @@ use crate::fs::icons::IconCache;
 use crate::panel::file_list::{ListRow, SortKey, format_filetime, format_size};
 use crate::ui::icon_tex::IconTextures;
 use crate::ui::list_common::{
-    FileListAction, RenameEdit, RenameEnd, cut_icon_tint, cut_text_color, dim_if_hidden,
+    DirSizes, FileListAction, RenameEdit, RenameEnd, cut_icon_tint, cut_text_color, dim_if_hidden,
     elided_galley_colored, rename_editor,
 };
 use crate::ui::theme;
@@ -430,6 +430,7 @@ pub fn show<R: ListRow>(
     input: DetailsInput<'_, R>,
     icons: &mut IconCache,
     textures: &mut IconTextures,
+    sizes: &mut DirSizes<'_>,
 ) -> DetailsOutcome {
     let mut outcome = DetailsOutcome::default();
     let himl = icons.himl();
@@ -609,7 +610,16 @@ pub fn show<R: ListRow>(
                 if editing && *kind == ColumnKind::Name {
                     continue;
                 }
-                let text = cell_text(entry, &type_names[index], *kind, show_extensions);
+                // 로컬 폴더의 크기는 워커가 잰 값이다 (FR-71) — 모르면 빈칸으로 두고 요청에 담는다
+                let text = if *kind == ColumnKind::Size
+                    && local_paths
+                    && entry.is_dir()
+                    && !entry.is_parent()
+                {
+                    folder_size_text(entry.path_in(dir), sizes)
+                } else {
+                    cell_text(entry, &type_names[index], *kind, show_extensions)
+                };
                 // 이름 열만 아이콘 자리를 비켜 시작한다
                 let leading = if *kind == ColumnKind::Name {
                     NAME_X
@@ -690,6 +700,17 @@ pub fn show<R: ListRow>(
         }
     }
     outcome
+}
+
+/// 폴더 행의 크기 칸 (FR-71) — 알면 그 값, 모르면 빈칸이고 그 경로를 이번 프레임의 요청에 담는다
+fn folder_size_text(path: PathBuf, sizes: &mut DirSizes<'_>) -> String {
+    match sizes.known.get(&path) {
+        Some(&bytes) => format_size(bytes),
+        None => {
+            sizes.wanted.push(path);
+            String::new()
+        }
+    }
 }
 
 /// 셀 하나에 보일 문자열.
@@ -1551,5 +1572,96 @@ mod tests {
         // plan Edge Case — 서버가 이름을 안 주면 숫자가 곧 소유자다
         let entry = remote_entry("a.txt", None, Some("1000"));
         assert_eq!(cell_text(&entry, "텍스트", ColumnKind::Owner, true), "1000");
+    }
+
+    fn local_row(name: &str, is_dir: bool, size: u64) -> crate::fs::enumerate::FileEntry {
+        let mut wide: Vec<u16> = name.encode_utf16().collect();
+        wide.push(0);
+        crate::fs::enumerate::FileEntry {
+            name: wide.into(),
+            is_dir,
+            size,
+            modified: 0,
+            attributes: 0,
+            location: None,
+        }
+    }
+
+    /// 로컬 자세히 보기를 한 프레임 그리고 (화면 글자, 크기를 요청한 경로)를 돌려준다
+    fn draw_local(
+        rows: &[crate::fs::enumerate::FileEntry],
+        known: &std::collections::HashMap<PathBuf, u64>,
+    ) -> (Vec<String>, Vec<PathBuf>) {
+        let ctx = egui::Context::default();
+        let mut icons = IconCache::new();
+        let mut textures = IconTextures::inline();
+        let mut columns = Columns::new();
+        let mut icon_indices = vec![None; rows.len()];
+        let type_names = vec![String::new(); rows.len()];
+        let selection = BTreeSet::new();
+        let cut_marks = HashSet::new();
+        let mut sizes = DirSizes {
+            known,
+            wanted: Vec::new(),
+        };
+        let output = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                show(
+                    ui,
+                    DetailsInput {
+                        dir: Path::new(r"C:\Docs"),
+                        entries: rows,
+                        type_names: &type_names,
+                        icon_indices: &mut icon_indices,
+                        selection: &selection,
+                        rename: None,
+                        cut_marks: &cut_marks,
+                        sort_key: SortKey::Name,
+                        ascending: true,
+                        columns: &mut columns,
+                        is_remote: false,
+                        column_flags: ColumnFlags::default(),
+                        local_paths: true,
+                        show_extensions: true,
+                        scroll_to: None,
+                    },
+                    &mut icons,
+                    &mut textures,
+                    &mut sizes,
+                );
+            });
+        });
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            if let egui::Shape::Text(text) = &clipped.shape {
+                texts.push(text.galley.text().to_owned());
+            }
+        }
+        (texts, sizes.wanted)
+    }
+
+    #[test]
+    fn 알려진_폴더_크기가_크기_칸에_선다() {
+        // FR-71 — 워커가 잰 값이 폴더 행의 크기 칸에 보인다
+        let rows = [local_row("사진", true, 0), local_row("a.txt", false, 10)];
+        let known = std::collections::HashMap::from([(PathBuf::from(r"C:\Docs\사진"), 2048)]);
+        let (texts, wanted) = draw_local(&rows, &known);
+        assert!(
+            texts.iter().any(|text| text == "2.00 KB"),
+            "폴더 크기가 없다: {texts:?}"
+        );
+        assert!(wanted.is_empty(), "이미 아는 폴더를 다시 요청했다");
+    }
+
+    #[test]
+    fn 크기를_모르는_보이는_폴더만_요청에_든다() {
+        // 파일·`..` 줄은 요청하지 않는다
+        let rows = [
+            local_row("..", true, 0),
+            local_row("사진", true, 0),
+            local_row("a.txt", false, 10),
+        ];
+        let (_, wanted) = draw_local(&rows, &std::collections::HashMap::new());
+        assert_eq!(wanted, vec![PathBuf::from(r"C:\Docs\사진")]);
     }
 }

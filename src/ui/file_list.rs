@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 // 조작 타입은 보기 모드별 렌더 모듈이 함께 쓰므로 공용 모듈에 둔다.
 // 호출부(`ui::panel`)가 종전 경로를 그대로 쓰도록 여기서 다시 내보낸다
 pub use crate::ui::list_common::FileListAction;
-use crate::ui::list_common::{DragItem, RenameEdit, RenameEnd};
+use crate::ui::list_common::{DirSizes, DragItem, RenameEdit, RenameEnd};
 use crate::ui::remote_menu::RemoteTarget;
 
 /// 목록이 담은 항목 — 로컬 폴더의 것이거나 원격 폴더의 것이다 (plan T8).
@@ -697,6 +697,7 @@ impl FileListView {
         textures: &mut IconTextures,
         thumbnails: &ThumbnailTextures,
         visible: &mut Vec<(PathBuf, FileStamp)>,
+        sizes: &mut DirSizes<'_>,
     ) -> ListInteraction {
         // 필드를 미리 풀어 둔다 — 모델을 빌리는 동안 나머지 필드도 함께 빌려야 한다
         let FileListView {
@@ -738,8 +739,8 @@ impl FileListView {
             show_extensions: self.show_extensions,
         };
         let outcome = match model {
-            ListModel::Local(rows) => render_rows(ui, rows, request, icons, textures),
-            ListModel::Remote(rows) => render_rows(ui, rows, request, icons, textures),
+            ListModel::Local(rows) => render_rows(ui, rows, request, icons, textures, sizes),
+            ListModel::Remote(rows) => render_rows(ui, rows, request, icons, textures, sizes),
         };
 
         // 상태 변경은 그리기가 끝난 뒤에 한다 — 그리는 동안에는 목록이 빌려진 상태다
@@ -1203,6 +1204,7 @@ fn render_rows<R: ListRow>(
     request: RenderRequest<'_>,
     icons: &mut IconCache,
     textures: &mut IconTextures,
+    sizes: &mut DirSizes<'_>,
 ) -> RenderOutcome {
     // 자세히 보기만 열·머리글을 갖는다 — 나머지는 격자 렌더가 맡는다 (FR-23)
     if request.view_mode.is_details() {
@@ -1229,6 +1231,7 @@ fn render_rows<R: ListRow>(
             },
             icons,
             textures,
+            sizes,
         );
         RenderOutcome {
             action: outcome.action,
