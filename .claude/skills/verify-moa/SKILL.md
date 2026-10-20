@@ -19,8 +19,10 @@ MOA 를 실제로 띄워 사용자 경로로 조작하고 증거를 남기는 �
 ## Launch
 
 ```powershell
-pwsh -NoProfile -File "$H\launch.ps1" -RepoRoot <레포 루트> [-Release] [-RunId <이름>]
+pwsh -NoProfile -File "$H\launch.ps1" -RepoRoot <레포 루트> [-Release] [-RunId <이름>] [-KeepDays <일수>]
 ```
+
+- 띄우기 전에 `%TEMP%\verify-moa\` 아래에서 마지막 수정이 `-KeepDays`(기본 7)일보다 오래된 실행 폴더를 증거째 지우고 `PRUNED <경로>` 로 찍는다. 지우지 못한 폴더(아직 떠 있는 사본 등)는 `PRUNE SKIP` 으로 찍고 건너뛴다. 오래 남길 증거는 그 전에 다른 곳으로 옮긴다.
 
 - `-RepoRoot` 로 받은 레포에서 `cargo build`(`-Release` 면 `--release`)를 돌리고 `target\<profile>\moa.exe` 를 `%TEMP%\verify-moa\<RunId>\app\moa.exe` 로 복사해 띄운다. BASE worktree 대조는 그 worktree 경로를 `-RepoRoot` 로, 다른 `-RunId` 로 따로 띄운다(동시에는 못 띄운다 — 하나를 `stop.ps1` 로 내린 뒤 띄운다).
 - **준비 판정**: 그 PID 의 제목 있는 주 창(`모아`/`MOA`)이 30초 안에 나타나야 한다. 나타나면 `PID=… WINDOW=… SIZE=…` 와 `RUN_DIR=…` 를 찍는다. 빈 설정이라 창은 1100x700 이고 첫 워크스페이스 `워크스페이스 1` 이 사용자 홈 폴더를 연 상태다.
@@ -81,7 +83,7 @@ pwsh -NoProfile -File "$H\stop.ps1" -RunDir $R
 ```
 
 - `run.json` 의 PID 가 실행 사본 경로일 때만 내린다(창 닫기 → 5초 뒤 남아 있으면 강제 종료). 경로가 다르면 PID 가 재사용된 남의 프로세스라 건드리지 않는다.
-- `settings.json` 을 `evidence\settings.final.json` 으로 복사한 뒤 `app\`·`work\` 를 지운다. **`evidence\` 와 `run.json` 은 남긴다.**
+- `settings.json` 을 `evidence\settings.final.json` 으로 복사한 뒤 `app\`·`work\` 를 지운다. **`evidence\` 와 `run.json` 은 남긴다** — 다음 launch 가 `-KeepDays` 일이 지나면 지운다.
 - launch 가 준비 판정에서 실패해도 `run.json` 은 이미 있으므로 같은 명령으로 내린다.
 
 ## 변경 검증

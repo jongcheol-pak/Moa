@@ -1,6 +1,6 @@
 ﻿# 검증용 MOA 를 빌드해 임시 실행 폴더에서 띄운다.
 #
-# 사용: pwsh -File launch.ps1 -RepoRoot <레포 루트> [-Release] [-RunId <이름>]
+# 사용: pwsh -File launch.ps1 -RepoRoot <레포 루트> [-Release] [-RunId <이름>] [-KeepDays <일수, 기본 7>]
 # 출력 마지막 줄: RUN_DIR=<실행 폴더>  — 이후 헬퍼는 이 경로를 -RunDir 로 받는다.
 #
 # 실행 폴더(%TEMP%\verify-moa\<RunId>\) 구성:
@@ -11,7 +11,8 @@
 param(
     [Parameter(Mandatory)][string]$RepoRoot,
     [switch]$Release,
-    [string]$RunId = (Get-Date -Format 'yyyyMMdd-HHmmss')
+    [string]$RunId = (Get-Date -Format 'yyyyMMdd-HHmmss'),
+    [int]$KeepDays = 7
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
 
@@ -41,7 +42,17 @@ try {
 $builtExe = Join-Path $RepoRoot "target\$profileName\moa.exe"
 if (-not (Test-Path $builtExe)) { throw "빌드 산출물이 없다: $builtExe" }
 
-$runDir = Join-Path (Get-LongPath $env:TEMP) "verify-moa\$RunId"
+$runsRoot = Join-Path (Get-LongPath $env:TEMP) 'verify-moa'
+# stop.ps1 은 증거를 남기므로 실행 폴더가 쌓인다 — 새로 띄우기 전에 -KeepDays 일이 지난 것을 지운다.
+# 아직 떠 있는 사본이 exe 를 쥐고 있으면 지우지 못하니 그 폴더는 건너뛴다
+if (Test-Path $runsRoot) {
+    $cutoff = (Get-Date).AddDays(-$KeepDays)
+    foreach ($old in Get-ChildItem $runsRoot -Directory | Where-Object { $_.LastWriteTime -lt $cutoff }) {
+        try { Remove-Item -Recurse -Force -ErrorAction Stop $old.FullName; Write-Output "PRUNED $($old.FullName)" }
+        catch { Write-Output "PRUNE SKIP $($old.FullName) — $($_.Exception.Message)" }
+    }
+}
+$runDir = Join-Path $runsRoot $RunId
 if (Test-Path $runDir) { throw "실행 폴더가 이미 있다: $runDir — 다른 -RunId 를 준다" }
 $appDir = Join-Path $runDir 'app'
 $workDir = Join-Path $runDir 'work'
