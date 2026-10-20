@@ -1221,6 +1221,7 @@ mod tests {
             size,
             modified,
             attributes: 0,
+            location: None,
         }
     }
 
@@ -1318,6 +1319,7 @@ mod tests {
             // 숨김 속성 — 숨김을 끄면 빠져야 한다
             FileEntry {
                 attributes: 2,
+                location: None,
                 ..entry("hidden.txt", false, 7, 5)
             },
         ]
@@ -1523,6 +1525,7 @@ mod tests {
         // 셋의 논리곱이라 어느 쪽을 먼저 켜도 같은 결과여야 한다
         let hidden = FileEntry {
             attributes: windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN.0,
+            location: None,
             ..entry("secret.txt", false, 0, 0)
         };
         let mut v = view(vec![

@@ -647,6 +647,7 @@ mod tests {
             size: 10,
             modified: 0,
             attributes: 0,
+            location: None,
         }
     }
 

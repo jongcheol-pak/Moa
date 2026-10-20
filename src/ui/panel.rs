@@ -2534,6 +2534,7 @@ fn with_local_parent_first(dir: &Path, entries: Vec<FileEntry>) -> Vec<FileEntry
         // 실제 파일이 아니라 화면 장치다 — 어떤 필터에도 걸리지 않게 속성을 비운다.
         // 숨김 항목을 꺼도 `..`는 첫 줄에 남아야 한다 (FR-31)
         attributes: 0,
+        location: None,
     });
     out.extend(entries.into_iter().filter(|entry| !entry.is_parent()));
     out

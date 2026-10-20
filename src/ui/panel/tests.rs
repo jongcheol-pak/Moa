@@ -443,6 +443,7 @@ fn batch(names: &[&str]) -> Vec<crate::fs::enumerate::FileEntry> {
                 size: 0,
                 modified: 0,
                 attributes: 0,
+                location: None,
             }
         })
         .collect()
@@ -1401,6 +1402,7 @@ fn local_entry(name: &str, is_dir: bool) -> FileEntry {
         size: 0,
         modified: 0,
         attributes: 0,
+        location: None,
     }
 }
 

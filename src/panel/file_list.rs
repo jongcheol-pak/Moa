@@ -509,6 +509,7 @@ mod tests {
             size,
             modified,
             attributes: 0,
+            location: None,
         }
     }
 

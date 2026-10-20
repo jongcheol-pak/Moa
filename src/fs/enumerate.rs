@@ -29,6 +29,11 @@ pub struct FileEntry {
     /// 판정 결과(`bool`)가 아니라 원시값을 든다: 무엇을 숨길지는 화면 쪽 규칙이고,
     /// 열거는 OS가 준 사실만 실어 나른다
     pub attributes: u32,
+    /// 목록 폴더 아래 어느 하위 폴더에 있는가 — **하위 폴더 검색 결과에만 있다** (FR-70).
+    ///
+    /// 목록 폴더 기준 상대 경로이며, 목록 폴더 바로 아래 항목과 일반 열거는 `None`이다.
+    /// 같은 폴더의 결과끼리 한 버퍼를 나눠 든다
+    pub location: Option<std::sync::Arc<Path>>,
 }
 
 /// 파일 내용이 바뀌었는지 가르는 도장 — 크기와 수정 시각 (2026-09-29).
@@ -232,6 +237,7 @@ fn push_entry(data: &WIN32_FIND_DATAW, out: &mut Vec<FileEntry>) {
         modified: ((data.ftLastWriteTime.dwHighDateTime as u64) << 32)
             | data.ftLastWriteTime.dwLowDateTime as u64,
         attributes: data.dwFileAttributes,
+        location: None,
     });
 }
 
@@ -471,6 +477,7 @@ mod tests {
                 size: 0,
                 modified: 0,
                 attributes: 0,
+                location: None,
             }
         };
         assert_eq!(mk("A.TXT", false).extension(), "txt");
