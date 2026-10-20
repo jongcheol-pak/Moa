@@ -963,7 +963,8 @@ fn with_left(error: Option<String>, left: &[PathBuf]) -> Option<String> {
 /// **그 사이 사라진 항목은 그것만 건너뛴다** — 여러 개를 골랐는데 하나가 없어졌다고
 /// 나머지를 버릴 이유가 없다(`perform`의 같은 규칙). 하나도 걸지 못했으면 실패로 본다
 fn perform_delete(paths: &[PathBuf], permanent: bool, owner: &HwndSend) -> Result<bool, String> {
-    // 안전성: 위 `perform_rename`과 같다
+    // 안전성: COM이 STA로 초기화된 워커 스레드에서만 부른다. 얻은 인터페이스는 이 함수
+    // 안에서만 살다 `Drop`으로 해제된다
     unsafe {
         let op = new_operation(delete_flags(permanent), owner)?;
         let mut queued = 0usize;
