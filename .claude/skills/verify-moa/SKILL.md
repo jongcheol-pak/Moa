@@ -66,7 +66,7 @@ $a   = @('--app', "pid:$($run.pid)", '--window-id', "$($run.windowId)", '--no-sc
 pwsh -NoProfile -File "$H\shot.ps1" -RunDir $R -Name <증거 이름> [-NoRaise]
 ```
 
-- 증거는 **레포 밖** `%TEMP%\verify-moa\<RunId>\evidence\` 에 둔다. `shot.ps1` 은 `<이름>.png`(창 캡처, 제목 표시줄 포함)와 `<이름>.json`(창 위치·크기·제목)을 남긴다.
+- 증거는 **레포 밖** `%TEMP%\verify-moa\<RunId>\evidence\` 에 둔다. `shot.ps1` 은 `<이름>.png`(창 캡처, 제목 표시줄 포함)와 `<이름>.json`(창 위치·크기·제목)을 남긴다. 같은 이름의 증거가 이미 있으면 덮어쓰지 않고 실패한다.
 - `shot.ps1` 은 기본으로 창을 최소화·복원해 앞으로 올린 뒤(화면이 한 번 깜박인다) 전경 창이 MOA 인지 확인하고 찍는다. 팝업 메뉴처럼 앞으로 올리면 닫히는 상태를 찍을 때는 `-NoRaise` 를 준다 — 그래도 전경이 MOA 가 아니면 찍지 않고 실패한다.
 - 증거 기준:
   - 조작 전 캡처와 조작 후 캡처를 함께 남긴다. 이름은 `<순번>-<기능 ID>-<단계>` 로 짓는다(예: `12-create-menu-after`).

@@ -31,5 +31,5 @@ H1 제목과 사용자에게 보이는 동작 한 문단 뒤에 H2 넷을 이 �
 |---|---|---|
 | 새 폴더·새 파일 만들기 | [create-item.md](./create-item.md) | `src/ui/panel*`·`src/ui/app.rs`(패널 메뉴·단축키) · `src/fs/create.rs`(이름 번호 규칙) · `src/fs/file_op.rs` |
 | 주소창 탐색 | [navigate.md](./navigate.md) | `src/ui/address_bar.rs` · `src/panel/`(히스토리) · `src/fs/`(열거) · `src/ui/file_list.rs`·`list_*.rs` |
-| 워크스페이스 만들기·이름 | [workspace.md](./workspace.md) | `src/ui/sidebar.rs` · `src/ui/titlebar.rs` · `src/app/workspace.rs` · `src/app/settings.rs`(세션 저장) |
+| 워크스페이스 만들기·이름 | [workspace.md](./workspace.md) | `src/ui/sidebar.rs` · `src/ui/titlebar.rs` · `src/app/workspace.rs` · `src/app/settings.rs`(세션 스키마) · `src/app/session_saver.rs`(세션 디스크 쓰기·종료 저장) |
 | 설정 메뉴·설정 화면 | [settings-menu.md](./settings-menu.md) | `src/ui/titlebar.rs` · `src/ui/menu.rs` · `src/ui/settings_dialog.rs` · `src/ui/about_dialog.rs` · `src/ui/license_dialog.rs` · `src/i18n/` |

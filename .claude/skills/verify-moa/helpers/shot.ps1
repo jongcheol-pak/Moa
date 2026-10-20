@@ -31,6 +31,8 @@ if ($fg -ne [int64]$window.platform.nativeWindowHandle) {
 }
 
 $png = Join-Path $run.evidenceDir "$Name.png"
+# 같은 이름을 다시 쓰면 앞 증거(조작 전 캡처 등)가 조용히 사라진다 — 덮어쓰지 않는다
+if (Test-Path $png) { throw "증거가 이미 있다: $png — 다른 -Name 을 준다" }
 $bmp = [System.Drawing.Bitmap]::new([int]$window.width, [int]$window.height)
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 try {

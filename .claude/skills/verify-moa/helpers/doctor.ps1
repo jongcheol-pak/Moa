@@ -11,7 +11,8 @@ function Report([bool]$ok, [string]$what) {
     if ($ok) { Write-Output "OK   $what" } else { Write-Output "FAIL $what"; $script:fails++ }
 }
 
-$run = Read-Run -RunDir $RunDir
+# Read-Run·Invoke-Karina 의 throw 는 ErrorActionPreference 와 무관하게 스크립트를 끝내므로 점검마다 잡아 FAIL 로 찍는다
+try { $run = Read-Run -RunDir $RunDir } catch { Report $false "run.json 읽기 — $_"; Write-Output "DOCTOR: FAIL $fails 건 — 조작하지 않는다"; exit 1 }
 
 # 1. 조작 도구 — 스킬을 만든 PC·시점과 돌리는 PC·시점이 다를 수 있어 매번 본다
 $cli = $null
@@ -25,10 +26,10 @@ if ($cli) {
 # 2. 프로세스가 우리가 띄운 사본인가
 $proc = Get-Process -Id $run.pid -ErrorAction SilentlyContinue
 Report ([bool]$proc) "PID $($run.pid) 살아 있음"
-if ($proc) { Report ($proc.Path -eq $run.exe) "PID $($run.pid) 경로 = $($proc.Path) (기대 $($run.exe))" }
+if ($proc) { Report (Test-SamePath $proc.Path $run.exe) "PID $($run.pid) 경로 = $($proc.Path) (기대 $($run.exe))" }
 
 # 3. 다른 MOA 가 없는가 — 있으면 중복 실행 방지가 입력·세션 저장을 섞는다
-$others = Get-Process moa -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $run.pid }
+$others = Get-OtherMoa -ExceptPid $run.pid
 Report (-not $others) "다른 MOA 없음$(if ($others) { ' — ' + (($others | ForEach-Object { "PID $($_.Id) $($_.Path)" }) -join '; ') })"
 
 # 4. 기대한 빌드인가 — 실행 중인 사본이 지금 레포 빌드 산출물과 같은가
@@ -43,12 +44,17 @@ if (Test-Path $run.exe) {
 
 # 5. 창이 보이고 화면이 잠기지 않았는가 — 스크린샷 한 장으로 본다
 if ($proc -and $cli) {
-    $window = Find-MainWindow -ProcessId $run.pid
-    Report ([bool]$window) "주 창 보임$(if ($window) { " (id $($window.id), $($window.width)x$($window.height))" })"
+    $window = $null
+    try {
+        $window = Find-MainWindow -ProcessId $run.pid
+        Report ([bool]$window) "주 창 보임$(if ($window) { " (id $($window.id), $($window.width)x$($window.height))" })"
+    } catch { Report $false "주 창 찾기 — $_" }
     if ($window) {
         # 잠긴 화면·보안 데스크톱이면 커서·입력이 닿지 않는다 — Karina 가 창 상태를 읽을 수 있는지로 본다
-        $state = Invoke-Karina @('computer', 'get-app-state', '--app', "pid:$($run.pid)", '--window-id', "$($window.id)", '--no-screenshot', '--json')
-        Report ([bool]$state.ok) "Karina 가 창 상태를 읽음$(if (-not $state.ok) { " — $($state.code) $($state.error)" })"
+        try {
+            $state = Invoke-Karina @('computer', 'get-app-state', '--app', "pid:$($run.pid)", '--window-id', "$($window.id)", '--no-screenshot', '--json')
+            Report ([bool]$state.ok) "Karina 가 창 상태를 읽음$(if (-not $state.ok) { " — $($state.code) $($state.error)" })"
+        } catch { Report $false "Karina 창 상태 읽기 — $_" }
         Report ($window.id -eq $run.windowId) "창 id 가 launch 때와 같음 ($($run.windowId))"
     }
 }

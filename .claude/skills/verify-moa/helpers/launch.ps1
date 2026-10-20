@@ -19,12 +19,16 @@ $RepoRoot = (Resolve-Path $RepoRoot).Path
 $profileName = if ($Release) { 'release' } else { 'debug' }
 
 # 중복 실행 방지 뮤텍스(Local\MOA-single-instance)가 로그온 세션 하나에 MOA 하나만 허용한다.
-# 다른 MOA 가 떠 있으면 새로 띄운 것은 그 창을 깨우고 스스로 끝나, 사용자의 MOA 를 조작하게 된다
-$others = Get-Process moa -ErrorAction SilentlyContinue
-if ($others) {
-    $list = ($others | ForEach-Object { "PID $($_.Id) $($_.Path)" }) -join '; '
-    throw "다른 MOA 가 실행 중이라 띄우지 않는다 — $list. 사용자가 그 MOA 를 종료한 뒤 다시 돌린다(이 스크립트는 남의 프로세스를 내리지 않는다)"
+# 다른 MOA 가 떠 있으면 새로 띄운 것은 그 창을 깨우고 스스로 끝나, 사용자의 MOA 를 조작하게 된다.
+# 빌드가 몇 분 걸리는 사이 사용자가 MOA 를 켤 수 있어 빌드 전과 띄우기 직전에 두 번 본다
+function Assert-NoOtherMoa {
+    $others = Get-OtherMoa
+    if ($others) {
+        $list = ($others | ForEach-Object { "PID $($_.Id) $($_.Path)" }) -join '; '
+        throw "다른 MOA 가 실행 중이라 띄우지 않는다 — $list. 사용자가 그 MOA 를 종료한 뒤 다시 돌린다(이 스크립트는 남의 프로세스를 내리지 않는다)"
+    }
 }
+Assert-NoOtherMoa
 
 Push-Location $RepoRoot
 try {
@@ -37,7 +41,7 @@ try {
 $builtExe = Join-Path $RepoRoot "target\$profileName\moa.exe"
 if (-not (Test-Path $builtExe)) { throw "빌드 산출물이 없다: $builtExe" }
 
-$runDir = Join-Path $env:TEMP "verify-moa\$RunId"
+$runDir = Join-Path (Get-LongPath $env:TEMP) "verify-moa\$RunId"
 if (Test-Path $runDir) { throw "실행 폴더가 이미 있다: $runDir — 다른 -RunId 를 준다" }
 $appDir = Join-Path $runDir 'app'
 $workDir = Join-Path $runDir 'work'
@@ -46,6 +50,7 @@ New-Item -ItemType Directory -Force $appDir, $workDir, $evidenceDir | Out-Null
 $exe = Join-Path $appDir 'moa.exe'
 Copy-Item $builtExe $exe
 
+Assert-NoOtherMoa
 $proc = Start-Process -FilePath $exe -WorkingDirectory $appDir -PassThru
 $run = [ordered]@{
     runId = $RunId; runDir = $runDir; repoRoot = $RepoRoot; profile = $profileName
