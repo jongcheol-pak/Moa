@@ -2372,12 +2372,19 @@ impl PanelState {
                     // "빈 폴더"라는 없는 말을 하게 된다 (인벤토리 #95)
                     ui.colored_label(theme::TEXT_MUTED, remote_states::UNKNOWN_COUNT);
                 } else if !self.load.is_loading() {
-                    // 읽는 중에는 세지 않는다 — 이전 폴더의 수가 남아 새 폴더의 것처럼 보인다
-                    let (dirs, files) = self.list.counts();
-                    ui.colored_label(
-                        theme::TEXT_MUTED,
-                        crate::i18n::dynamic::item_counts(dirs, files),
-                    );
+                    // 읽는 중에는 세지 않는다 — 이전 폴더의 수가 남아 새 폴더의 것처럼 보인다.
+                    // 고른 것이 있으면 그 수와 파일 크기 합을 대신 보인다 (FR-72)
+                    let text = match self.list.selection_summary() {
+                        Some((count, bytes)) => crate::i18n::dynamic::selection_summary(
+                            count,
+                            &crate::panel::file_list::format_size(bytes),
+                        ),
+                        None => {
+                            let (dirs, files) = self.list.counts();
+                            crate::i18n::dynamic::item_counts(dirs, files)
+                        }
+                    };
+                    ui.colored_label(theme::TEXT_MUTED, text);
                 }
             },
         );

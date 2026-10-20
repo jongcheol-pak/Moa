@@ -878,6 +878,14 @@ pub mod dynamic {
         }
     }
 
+    /// 상태 줄의 선택 통계 — 고른 수와 파일 크기 합 (FR-72). 크기 문자열은 호출부가 만든다
+    pub fn selection_summary(count: usize, size: &str) -> String {
+        match current() {
+            Language::Korean => format!("{count}개 선택 · {size}"),
+            Language::English => format!("{count} selected · {size}"),
+        }
+    }
+
     /// 상태 줄의 폴더·파일 개수 — 어순이 언어마다 다르다
     pub fn item_counts(dirs: usize, files: usize) -> String {
         match current() {
@@ -1690,6 +1698,34 @@ mod tests {
         // 영어는 한 개일 때 복수형을 쓰지 않는다
         assert_eq!(dynamic::local_copy_cancelled(1), "Copy stopped — 1 item");
         assert_eq!(dynamic::local_copy_cancelled(3), "Copy stopped — 3 items");
+    }
+
+    #[test]
+    fn 검색과_선택_통계_문구는_두_언어를_모두_낸다() {
+        // FR-70·FR-72 — 기대값은 원문 리터럴이고 언어를 잠근다
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(search_running(), "하위 폴더에서 찾는 중…");
+        assert_eq!(column_location(), "경로");
+        assert_eq!(
+            dynamic::search_truncated(100_000),
+            "결과가 많아 처음 100000개만 보입니다"
+        );
+        assert_eq!(
+            dynamic::selection_summary(3, "1.20 MB"),
+            "3개 선택 · 1.20 MB"
+        );
+
+        set_language(LanguageSetting::English);
+        assert_eq!(search_running(), "Searching subfolders…");
+        assert_eq!(column_location(), "Path");
+        assert_eq!(
+            dynamic::search_truncated(100_000),
+            "Too many results — showing the first 100000"
+        );
+        assert_eq!(
+            dynamic::selection_summary(3, "1.20 MB"),
+            "3 selected · 1.20 MB"
+        );
     }
 
     #[test]

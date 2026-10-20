@@ -955,6 +955,28 @@ impl FileListView {
         self.searching
     }
 
+    /// 고른 것의 수와 그중 파일 크기의 합 — 고른 것이 없으면 `None` (FR-72).
+    ///
+    /// `..` 줄은 세지 않는다. 폴더는 수에만 든다 — 계산 중인 폴더 크기를 더하면 합계가 계산이
+    /// 끝날 때마다 흔들린다. 고른 것만 훑으므로 프레임마다 불러도 전량을 훑지 않는다
+    pub fn selection_summary(&self) -> Option<(usize, u64)> {
+        fn sum<R: ListRow>(rows: &[R], selection: &BTreeSet<usize>) -> (usize, u64) {
+            selection
+                .iter()
+                .filter_map(|&index| rows.get(index))
+                .filter(|row| !row.is_parent())
+                .fold((0, 0), |(count, bytes), row| {
+                    let size = if row.is_dir() { 0 } else { row.size() };
+                    (count + 1, bytes.saturating_add(size))
+                })
+        }
+        let (count, bytes) = match &self.model {
+            ListModel::Local(rows) => sum(rows, &self.selection),
+            ListModel::Remote(rows) => sum(rows, &self.selection),
+        };
+        (count > 0).then_some((count, bytes))
+    }
+
     /// 숨김·시스템 항목 표시 설정 — 검색 워커가 같은 규칙으로 거른다
     pub fn hidden_rules(&self) -> (bool, bool) {
         (self.show_hidden, self.show_system)
@@ -2352,5 +2374,30 @@ mod tests {
             .chain(std::iter::once(0))
             .collect();
         assert!(!v.select_name(&key));
+    }
+
+    #[test]
+    fn 선택_통계는_고른_수와_파일_크기_합이다() {
+        // FR-72 — `..`는 세지 않고 폴더는 수에만 든다
+        let mut v = view(vec![
+            (entry("..", true, 0, 0), "폴더"),
+            (entry("사진", true, 999, 0), "폴더"),
+            (entry("a.txt", false, 100, 0), "텍스트"),
+            (entry("b.txt", false, 23, 0), "텍스트"),
+        ]);
+        assert_eq!(v.selection_summary(), None, "고른 것이 없는데 통계가 섰다");
+        v.selection = (0..4).collect();
+        assert_eq!(v.selection_summary(), Some((3, 123)));
+    }
+
+    #[test]
+    fn 원격_목록의_선택_통계도_같은_규칙이다() {
+        let mut v = remote_view(vec![
+            (remote("..", true, 0), "폴더"),
+            (remote("dir", true, 4096), "폴더"),
+            (remote("a.bin", false, 2048), "파일"),
+        ]);
+        v.selection = (0..3).collect();
+        assert_eq!(v.selection_summary(), Some((2, 2048)));
     }
 }

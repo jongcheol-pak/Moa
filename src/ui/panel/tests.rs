@@ -4846,3 +4846,30 @@ fn 다른_폴더로_옮기면_폴더_크기를_버린다() {
         "옮긴 뒤에도 옛 폴더의 요청 기록이 남았다"
     );
 }
+
+#[test]
+fn 고른_것이_있으면_상태_줄에_선택_통계가_선다() {
+    // FR-72 — 고르면 `N개 선택 · 합계`, 풀면 종전 `폴더 N 파일 N`
+    let _guard = crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+    let mut icons = IconCache::new();
+    let mut panel = docs_panel(&mut icons);
+    panel.list.toggle_select(1);
+    panel.list.toggle_select(2);
+    let 고름 = drawn_texts(&draw_once(&mut panel, &SiteStore::new()));
+    assert!(
+        고름.iter().any(|t| t == "2개 선택 · 0.00 KB"),
+        "선택 통계가 상태 줄에 없다: {고름:?}"
+    );
+    assert!(
+        !고름.iter().any(|t| is_item_count(t)),
+        "고른 것이 있는데 항목 수를 보였다"
+    );
+
+    panel.list.toggle_select(1);
+    panel.list.toggle_select(2);
+    let 풂 = drawn_texts(&draw_once(&mut panel, &SiteStore::new()));
+    assert!(
+        풂.iter().any(|t| is_item_count(t)),
+        "선택을 풀었는데 항목 수가 없다: {풂:?}"
+    );
+}
