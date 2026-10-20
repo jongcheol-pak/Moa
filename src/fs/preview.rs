@@ -89,7 +89,7 @@ fn utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> String {
 ///
 /// 안전성: `MultiByteToWideChar` 는 길이를 바이트/문자 수로 받고 버퍼 밖을 건드리지 않는다.
 /// 필요한 길이를 먼저 물어 그만큼만 잡아 두 번째 호출에 넘긴다
-fn decode_system_code_page(bytes: &[u8]) -> String {
+pub(crate) fn decode_system_code_page(bytes: &[u8]) -> String {
     use windows::Win32::Globalization::{CP_ACP, MultiByteToWideChar};
     let needed = unsafe { MultiByteToWideChar(CP_ACP, Default::default(), bytes, None) };
     if needed <= 0 {

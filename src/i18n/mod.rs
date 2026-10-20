@@ -412,6 +412,10 @@ strings! {
     preview_binary => "미리볼 수 없는 형식입니다" / "This file can't be previewed";
     preview_failed => "읽지 못했습니다" / "Couldn't read this file";
     preview_loading => "읽는 중…" / "Loading…";
+    /// zip 항목을 풀지 못한 사유 (FR-78) — 이름이 zip 바깥(`..`·절대 경로)을 가리킨다
+    zip_unsafe_name => "zip 바깥을 가리키는 이름입니다" / "The name points outside the zip";
+    /// zip 항목을 풀지 못한 사유 (FR-78) — Windows 파일 이름에 쓸 수 없는 글자가 있다
+    zip_bad_name => "Windows에서 쓸 수 없는 이름입니다" / "The name isn't valid on Windows";
     /// 앱 안에서 Shift 를 든 채 끄는 동안 그림 옆에 붙는 표시 (FR-60 — 놓으면 이동한다)
     drag_moving => "이동" / "Move";
     /// `Ctrl+Z`를 눌렀는데 되돌릴 기록이 없을 때 (FR-74)

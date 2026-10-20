@@ -19,4 +19,5 @@ pub mod shell_menu_worker;
 pub mod thumbnail;
 pub mod undo;
 pub mod watcher;
+pub mod zip_archive;
 pub mod zip_shell;

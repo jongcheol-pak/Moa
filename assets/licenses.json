@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "lock_fingerprint": 15272231247633232411,
+  "lock_fingerprint": 11754054140056890680,
   "crates": [
     {
       "name": "accesskit",
@@ -386,6 +386,18 @@
       "bundled": false
     },
     {
+      "name": "equivalent",
+      "version": "1.0.2",
+      "spdx": "Apache-2.0 OR MIT",
+      "authors": [],
+      "text_indices": [
+        2,
+        93
+      ],
+      "standard_text": false,
+      "bundled": false
+    },
+    {
       "name": "error-code",
       "version": "3.4.0",
       "spdx": "BSL-1.0",
@@ -733,6 +745,18 @@
       "bundled": false
     },
     {
+      "name": "indexmap",
+      "version": "2.14.0",
+      "spdx": "Apache-2.0 OR MIT",
+      "authors": [],
+      "text_indices": [
+        2,
+        92
+      ],
+      "standard_text": false,
+      "bundled": false
+    },
+    {
       "name": "itertools",
       "version": "0.14.0",
       "spdx": "MIT OR Apache-2.0",
@@ -829,7 +853,7 @@
       "spdx": "BSD-3-Clause",
       "authors": [],
       "text_indices": [
-        91
+        94
       ],
       "standard_text": false,
       "bundled": true
@@ -1617,6 +1641,20 @@
       "bundled": false
     },
     {
+      "name": "typed-path",
+      "version": "0.12.4",
+      "spdx": "MIT OR Apache-2.0",
+      "authors": [
+        "Chip Senkbeil"
+      ],
+      "text_indices": [
+        1,
+        5
+      ],
+      "standard_text": false,
+      "bundled": false
+    },
+    {
       "name": "unicode-general-category",
       "version": "1.1.0",
       "spdx": "Apache-2.0",
@@ -2109,12 +2147,28 @@
       "bundled": false
     },
     {
+      "name": "zip",
+      "version": "9.0.5",
+      "spdx": "MIT",
+      "authors": [
+        "Mathijs van de Nes",
+        "Marli Frost",
+        "Ryan Levick",
+        "Chris Hennick"
+      ],
+      "text_indices": [
+        91
+      ],
+      "standard_text": false,
+      "bundled": false
+    },
+    {
       "name": "zlib (libz-sys 번들)",
       "version": "1.1.29",
       "spdx": "Zlib",
       "authors": [],
       "text_indices": [
-        92
+        95
       ],
       "standard_text": false,
       "bundled": true
@@ -2497,6 +2551,18 @@
     {
       "spdx": "MIT",
       "body": "Copyright (c) 2015 steffengy\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
+    },
+    {
+      "spdx": "MIT",
+      "body": "The MIT License (MIT)\n\nCopyright (c) 2014 Mathijs van de Nes\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+    },
+    {
+      "spdx": "MIT",
+      "body": "Copyright (c) 2016--2017\n\nPermission is hereby granted, free of charge, to any\nperson obtaining a copy of this software and associated\ndocumentation files (the \"Software\"), to deal in the\nSoftware without restriction, including without\nlimitation the rights to use, copy, modify, merge,\npublish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software\nis furnished to do so, subject to the following\nconditions:\n\nThe above copyright notice and this permission notice\nshall be included in all copies or substantial portions\nof the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF\nANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED\nTO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A\nPARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT\nSHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY\nCLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION\nOF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR\nIN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER\nDEALINGS IN THE SOFTWARE."
+    },
+    {
+      "spdx": "MIT",
+      "body": "Copyright (c) 2016--2023\n\nPermission is hereby granted, free of charge, to any\nperson obtaining a copy of this software and associated\ndocumentation files (the \"Software\"), to deal in the\nSoftware without restriction, including without\nlimitation the rights to use, copy, modify, merge,\npublish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software\nis furnished to do so, subject to the following\nconditions:\n\nThe above copyright notice and this permission notice\nshall be included in all copies or substantial portions\nof the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF\nANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED\nTO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A\nPARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT\nSHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY\nCLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION\nOF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR\nIN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER\nDEALINGS IN THE SOFTWARE."
     },
     {
       "spdx": "BSD-3-Clause",

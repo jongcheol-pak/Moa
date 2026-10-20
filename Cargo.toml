@@ -100,6 +100,12 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # 판을 링크하고 있어(`cargo tree -i regex`) 패키지 집합은 그대로다 — 전이 의존에 기대지 않으려고
 # 명시로 올린다(`image`와 같은 판단)
 regex = "1.13.1"
+# zip 안 읽기 전용 탐색·끌어 풀기 (FR-78 — `fs::zip_archive`). **읽기와 deflate 만** 켠다:
+# 기본 기능은 aes·bzip2·zstd·xz 를 끌어오고, `deflate` 기능도 압축 쓰기용 zopfli 와 zlib-rs 를
+# 끌어온다(2026-10-20 `cargo tree` 실측). `deflate-flate2` 만 켜면 flate2 에 백엔드가 없어
+# 컴파일되지 않으므로 아래 flate2 를 명시로 올려 이미 링크된 miniz_oxide 백엔드를 고른다
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 
 # 원격 연결 (FR-27~FR-46). 둘 다 **동기(blocking) API**라 이 앱의 std::thread + 채널 구조에
 # 그대로 맞는다 — async 런타임(tokio)을 들이지 않는다(AGENTS 동시성 규약).
