@@ -57,6 +57,7 @@ use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 
 mod autosave;
+mod compare;
 mod remote;
 mod shell_menu;
 mod transfer_conflict;
@@ -222,6 +223,8 @@ pub struct WorkspaceView {
     last_local_tab: Option<TabId>,
     /// 같은 규칙의 원격 쪽 — **올리기 목적지**다 (FR-54)
     last_remote_tab: Option<TabId>,
+    /// 두 패널 비교 짝 (FR-79) — 세션에 담지 않는다(다시 켜면 꺼진 채 시작한다)
+    compare: Option<compare::ComparePair>,
 }
 
 impl WorkspaceView {
@@ -263,6 +266,7 @@ impl WorkspaceView {
             // 전송 대상은 첫 조회에서 폴백 규칙이 정한다 (FR-54)
             last_local_tab: None,
             last_remote_tab: None,
+            compare: None,
         }
     }
 
@@ -347,6 +351,7 @@ impl WorkspaceView {
             // 세션에 담지 않는 값이라 되살릴 것이 없다 — 첫 조회의 폴백이 정한다 (FR-54)
             last_local_tab: None,
             last_remote_tab: None,
+            compare: None,
         }
     }
 
@@ -2176,6 +2181,17 @@ impl ExplorerApp {
                 }
             }
             Command::QuickOpen => self.open_quick_open(),
+            Command::CompareWith(other) => {
+                let view = self.ensure_active_view();
+                let me = target.unwrap_or(view.active);
+                view.start_compare(me, other);
+            }
+            Command::CompareOff => self.ensure_active_view().stop_compare(),
+            Command::SelectCompareOnly => {
+                if let Some(panel) = self.command_panel_mut(target) {
+                    panel.select_compare_only();
+                }
+            }
             Command::TogglePreview => self.preview.toggle(),
             Command::MoveSelection { down, extend } => {
                 if let Some(panel) = self.command_panel_mut(target) {
@@ -3038,6 +3054,8 @@ impl eframe::App for ExplorerApp {
                     self.recent.visit(&dir);
                 }
             }
+            // 두 패널 비교 — 이번 프레임에 목록이 바뀌었으면 다시 견준다 (FR-79)
+            view.sync_compare(ctx);
         }
         self.frame_timer.mark("panels_poll");
         self.sync_subtitle();
@@ -3218,6 +3236,7 @@ impl eframe::App for ExplorerApp {
                     // 전송 대상은 **그리기 전에** 정한다 — 아이콘이 가리키는 곳과 실제로 가는
                     // 곳이 같은 값에서 나와야 한다 (FR-54)
                     let targets = view.transfer_targets();
+                    let compare = view.compare_pair();
                     let outcome = splitter::show_layout(
                         ui,
                         &ctx,
@@ -3239,6 +3258,7 @@ impl eframe::App for ExplorerApp {
                         targets,
                         &self.favorites.entries(),
                         self.drives.rows(),
+                        compare,
                     );
                     // 이번 프레임에 눌린 패널이 다음 전송의 대상이 된다 — 팝업에 가린 클릭은
                     // 여기 오지 않는다(`pressed_panel` 설명). 메뉴 실행보다 **앞서** 반영해야

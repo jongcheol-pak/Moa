@@ -3,6 +3,7 @@
 //! 표시 규칙(크기·날짜 문자열)과 정렬 비교는 `panel::file_list`의 순수 함수를 그대로 쓴다 —
 //! 복제하면 두 벌로 갈라진다. **그리기는 보기 모드별 모듈이 맡고**(자세히 보기는
 //! `ui::list_details`) 이 파일은 상태를 들고 그 모듈에 넘긴 뒤, 돌아온 조작을 상태에 반영한다.
+use crate::app::compare::{CompareMarks, Mark};
 use crate::fs::enumerate::{FileEntry, FileStamp};
 use crate::fs::icons::IconCache;
 use crate::panel::file_list::{ListRow, SortKey, compare_rows_keyed};
@@ -136,6 +137,11 @@ pub struct FileListView {
     /// 목록 판 번호 — 항목을 갈아 끼우거나 이어 붙일 때마다 오른다. 두 패널 비교(FR-79)가
     /// 이 번호로 다시 견줄지를 가린다(10만 항목을 매 프레임 견주지 않는다)
     version: u64,
+    /// 두 패널 비교 결과 (FR-79) — 없으면 비교 중이 아니다
+    compare: Option<std::sync::Arc<CompareMarks>>,
+    /// 보이는 행마다의 비교 표시 — `model`과 같은 인덱스다. 결과나 보이는 목록이 바뀔 때 다시
+    /// 만든다(그리는 자리가 행마다 이름을 접어 찾지 않게 한다)
+    compare_rows: Vec<Option<Mark>>,
 }
 
 impl Default for FileListView {
@@ -176,6 +182,8 @@ impl FileListView {
             searching: false,
             zip_dir: None,
             version: 0,
+            compare: None,
+            compare_rows: Vec::new(),
         }
     }
 
@@ -300,6 +308,45 @@ impl FileListView {
         self.anchor = None;
         self.cursor = None;
         self.relocate_rename();
+        self.rebuild_compare_rows();
+    }
+
+    /// 보이는 행마다의 비교 표시를 다시 만든다 (FR-79) — 비교는 로컬 폴더 목록끼리만이다
+    fn rebuild_compare_rows(&mut self) {
+        self.compare_rows = match (&self.compare, &self.model) {
+            (Some(marks), ListModel::Local(rows)) => rows
+                .iter()
+                .map(|row| marks.get(&row.name_string()))
+                .collect(),
+            _ => Vec::new(),
+        };
+    }
+
+    /// 비교 결과를 받는다 (FR-79) — `None` 이면 표시를 거둔다
+    pub fn set_compare(&mut self, marks: Option<std::sync::Arc<CompareMarks>>) {
+        self.compare = marks;
+        self.rebuild_compare_rows();
+    }
+
+    /// 비교 중이면 (한쪽에만, 다름) 개수 (FR-79)
+    pub fn compare_counts(&self) -> Option<(usize, usize)> {
+        self.compare.as_ref().map(|marks| marks.counts())
+    }
+
+    /// 비교 결과에서 이 목록에만 있는 행을 고른다 (FR-79) — 기준점·포커스 행은 첫 것에 세운다
+    pub fn select_compare_only(&mut self) {
+        let picked: BTreeSet<usize> = self
+            .compare_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, mark)| **mark == Some(Mark::OnlyHere))
+            .map(|(index, _)| index)
+            .collect();
+        let first = picked.first().copied();
+        self.selection = picked;
+        self.anchor = first;
+        self.cursor = first;
+        self.scroll_to = first;
     }
 
     /// 원본의 정렬 순열을 지금 정렬 기준으로 다시 만든다 — 원본이 바뀌거나 정렬 기준이 바뀔 때만 부른다
@@ -530,6 +577,7 @@ impl FileListView {
                 None => self.rename = None,
             }
         }
+        self.rebuild_compare_rows();
     }
 
     /// 지금 그려져 있는 목록의 폴더 — **커밋된 경로와 다르다** (FR-68).
@@ -891,6 +939,7 @@ impl FileListView {
             rename,
             cut_marks,
             scroll_to,
+            compare_rows,
             ..
         } = self;
         let request = RenderRequest {
@@ -914,6 +963,7 @@ impl FileListView {
             visible,
             local_paths: model.is_local(),
             is_remote: matches!(model, ListModel::Remote(_)),
+            compare: compare_rows,
             show_extensions: self.show_extensions,
         };
         let outcome = match model {
@@ -1407,6 +1457,8 @@ struct RenderRequest<'a> {
     /// 원격 목록인가 — 권한·소유자 열은 여기서만 선다. `local_paths`의 부정이 아니다:
     /// zip 목록(FR-78)은 로컬 경로가 없지만 원격도 아니다
     is_remote: bool,
+    /// 보이는 행마다의 비교 표시 (FR-79) — 비교 중이 아니면 비었다
+    compare: &'a [Option<Mark>],
     /// 이름 뒤 확장자를 보일지 (FR-52)
     show_extensions: bool,
 }
@@ -1452,6 +1504,7 @@ fn render_rows<R: ListRow>(
                 ascending: request.ascending,
                 columns: request.columns,
                 is_remote: request.is_remote,
+                compare: request.compare,
                 column_flags: request.column_flags,
                 local_paths: request.local_paths,
                 show_extensions: request.show_extensions,
@@ -1486,6 +1539,7 @@ fn render_rows<R: ListRow>(
                 thumbnails: request.thumbnails,
                 visible: request.visible,
                 local_paths: request.local_paths,
+                compare: request.compare,
                 show_extensions: request.show_extensions,
                 scroll_to: request.scroll_to,
             },
@@ -2959,5 +3013,50 @@ mod tests {
             &mut icons,
         );
         assert!(v.version() > before_zip);
+    }
+
+    /// `same`·`diff` 는 양쪽에, `only-a`·`only-b` 는 이 목록에만 있는 비교 결과를 단 목록
+    fn compared() -> FileListView {
+        let mut v = view(vec![
+            (entry("only-b", false, 1, 1), ""),
+            (entry("same", false, 1, 1), ""),
+            (entry("diff", false, 1, 1), ""),
+            (entry("only-a", false, 1, 1), ""),
+        ]);
+        let other = [entry("same", false, 1, 1), entry("diff", false, 9, 1)];
+        let mine: Vec<FileEntry> = match v.model() {
+            ListModel::Local(rows) => rows.clone(),
+            _ => Vec::new(),
+        };
+        let (marks, _) = crate::app::compare::compare(&mine, &other);
+        v.set_compare(Some(std::sync::Arc::new(marks)));
+        v
+    }
+
+    #[test]
+    fn 한쪽에만_있는_것_선택은_그_항목을_고른다() {
+        // FR-79 — 다른 것(diff)·같은 것(same)은 고르지 않는다
+        let mut v = compared();
+        v.select_compare_only();
+        let picked: Vec<String> = v
+            .selection
+            .iter()
+            .map(|&index| names(&v)[index].clone())
+            .collect();
+        let mut picked = picked;
+        picked.sort();
+        assert_eq!(picked, ["only-a", "only-b"]);
+        assert_eq!(v.compare_counts(), Some((2, 1)));
+    }
+
+    #[test]
+    fn 한쪽에만_있는_것_선택은_기준점과_포커스를_세운다() {
+        // plan 3 인계 — 선택을 바꾸면 anchor·cursor 를 함께 세워야 화살표·미리보기가 엉뚱한 행에서 시작하지 않는다
+        let mut v = compared();
+        v.select_compare_only();
+        let first = v.selection.first().copied();
+        assert!(first.is_some());
+        assert_eq!(v.anchor, first);
+        assert_eq!(v.cursor, first);
     }
 }

@@ -1350,6 +1350,41 @@ impl PanelState {
         self.tabs.active().source.local_path()
     }
 
+    /// 목록을 읽는 중인가 — 폴더 열거나 zip 목차
+    pub fn is_loading(&self) -> bool {
+        self.load.is_loading() || self.zip_load.is_loading()
+    }
+
+    /// 두 패널 비교(FR-79)에 내줄 목록 — 판 번호와 그 폴더의 항목. 로컬 폴더 목록이 아니면
+    /// (원격·zip·검색 결과) 또는 읽는 중이면 `None` 이다
+    pub fn compare_snapshot(&self) -> Option<(u64, &[FileEntry])> {
+        self.local_dir()?;
+        if self.is_loading() {
+            return None;
+        }
+        // 검색 결과·zip 목록이면 `entries()` 가 `None` 이다
+        let rows = self.list.entries()?;
+        Some((self.list.version(), rows))
+    }
+
+    /// 비교 결과를 목록에 내려 준다 (FR-79) — `None` 이면 표시를 거둔다
+    pub fn set_compare_marks(
+        &mut self,
+        marks: Option<std::sync::Arc<crate::app::compare::CompareMarks>>,
+    ) {
+        self.list.set_compare(marks);
+    }
+
+    /// 비교 중이면 (한쪽에만, 다름) 개수 — 상태 줄 요약이 쓴다 (FR-79)
+    pub fn compare_counts(&self) -> Option<(usize, usize)> {
+        self.list.compare_counts()
+    }
+
+    /// 비교 결과에서 이 패널에만 있는 항목을 고른다 (FR-79)
+    pub fn select_compare_only(&mut self) {
+        self.list.select_compare_only();
+    }
+
     /// 활성 탭이 zip 안인가 (FR-78) — 읽기 전용이라 앱이 되돌리기(Ctrl+Z)를 걸지 않는다
     pub fn is_zip(&self) -> bool {
         self.tabs.active().source.zip_location().is_some()
@@ -2603,6 +2638,13 @@ impl PanelState {
                 }
                 if !self.status.is_empty() {
                     ui.colored_label(theme::TEXT_MUTED, &self.status);
+                }
+                // 비교 중이면 그 요약 — 같은 폴더면 칠할 것이 없어 켜졌는지 알 수 없다 (FR-79)
+                if let Some((only, differs)) = self.list.compare_counts() {
+                    ui.colored_label(
+                        theme::TEXT_MUTED,
+                        crate::i18n::dynamic::compare_summary(only, differs),
+                    );
                 }
             },
             |ui| {

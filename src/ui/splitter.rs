@@ -11,7 +11,7 @@ use crate::remote::connection::ConnectionId;
 use crate::remote::url::RemoteUrl;
 use crate::ui::icon_tex::IconTextures;
 use crate::ui::list_common::DropOutcome;
-use crate::ui::menu::{Command, PanelMenuState};
+use crate::ui::menu::{Command, CompareMenu, PanelMenuState};
 use crate::ui::panel::{
     DisplayRules, MenuRequest, PanelOutcome, PanelState, RemoteAction, RemoteMenuPick,
     RenameRequest,
@@ -221,6 +221,8 @@ pub fn show_layout(
     favorites: &[FavoriteEntry],
     // 트리의 드라이브 줄과 그 연결 상태 (T4) — 즐겨찾기와 같은 이유로 앱에 하나뿐이다
     drives: &[DriveRow],
+    // 이 워크스페이스의 비교 짝 (FR-79) — 패널 메뉴의 `비교` 줄이 켜짐을 보인다
+    compare: Option<(PanelId, PanelId)>,
 ) -> LayoutOutcome {
     let mut outcome = LayoutOutcome::default();
     let area = ui.available_rect_before_wrap();
@@ -241,6 +243,16 @@ pub fn show_layout(
     let pressed_at = ctx
         .input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()))
         .flatten();
+    // 비교 후보(활성 탭이 로컬 폴더인 패널 — 배치 차례)는 패널을 가변으로 빌리기 **전에** 모은다.
+    // 패널은 서로를 모르므로 다른 패널의 상태는 트리를 아는 이곳이 내려 준다 (FR-79)
+    let locals: Vec<(PanelId, String)> = computed
+        .panes
+        .iter()
+        .filter_map(|(id, _)| {
+            let dir = panels.get(id)?.local_dir()?;
+            Some((*id, crate::panel::tabs::tab_title(dir)))
+        })
+        .collect();
 
     for (id, rect) in &computed.panes {
         let pane = to_egui_rect(*rect);
@@ -258,7 +270,11 @@ pub fn show_layout(
         let builder = egui::UiBuilder::new()
             .max_rect(pane)
             .id_salt(("pane", id.0));
-        let menu_state = PanelMenuState::for_panes(pane_count);
+        let menu_state = PanelMenuState {
+            can_write: panel.local_dir().is_some(),
+            compare: compare_menu(*id, &locals, compare),
+            ..PanelMenuState::for_panes(pane_count)
+        };
         let requested = ui
             .scope_builder(builder, |ui| {
                 ui.set_clip_rect(pane);
@@ -340,6 +356,30 @@ pub fn show_layout(
 /// 폴더가 바뀌었다」며 떼기 전에 메뉴를 닫아 그 줄이 실행되지 않는다(2026-10-19 사용자 보고)
 fn pressed_in_pane(ui: &egui::Ui, pressed_at: Option<egui::Pos2>, pane: egui::Rect) -> bool {
     pressed_at.is_some() && ui.rect_contains_pointer(pane)
+}
+
+/// 이 패널의 `비교` 줄 상태 (FR-79) — `locals`는 활성 탭이 로컬 폴더인 패널들(배치 차례, 폴더 이름)이다.
+///
+/// 짝에 들어 있으면 켜짐, 이 패널이 로컬이 아니거나 다른 로컬 패널이 없으면 흐림, 하나면 그것,
+/// 여럿이면 고르기다
+pub fn compare_menu(
+    me: PanelId,
+    locals: &[(PanelId, String)],
+    pair: Option<(PanelId, PanelId)>,
+) -> CompareMenu {
+    if pair.is_some_and(|(a, b)| a == me || b == me) {
+        return CompareMenu::On;
+    }
+    if !locals.iter().any(|(id, _)| *id == me) {
+        return CompareMenu::Unavailable;
+    }
+    let others: Vec<(PanelId, String)> =
+        locals.iter().filter(|(id, _)| *id != me).cloned().collect();
+    match others.as_slice() {
+        [] => CompareMenu::Unavailable,
+        [(only, _)] => CompareMenu::With(*only),
+        _ => CompareMenu::Pick(others),
+    }
 }
 
 #[cfg(test)]
@@ -732,5 +772,32 @@ mod tests {
             )),
             "먼저 올라온 조작이 어느 패널 것인지와 함께 남아야 한다"
         );
+    }
+
+    #[test]
+    fn 비교_후보는_다른_로컬_패널이다() {
+        // FR-79 — 둘뿐이면 바로, 여럿이면 고르기, 자기 자신·로컬이 아닌 패널은 후보가 아니다
+        let (a, b, c, remote) = (PanelId(0), PanelId(1), PanelId(2), PanelId(3));
+        let two = [(a, "왼쪽".to_owned()), (b, "오른쪽".to_owned())];
+        assert_eq!(compare_menu(a, &two, None), CompareMenu::With(b));
+        let three = [
+            (a, "왼쪽".to_owned()),
+            (b, "가운데".to_owned()),
+            (c, "오른쪽".to_owned()),
+        ];
+        assert_eq!(
+            compare_menu(b, &three, None),
+            CompareMenu::Pick(vec![(a, "왼쪽".to_owned()), (c, "오른쪽".to_owned())])
+        );
+        // 원격·zip 탭을 보는 패널은 비교할 수 없다
+        assert_eq!(compare_menu(remote, &two, None), CompareMenu::Unavailable);
+        // 다른 로컬 패널이 없다
+        assert_eq!(
+            compare_menu(a, &[(a, "왼쪽".to_owned())], None),
+            CompareMenu::Unavailable
+        );
+        // 짝에 든 패널은 켜짐이다 — 양쪽 모두
+        assert_eq!(compare_menu(a, &two, Some((a, b))), CompareMenu::On);
+        assert_eq!(compare_menu(b, &two, Some((a, b))), CompareMenu::On);
     }
 }

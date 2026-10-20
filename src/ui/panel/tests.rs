@@ -5457,3 +5457,35 @@ fn 로컬_탭의_local_dir은_그_폴더다() {
     let panel = PanelState::new(std::path::PathBuf::from(r"C:\테스트"));
     assert_eq!(panel.local_dir(), Some(std::path::Path::new(r"C:\테스트")));
 }
+
+#[test]
+fn 비교_중이면_상태_줄에_요약이_선다() {
+    // FR-79 — 같은 폴더끼리면 칠할 것이 없어 요약이 켜짐을 알린다
+    let _guard = crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\Users"));
+    panel.pending_dir = std::path::PathBuf::from(r"C:\Docs");
+    panel.pending_nav = PendingNav::None;
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["a.txt", "b.txt"])),
+        &mut icons,
+        &mut cache,
+        &ctx,
+    );
+    let rows = panel.compare_snapshot().expect("로컬 목록").1.to_vec();
+    // 목록 맨 앞은 `..` 줄이라 이름으로 골라 상대 쪽을 만든다
+    let other: Vec<_> = rows
+        .iter()
+        .filter(|row| row.name_string() == "a.txt")
+        .cloned()
+        .collect();
+    let (marks, _) = crate::app::compare::compare(&rows, &other);
+    panel.set_compare_marks(Some(std::sync::Arc::new(marks)));
+    let texts = drawn_texts(&draw_once(&mut panel, &SiteStore::default()));
+    assert!(
+        texts
+            .iter()
+            .any(|text| text == "비교 · 한쪽에만 1 · 다름 0"),
+        "{texts:?}"
+    );
+}
