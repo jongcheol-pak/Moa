@@ -30,7 +30,7 @@ use crate::ui::file_list::{FileListAction, FileListView};
 use crate::ui::icon_tex::{IconTextures, ThumbnailTextures};
 use crate::ui::list_common::{DirSizes, DropOutcome, DropTarget, FileDrag};
 use crate::ui::menu::{Command, PanelMenuState, clamp_menu_pos};
-use crate::ui::panel::workers::{CreateOp, DirLoad, FolderSizes, TreeSearch};
+use crate::ui::panel::workers::{CreateOp, DirLoad, FolderSizes, TreeSearch, ZipLoad};
 use crate::ui::remote_menu::{self, RemoteMenuAction, RemoteTarget};
 use crate::ui::remote_states::{self, FailedAction, RemoteView};
 use crate::ui::session::PanelTabs;
@@ -382,6 +382,10 @@ pub struct PanelState {
     drag_preview: Option<crate::ui::list_common::DragItem>,
     /// 하위 폴더 이름 검색 (FR-70) — 결과를 보이는 중인지는 목록(`is_searching`)이 든다
     search: TreeSearch,
+    /// zip 안 목차 읽기 (FR-78) — 답이 와야 탭이 그 자리로 옮겨 간다
+    zip_load: ZipLoad,
+    /// 읽는 중인 zip 자리와 성공하면 할 일 `(zip 파일, 안 경로, 이동)` — 로컬의 `pending_dir`·`pending_nav`
+    zip_pending: Option<(PathBuf, String, ZipNav)>,
     /// 자세히 보기에서 보이는 폴더 행의 크기 (FR-71) — 폴더를 옮기면 비운다
     sizes: FolderSizes,
     /// 검색 결과를 열어 옮겨 가는 폴더와 거기서 고를 이름(널 종단 UTF-16) (FR-70).
@@ -453,6 +457,8 @@ impl PanelState {
             remote_seq: 0,
             drag_preview: None,
             search: TreeSearch::new(),
+            zip_load: ZipLoad::new(),
+            zip_pending: None,
             sizes: FolderSizes::new(),
             pending_select: None,
             created: None,
@@ -589,6 +595,7 @@ impl PanelState {
             self.start_load(path, PendingNav::None, ctx);
         }
         self.poll_load(ctx, icons, cache);
+        self.poll_zip(icons);
         self.poll_search(icons);
         self.sizes.poll();
         self.poll_watch(ctx);
@@ -596,9 +603,93 @@ impl PanelState {
         if let Some(delay) = self.poll_thumbnails(ctx) {
             ctx.request_repaint_after(delay);
         }
-        if self.load.is_loading() || self.search.is_running() {
+        if self.load.is_loading() || self.search.is_running() || self.zip_load.is_loading() {
             ctx.request_repaint();
         }
+    }
+
+    /// zip 안 자리를 읽기 시작한다 (FR-78) — 진행 중인 로컬 열거·검색은 버린다(그 답이 오면
+    /// zip 화면을 로컬 목록으로 덮는다)
+    fn start_zip(&mut self, archive: PathBuf, inner: String, nav: ZipNav, ctx: &egui::Context) {
+        self.abandon_local_load();
+        self.zip_pending = Some((archive.clone(), inner.clone(), nav));
+        self.zip_load.start(archive, inner, ctx);
+    }
+
+    /// zip 대기를 버린다 — 다른 곳(로컬·원격)으로 가는 요청이 섰을 때
+    fn abandon_zip_load(&mut self) {
+        self.zip_load.cancel();
+        self.zip_pending = None;
+    }
+
+    /// zip 목차의 답을 거둔다 — 성공하면 그때 탭을 그 자리로 옮기고(pending-커밋), 실패하면
+    /// 자리를 지키고 사유를 적는다
+    fn poll_zip(&mut self, icons: &mut IconCache) {
+        let Some(listed) = self.zip_load.poll() else {
+            return;
+        };
+        icons.accept_ext_info(self.zip_load.take_ext_infos());
+        let Some((archive, inner, nav)) = self.zip_pending.take() else {
+            return;
+        };
+        let entries = match listed {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.status = crate::i18n::dynamic::zip_open_failed(&error);
+                return;
+            }
+        };
+        let tab = self.tabs.active_mut();
+        match nav {
+            ZipNav::Enter => tab.enter_zip(archive.clone()),
+            ZipNav::Push => {
+                tab.zip_history.push(inner.clone());
+                tab.set_zip_inner(inner.clone());
+            }
+            ZipNav::Back => {
+                tab.zip_history.back();
+                tab.set_zip_inner(inner.clone());
+            }
+            ZipNav::Forward => {
+                tab.zip_history.forward();
+                tab.set_zip_inner(inner.clone());
+            }
+            ZipNav::None => {}
+        }
+        // zip 안은 감시하지 않는다 — 옛 폴더의 통지가 zip 화면을 로컬 목록으로 덮지 않게 놓는다
+        self.watch = None;
+        self.blocked = None;
+        self.status.clear();
+        // 옛 폴더의 썸네일·폴더 크기를 놓는다 — zip 파일 경로를 그 세대의 열쇠로 쓴다
+        if self.thumbs.set_folder(&archive) {
+            self.thumb_textures.clear();
+            self.sizes.reset();
+        }
+        self.list
+            .set_zip_entries(archive, inner, with_zip_parent_first(entries), icons);
+    }
+
+    /// zip 안에서 한 단계 위로 — 뿌리면 zip 이 있는 폴더로 나온다 (FR-78)
+    fn zip_up(&mut self, ctx: &egui::Context) {
+        let Some((archive, inner)) = self.tabs.active().source.zip_location() else {
+            return;
+        };
+        let archive = archive.to_path_buf();
+        match inner.rsplit_once('/') {
+            Some((parent, _)) => {
+                let parent = parent.to_owned();
+                self.start_zip(archive, parent, ZipNav::Push, ctx);
+            }
+            None if !inner.is_empty() => self.start_zip(archive, String::new(), ZipNav::Push, ctx),
+            None => self.leave_zip(ctx),
+        }
+    }
+
+    /// zip 에서 나와 로컬 히스토리의 현재 칸(= zip 이 있는 폴더)을 다시 읽는다 — 로컬 히스토리는
+    /// 그대로다(들어갈 때 쌓지 않았다)
+    fn leave_zip(&mut self, ctx: &egui::Context) {
+        let folder = self.tabs.active().history.current().clone();
+        self.start_load(folder, PendingNav::None, ctx);
     }
 
     /// 표시 중인 폴더를 감시한다 (FR-10). 이전 폴더의 감시는 여기서 끝난다 —
@@ -620,9 +711,9 @@ impl PanelState {
     /// 감시 통지를 확인해 변경이 있으면 폴더를 다시 읽는다.
     /// 폴더가 열리지 않아 감시가 즉시 끝난 경우에도 통지 1회가 오며, 재열거가 사유를 표시한다
     fn poll_watch(&mut self, ctx: &egui::Context) {
-        // 원격 탭을 보는 동안에는 로컬 감시 통지를 처리하지 않는다 — 이전 폴더의 감시가
-        // 아직 살아 있을 수 있는데, 그 통지로 로컬 열거를 걸면 원격 화면이 로컬 목록으로 덮인다
-        if self.is_remote() {
+        // 원격·zip 탭을 보는 동안에는 로컬 감시 통지를 처리하지 않는다 — 이전 폴더의 감시가
+        // 아직 살아 있을 수 있는데, 그 통지로 로컬 열거를 걸면 그 화면이 로컬 목록으로 덮인다
+        if self.local_dir().is_none() {
             return;
         }
         let Some(watch) = self.watch.as_ref() else {
@@ -662,6 +753,7 @@ impl PanelState {
         {
             self.pending_select = None;
         }
+        self.abandon_zip_load();
         self.pending_dir = path.clone();
         self.pending_nav = nav;
         self.streamed = false;
@@ -781,7 +873,8 @@ impl PanelState {
     ///
     /// 같은 폴더를 다시 읽는 길(F5·감시 갱신·숨김 토글)은 ⓑ가 거짓이라 저절로 걸러진다
     fn try_cache_hit(&mut self, icons: &mut IconCache, cache: &mut DirCache) {
-        if !self.load.is_loading() || self.is_remote() {
+        // zip 에서 나오는 길도 캐시를 타지 않는다 — 되돌릴 자리(`dir()`)가 빈 경로다 (FR-78)
+        if !self.load.is_loading() || self.local_dir().is_none() {
             return;
         }
         if self.list.entries().is_some() && self.list.dir() == self.pending_dir {
@@ -1199,6 +1292,11 @@ impl PanelState {
     /// **원격 탭에서는 로컬 열거를 걸지 않는다** — 원격 목록은 연결 워커에게 다시 물어야 하고
     /// (`request_remote_list`), 그 배선은 연결 화면과 함께 들어온다(T10)
     pub fn refresh(&mut self, ctx: &egui::Context) {
+        if let Some((archive, inner)) = self.tabs.active().source.zip_location() {
+            let (archive, inner) = (archive.to_path_buf(), inner.to_owned());
+            self.start_zip(archive, inner, ZipNav::None, ctx);
+            return;
+        }
         let Some(dir) = self.tabs.active().source.local_path() else {
             return;
         };
@@ -1241,6 +1339,15 @@ impl PanelState {
     /// 활성 탭에서 그 로컬 폴더로 옮긴다 (FR-75) — 주소창 이동과 같아 히스토리에 남는다
     pub fn navigate_to(&mut self, path: PathBuf, ctx: &egui::Context) {
         self.navigate(path, ctx);
+    }
+
+    /// 활성 탭이 보는 **로컬 폴더** — 원격·zip 탭이면 `None` (FR-78).
+    ///
+    /// 쓰기(새 폴더·붙여넣기·드롭)·열거·감시처럼 로컬 폴더에만 있는 일은 이것으로 가른다.
+    /// `dir()`은 원격·zip 탭에서 빈 경로를 주는데, 빈 경로에 이름을 이으면 **현재 작업 폴더**를
+    /// 가리키게 된다
+    pub fn local_dir(&self) -> Option<&Path> {
+        self.tabs.active().source.local_path()
     }
 
     /// 지난번에 거둔 뒤 실제로 옮겨 간 로컬 폴더 (FR-75) — 거두면 비워진다
@@ -1568,10 +1675,9 @@ impl PanelState {
     /// 표시 중인 폴더에 새 폴더를 만든다 (FR-25).
     /// **원격 탭에서는 아무것도 하지 않는다** — 원격 폴더 만들기는 원격 파일 작업(T23)이 맡는다
     pub fn new_folder(&mut self, ctx: &egui::Context) {
-        if self.is_remote() {
+        let Some(dir) = self.local_dir().map(Path::to_path_buf) else {
             return;
-        }
-        let dir = self.dir().to_path_buf();
+        };
         self.create.start(
             dir,
             crate::i18n::panel_kind_folder(),
@@ -1582,10 +1688,9 @@ impl PanelState {
 
     /// 표시 중인 폴더에 빈 텍스트 문서를 만든다 (FR-25). 원격 탭에서는 하지 않는다
     pub fn new_file(&mut self, ctx: &egui::Context) {
-        if self.is_remote() {
+        let Some(dir) = self.local_dir().map(Path::to_path_buf) else {
             return;
-        }
-        let dir = self.dir().to_path_buf();
+        };
         self.create.start(
             dir,
             crate::i18n::panel_kind_file(),
@@ -1701,6 +1806,12 @@ impl PanelState {
     /// 같은 탭을 다시 읽는 `apply_display_rules`는 이 함수를 곧바로 불러 편집을 그대로 둔다.
     /// **이 함수 자체는 편집을 건드리지 않는다** — 그 판정은 부르는 쪽에 있다
     fn reload_active_tab(&mut self, ctx: &egui::Context) {
+        if let Some((archive, inner)) = self.tabs.active().source.zip_location() {
+            let (archive, inner) = (archive.to_path_buf(), inner.to_owned());
+            self.start_zip(archive, inner, ZipNav::None, ctx);
+            return;
+        }
+        self.abandon_zip_load();
         match self.tabs.active().source.local_path() {
             Some(path) => {
                 let path = path.to_path_buf();
@@ -1974,6 +2085,26 @@ impl PanelState {
         match action {
             // 뒤로·앞으로는 소스로 갈린다 — 로컬은 열거가 성공한 뒤에 커서를 옮기고(pending-커밋),
             // 원격은 옮기고 나서 조회를 청한다(낙관적). 대상을 고르는 `peek`은 양쪽이 같다
+            NavAction::Back if self.tabs.active().source.zip_location().is_some() => {
+                let tab = self.tabs.active();
+                match (tab.source.zip_location(), tab.zip_history.peek_back()) {
+                    (Some((archive, _)), Some(inner)) => {
+                        let (archive, inner) = (archive.to_path_buf(), inner.clone());
+                        self.start_zip(archive, inner, ZipNav::Back, ctx);
+                    }
+                    // zip 히스토리의 맨 앞이면 zip 이 있는 폴더로 나온다 (FR-78)
+                    _ => self.leave_zip(ctx),
+                }
+            }
+            NavAction::Forward if self.tabs.active().source.zip_location().is_some() => {
+                let tab = self.tabs.active();
+                if let (Some((archive, _)), Some(inner)) =
+                    (tab.source.zip_location(), tab.zip_history.peek_forward())
+                {
+                    let (archive, inner) = (archive.to_path_buf(), inner.clone());
+                    self.start_zip(archive, inner, ZipNav::Forward, ctx);
+                }
+            }
             NavAction::Back => {
                 if self.is_remote() {
                     if let Some(path) = self.tabs.active().remote_history.peek_back().cloned() {
@@ -2005,7 +2136,7 @@ impl PanelState {
                         self.set_remote_path(parent);
                     }
                 }
-                TabSource::Zip { .. } => {}
+                TabSource::Zip { .. } => self.zip_up(ctx),
             },
             NavAction::Goto(path) => self.navigate(path, ctx),
             // 주소로 여는 일은 앱이 한다 — 여기서는 값만 받아 둔다
@@ -2078,6 +2209,24 @@ impl PanelState {
                     self.open_search_hit(index, ctx);
                     return None;
                 }
+                // zip 안 — 폴더면 그 안으로, `..` 면 위로, 파일은 아무것도 하지 않는다(임시로
+                // 꺼내 열기는 범위 밖 — FR-78)
+                if let Some((archive, inner)) = self.tabs.active().source.zip_location() {
+                    let entry = self.list.zip_at(index)?;
+                    if entry.is_parent() {
+                        self.zip_up(ctx);
+                    } else if entry.is_dir {
+                        let name = entry.name_string();
+                        let target = if inner.is_empty() {
+                            name
+                        } else {
+                            format!("{inner}/{name}")
+                        };
+                        let archive = archive.to_path_buf();
+                        self.start_zip(archive, target, ZipNav::Push, ctx);
+                    }
+                    return None;
+                }
                 let entry = self.list.entry_at(index)?;
                 let dir = self.tabs.active().source.local_path()?;
                 // 첫 줄(`..`)은 위 폴더로 간다. `dir.join("..")`을 그대로 넘기지 않는 이유는
@@ -2090,6 +2239,9 @@ impl PanelState {
                 let target = entry.path_in(dir);
                 if entry.is_dir {
                     self.navigate(target, ctx);
+                } else if crate::fs::zip_archive::is_zip_name(&entry.name_string()) {
+                    // zip 은 폴더처럼 읽기 전용으로 들어간다 — 연결 프로그램은 우클릭 메뉴에 남는다
+                    self.start_zip(target, String::new(), ZipNav::Enter, ctx);
                 } else {
                     shell_host::execute(&target);
                 }
@@ -2108,6 +2260,11 @@ impl PanelState {
                 } else {
                     (Vec::new(), Vec::new())
                 };
+                // zip 안에는 띄울 메뉴가 없다 — 셸 메뉴는 실제 경로가 있어야 하고 원격 메뉴는
+                // 원격 전용이다 (FR-78)
+                if self.tabs.active().source.zip_location().is_some() {
+                    return None;
+                }
                 // 셸 메뉴는 로컬 전용이다 (D21) — 원격 목록의 우클릭은 자체 메뉴가 받는다
                 let Some(folder) = self.tabs.active().source.local_path() else {
                     self.remote_menu_at = Some(pos);
@@ -2420,7 +2577,7 @@ impl PanelState {
                     theme::menu_style(ui);
                     crate::ui::menu::view_items(ui, current_view, &mut picked_view);
                 });
-                if self.load.is_loading() {
+                if self.load.is_loading() || self.zip_load.is_loading() {
                     ui.spinner();
                     ui.colored_label(theme::TEXT_MUTED, crate::i18n::tree_loading());
                 }
@@ -2707,6 +2864,18 @@ impl PanelState {
     ///
     /// 놓은 자리가 이 패널의 목록 밖이면 아무것도 가져가지 않는다 — 페이로드를 남겨 두어야
     /// 실제로 놓인 패널이 가져간다
+    /// 이 패널에 놓으면 어디로 가는가 — zip 탭은 받지 않는다 (FR-78 — 읽기 전용)
+    fn drop_target(&self) -> Option<DropTarget> {
+        match &self.tabs.active().source {
+            TabSource::Local(dir) => Some(DropTarget::Local(dir.clone())),
+            TabSource::Remote { site, path, .. } => Some(DropTarget::Remote {
+                site: *site,
+                dir: path.clone(),
+            }),
+            TabSource::Zip { .. } => None,
+        }
+    }
+
     fn take_drop(&mut self, ui: &egui::Ui, list_rect: egui::Rect) -> Option<DropOutcome> {
         let released = ui.input(|input| input.pointer.any_released());
         if !released {
@@ -2716,15 +2885,9 @@ impl PanelState {
         if !list_rect.contains(pointer) {
             return None;
         }
+        // 받지 않는 자리(zip 탭)면 페이로드를 가져가지 않는다 — 놓은 것은 아무 데도 가지 않는다
+        let target = self.drop_target()?;
         let drag = egui::DragAndDrop::take_payload::<FileDrag>(ui.ctx())?;
-        let target = match &self.tabs.active().source {
-            TabSource::Local(dir) => DropTarget::Local(dir.clone()),
-            TabSource::Remote { site, path, .. } => DropTarget::Remote {
-                site: *site,
-                dir: path.clone(),
-            },
-            TabSource::Zip { .. } => return None,
-        };
         Some(DropOutcome {
             items: drag.items.clone(),
             source_site: drag.source_site,
@@ -2733,12 +2896,30 @@ impl PanelState {
     }
 }
 
+/// zip 목록의 첫 줄에 상위 이동(`..`)을 얹는다 — **뿌리에서도** 얹는다: 그 위가 zip 이 있는
+/// 폴더라 올라갈 곳이 있다 (FR-78). zip 이 `..` 라는 이름을 담았어도 두 벌이 되지 않게 거른다
+fn with_zip_parent_first(entries: Vec<FileEntry>) -> Vec<FileEntry> {
+    parent_row_first(entries)
+}
+
 /// zip 이 있는 폴더 — 부모가 없으면(드라이브 뿌리 자체를 zip 으로 줄 수는 없지만) 시작 폴더다
 fn zip_folder(archive: &Path) -> PathBuf {
     archive
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(crate::ui::app::start_dir)
+}
+
+/// zip 목차가 성공하면 탭의 zip 히스토리에 무엇을 할지 (FR-78) — 로컬의 `PendingNav`와 같은 구실이다
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZipNav {
+    /// 로컬 폴더에서 zip 뿌리로 들어간다 — zip 히스토리를 새로 세운다
+    Enter,
+    Push,
+    Back,
+    Forward,
+    /// 같은 자리를 다시 읽는다(새로 고침·탭 전환)
+    None,
 }
 
 /// 원격 목록의 첫 줄을 언제나 상위 이동(`..`)으로 맞춘다.
@@ -2775,6 +2956,11 @@ fn with_local_parent_first(dir: &Path, entries: Vec<FileEntry>) -> Vec<FileEntry
     if dir.parent().is_none() {
         return entries;
     }
+    parent_row_first(entries)
+}
+
+/// 항목 앞에 `..` 줄을 얹는다 — 로컬·zip 목록이 함께 쓴다
+fn parent_row_first(entries: Vec<FileEntry>) -> Vec<FileEntry> {
     let mut out = Vec::with_capacity(entries.len() + 1);
     out.push(FileEntry {
         // `FileEntry.name`은 널 종단 UTF-16이라는 불변식을 지킨다 — 정렬이 그 형태를 요구한다

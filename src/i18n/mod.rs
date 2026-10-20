@@ -896,6 +896,14 @@ pub mod dynamic {
         }
     }
 
+    /// zip 안을 읽지 못했을 때 상태 줄 문구 (FR-78) — 자리는 그대로 지킨다
+    pub fn zip_open_failed(error: &str) -> String {
+        match current() {
+            Language::Korean => format!("zip 을 열지 못했습니다 — {error}"),
+            Language::English => format!("Could not open the zip — {error}"),
+        }
+    }
+
     /// 상태 줄 실패 알약 (인벤토리 #57) — 종전 `실패 3`은 무엇이 3인지 적지 않았다.
     /// 한국어는 수 뒤에 단위가 붙고 영어는 수가 앞에 선다
     pub fn status_failed_count(count: usize) -> String {
@@ -2201,6 +2209,26 @@ mod tests {
         assert_eq!(palette_source_tab(), "Tab");
         assert_eq!(palette_source_workspace(), "Workspace");
         assert!(palette_placeholder().starts_with("Go to"));
+    }
+
+    #[test]
+    fn zip_문구는_두_언어를_모두_낸다() {
+        // FR-78 — 기대값은 원문 리터럴이고 언어를 잠근다
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(zip_unsafe_name(), "zip 바깥을 가리키는 이름입니다");
+        assert_eq!(zip_bad_name(), "Windows에서 쓸 수 없는 이름입니다");
+        assert_eq!(
+            dynamic::zip_open_failed("깨짐"),
+            "zip 을 열지 못했습니다 — 깨짐"
+        );
+
+        set_language(LanguageSetting::English);
+        assert_eq!(zip_unsafe_name(), "The name points outside the zip");
+        assert_eq!(zip_bad_name(), "The name isn't valid on Windows");
+        assert_eq!(
+            dynamic::zip_open_failed("broken"),
+            "Could not open the zip — broken"
+        );
     }
 
     #[test]
