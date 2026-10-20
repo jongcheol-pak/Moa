@@ -274,6 +274,24 @@ fn is_network_drive(root: &Path) -> bool {
     unsafe { GetDriveTypeW(&root) == DRIVE_REMOTE }
 }
 
+/// 이 경로가 네트워크 너머에 있는가 — UNC(`\\서버\공유`)이거나 네트워크 드라이브 아래다 (FR-71).
+///
+/// 위 `is_network_drive`와 같이 **종류만 묻는다** — 접근을 시도하지 않아 끊긴 드라이브에서도
+/// 즉시 돌아온다. 그래도 Win32 호출이라 워커에서 부른다
+pub fn is_network_path(path: &Path) -> bool {
+    let text = path.to_string_lossy().replace('/', r"\");
+    let text = match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.starts_with(r"UNC\") => return true,
+        Some(rest) => rest.to_owned(),
+        None if text.starts_with(r"\\") => return true,
+        None => text,
+    };
+    match text.get(..2) {
+        Some(drive) if drive.ends_with(':') => is_network_drive(Path::new(&format!(r"{drive}\"))),
+        _ => false,
+    }
+}
+
 /// 이 드라이브에 지금 닿을 수 있는가.
 ///
 /// **끊긴 네트워크 드라이브에서는 첫 시도가 2.8초까지 걸린다**(실측 — 윈도우가 연결을
@@ -399,6 +417,20 @@ mod tests {
         let root = Path::new(r"C:\");
         assert!(!is_network_drive(root), "고정 디스크를 네트워크로 봤다");
         assert!(is_reachable(root), "C 드라이브에 닿지 못했다");
+    }
+
+    #[test]
+    fn unc와_확장_unc는_네트워크_경로다() {
+        // 폴더 크기를 계산하지 않을 자리 (FR-71) — 드라이브 문자가 없어도 네트워크다
+        assert!(is_network_path(Path::new(r"\\server\share\dir")));
+        assert!(is_network_path(Path::new(r"\\?\UNC\server\share")));
+    }
+
+    #[test]
+    fn 로컬_드라이브_아래는_네트워크_경로가_아니다() {
+        assert!(!is_network_path(Path::new(r"C:\Windows")));
+        assert!(!is_network_path(Path::new(r"\\?\C:\Windows")));
+        assert!(!is_network_path(Path::new("C:/Windows")));
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! 실행은 `ui::app`이 한다(패널·워크스페이스 소유자가 거기이기 때문).
 use crate::app::layout::{SplitDir, SplitPlace};
 use crate::remote::types::SiteId;
-use crate::ui::list_details::{ALL_COLUMNS, ColumnFlags, ColumnKind};
+use crate::ui::list_details::{ColumnFlags, ColumnKind, MENU_COLUMNS};
 use crate::ui::queue_panel::QueueColumnKind;
 use crate::ui::shell_host::AppNav;
 use crate::ui::theme;
@@ -195,7 +195,7 @@ pub fn column_menu_items(ui: &mut egui::Ui, flags: ColumnFlags, out: &mut Option
             .size(COLUMN_MENU_CAPTION_PX)
             .color(theme::TEXT_MUTED),
     );
-    for kind in ALL_COLUMNS {
+    for kind in MENU_COLUMNS {
         // 행 높이는 적지 않는다 — `menu_style`이 세운 공통 값(`theme::MENU_ITEM_HEIGHT`)을 따른다
         let button = egui::Button::new(column_menu_label(ui, kind, flags.shows(kind)));
         // 고정 열도 그리기는 한다 — 클릭만 무시한다(원본과 같은 동작).

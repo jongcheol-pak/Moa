@@ -1243,6 +1243,7 @@ mod tests {
             size: 0,
             modified: 0,
             attributes: 0,
+            location: None,
         }
     }
 

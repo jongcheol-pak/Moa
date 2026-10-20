@@ -104,6 +104,8 @@ pub struct AddressBarOutcome {
     pub nav: Option<NavAction>,
     /// 사용자가 필터란을 고쳤으면 그 새 값 — 고치지 않았으면 `None`이다 (FR-65)
     pub filter: Option<String>,
+    /// 필터란에서 Enter 를 눌렀다 — 하위 폴더 검색을 시작하라는 뜻이다 (FR-70)
+    pub filter_submitted: bool,
 }
 
 /// 주소 스트립 상태 — 편집 중인 문자열만 보유한다(경로 정본은 패널이 갖는다)
@@ -112,6 +114,9 @@ pub struct AddressBar {
     buffer: String,
     /// 사용자가 입력란을 건드린 뒤인가 — 편집 중에는 폴더가 바뀌어도 버퍼를 덮지 않는다
     editing: bool,
+    /// 마지막으로 그린 필터란의 위젯 id — 시험이 그 칸에 포커스를 주는 데 쓴다
+    #[cfg(test)]
+    filter_id: Option<egui::Id>,
 }
 
 impl Default for AddressBar {
@@ -125,6 +130,8 @@ impl AddressBar {
         AddressBar {
             buffer: String::new(),
             editing: false,
+            #[cfg(test)]
+            filter_id: None,
         }
     }
 
@@ -143,6 +150,7 @@ impl AddressBar {
     ) -> AddressBarOutcome {
         let mut action = None;
         let mut filter_changed = None;
+        let mut filter_submitted = false;
         if !self.editing {
             let shown = target.display_text();
             if self.buffer != shown {
@@ -212,8 +220,17 @@ impl AddressBar {
                     .desired_width(filter_width)
                     .hint_text(crate::i18n::address_filter_hint())
                     .text_color(theme::TEXT);
-                if ui.add(filter_edit).changed() {
+                let filter_resp = ui.add(filter_edit);
+                if filter_resp.changed() {
                     filter_changed = Some(text);
+                }
+                // Enter 는 한 줄 입력칸의 포커스를 거두므로 그 프레임에 함께 본다 — 주소칸과 같은 판정
+                if filter_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    filter_submitted = true;
+                }
+                #[cfg(test)]
+                {
+                    self.filter_id = Some(filter_resp.id);
                 }
             })
             .response
@@ -230,6 +247,7 @@ impl AddressBar {
         AddressBarOutcome {
             nav: action,
             filter: filter_changed,
+            filter_submitted,
         }
     }
 }
@@ -279,6 +297,58 @@ mod tests {
 
     /// egui 기본 가로 간격 — 시험이 그 값에 매이지 않게 한 곳에 적는다
     const GAP: f32 = 8.0;
+
+    /// 주소 스트립을 한 프레임 그리고 결과를 돌려준다 — 같은 `Context`를 이어 쓴다
+    fn frame(
+        ctx: &egui::Context,
+        bar: &mut AddressBar,
+        events: Vec<egui::Event>,
+    ) -> AddressBarOutcome {
+        let mut out = None;
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                out = Some(bar.show(
+                    ui,
+                    AddressTarget::Local(Path::new(r"C:\")),
+                    false,
+                    false,
+                    "abc",
+                ));
+            });
+        });
+        out.expect("스트립을 그리지 않았다")
+    }
+
+    fn enter() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn 필터란에서_enter를_누르면_검색_요청을_올린다() {
+        // FR-70 — 하위 폴더 검색은 필터란의 Enter 로 시작한다
+        let ctx = egui::Context::default();
+        let mut bar = AddressBar::new();
+        let _ = frame(&ctx, &mut bar, Vec::new());
+        let id = bar.filter_id.expect("필터란 id가 없다");
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        let idle = frame(&ctx, &mut bar, Vec::new());
+        assert!(!idle.filter_submitted, "Enter 없이 검색 요청이 올라갔다");
+        let pressed = frame(&ctx, &mut bar, vec![enter()]);
+        assert!(
+            pressed.filter_submitted,
+            "필터란 Enter 가 검색 요청으로 올라가지 않았다"
+        );
+    }
 
     #[test]
     fn 넓으면_필터란이_고정_폭을_갖는다() {

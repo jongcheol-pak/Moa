@@ -28,9 +28,9 @@ use crate::ui::address_bar::{AddressBar, AddressTarget, NavAction};
 use crate::ui::drag_preview;
 use crate::ui::file_list::{FileListAction, FileListView};
 use crate::ui::icon_tex::{IconTextures, ThumbnailTextures};
-use crate::ui::list_common::{DropOutcome, DropTarget, FileDrag};
+use crate::ui::list_common::{DirSizes, DropOutcome, DropTarget, FileDrag};
 use crate::ui::menu::{Command, PanelMenuState, clamp_menu_pos};
-use crate::ui::panel::workers::{CreateOp, DirLoad};
+use crate::ui::panel::workers::{CreateOp, DirLoad, FolderSizes, TreeSearch};
 use crate::ui::remote_menu::{self, RemoteMenuAction, RemoteTarget};
 use crate::ui::remote_states::{self, FailedAction, RemoteView};
 use crate::ui::session::PanelTabs;
@@ -374,6 +374,14 @@ pub struct PanelState {
     /// 그림을 이 패널이 그리는 이유는 썸네일 텍스처(`thumb_textures`)를 패널이 쥐기 때문이다 —
     /// 앱에는 썸네일 캐시가 없어 첫 항목의 썸네일에 닿을 길이 없다 (plan D5)
     drag_preview: Option<crate::ui::list_common::DragItem>,
+    /// 하위 폴더 이름 검색 (FR-70) — 결과를 보이는 중인지는 목록(`is_searching`)이 든다
+    search: TreeSearch,
+    /// 자세히 보기에서 보이는 폴더 행의 크기 (FR-71) — 폴더를 옮기면 비운다
+    sizes: FolderSizes,
+    /// 검색 결과를 열어 옮겨 가는 폴더와 거기서 고를 이름(널 종단 UTF-16) (FR-70).
+    ///
+    /// 그 폴더의 목록이 서면(캐시 적중·완료 조각) 그 이름을 고르고, 완료 조각에서 비운다
+    pending_select: Option<(PathBuf, Vec<u16>)>,
     /// 썸네일 픽셀 캐시 (FR-24) — 상한이 패널당이라 패널이 소유한다 (NFR-9)
     thumbs: ThumbnailCache,
     /// 올라간 썸네일 텍스처 — 픽셀 캐시와 함께 비워진다
@@ -435,6 +443,9 @@ impl PanelState {
             remote_dirty: false,
             remote_seq: 0,
             drag_preview: None,
+            search: TreeSearch::new(),
+            sizes: FolderSizes::new(),
+            pending_select: None,
             thumbs: ThumbnailCache::new(),
             thumb_textures: ThumbnailTextures::new(),
         }
@@ -566,12 +577,14 @@ impl PanelState {
             self.start_load(path, PendingNav::None, ctx);
         }
         self.poll_load(ctx, icons, cache);
+        self.poll_search(icons);
+        self.sizes.poll();
         self.poll_watch(ctx);
         self.poll_create(ctx);
         if let Some(delay) = self.poll_thumbnails(ctx) {
             ctx.request_repaint_after(delay);
         }
-        if self.load.is_loading() {
+        if self.load.is_loading() || self.search.is_running() {
             ctx.request_repaint();
         }
     }
@@ -608,7 +621,8 @@ impl PanelState {
         while watch.rx.try_recv().is_ok() {
             changed = true;
         }
-        if changed {
+        // 검색 결과를 보이는 동안에는 다시 읽지 않는다 (FR-70) — 결과가 예고 없이 폴더 목록으로 바뀐다
+        if changed && !self.list.is_searching() {
             let dir = self.dir().to_path_buf();
             self.start_load(dir, PendingNav::None, ctx);
             ctx.request_repaint();
@@ -625,6 +639,16 @@ impl PanelState {
         // (변경 감시(FR-10)·F5·숨김 토글)에서 지우면 사용자가 치던 글자가 예고 없이 사라진다
         if path != self.dir() {
             self.list.set_filter("");
+        }
+        // 어느 길로 새로 읽든 검색은 접는다 (FR-70) — 결과는 폴더 목록이 서면 내려간다
+        self.search.cancel();
+        // 검색 결과를 열어 옮겨 가는 폴더가 아니면 고를 이름도 버린다
+        if self
+            .pending_select
+            .as_ref()
+            .is_some_and(|(dir, _)| *dir != path)
+        {
+            self.pending_select = None;
         }
         self.pending_dir = path.clone();
         self.pending_nav = nav;
@@ -727,6 +751,8 @@ impl PanelState {
         // 이 해제는 세대를 올리는 지점이기도 해서, 늦게 도착한 이전 폴더의 결과도 함께 걸러진다
         if self.thumbs.set_folder(dir) {
             self.thumb_textures.clear();
+            // 폴더 크기도 그 폴더의 것이다 — 옛 폴더의 계산은 멈춘다 (FR-71)
+            self.sizes.reset();
         }
     }
 
@@ -768,6 +794,21 @@ impl PanelState {
         self.watch(&dir);
         // 캐시는 `..` 줄이 포함된 최종 목록이다 — 다시 붙이지 않는다 (계획 D7)
         self.list.set_entries(dir, entries, icons);
+        self.select_pending(false);
+    }
+
+    /// 검색 결과를 열어 옮겨 온 폴더의 목록이 섰으면 그 항목을 고른다 (FR-70).
+    /// `done`이면 이 요청이 끝났으므로 고를 이름을 버린다
+    fn select_pending(&mut self, done: bool) {
+        if let Some((dir, name)) = &self.pending_select
+            && self.list.entries().is_some()
+            && self.list.dir() == dir
+        {
+            self.list.select_name(name);
+        }
+        if done {
+            self.pending_select = None;
+        }
     }
 
     /// 다 읽지 못한 폴더의 중간 몫을 반영한다 (FR-69).
@@ -908,6 +949,7 @@ impl PanelState {
                 if let Some(rows) = self.list.entries() {
                     cache.put(&dir, rows);
                 }
+                self.select_pending(true);
             }
             // 읽지 못했어도 **그 폴더로 옮긴다** (2026-08-16·2026-08-17 사용자 요청) —
             // 이전 목록을 그대로 두면 주소창·트리가 가리키는 곳과 목록이 갈린다. 사유는
@@ -941,6 +983,8 @@ impl PanelState {
             }
         }
         self.pending_nav = PendingNav::None;
+        // 고를 이름은 그 폴더를 다 읽은 위에서만 쓴다 — 실패한 요청에 남기면 다음 탐색이 쓴다
+        self.pending_select = None;
         // 이 요청의 조각은 여기서 끝났다 — 깃발을 내려 수명을 「이번 요청 동안」으로 못 박는다.
         // 남겨 두면 다음 탐색이 시작되기 전까지 참으로 남아, 그 사이에 이 값을 보는 코드가
         // 생기면 「아직 흘리는 중」으로 오판한다
@@ -1141,6 +1185,8 @@ impl PanelState {
             return;
         };
         let dir = dir.to_path_buf();
+        // `F5`는 크기도 다시 잰다 — 그동안 폴더 안이 바뀌었을 수 있다 (FR-71)
+        self.sizes.reset();
         self.start_load(dir, PendingNav::None, ctx);
     }
 
@@ -1328,9 +1374,99 @@ impl PanelState {
         }
     }
 
+    /// 이름 필터의 글자로 이 폴더 아래를 훑는다 (FR-70) — 필터란에서 Enter 를 눌렀을 때.
+    ///
+    /// 로컬 탭에서 필터가 비지 않았을 때만 시작한다. 떠 있던 폴더 열거는 버린다 — 늦게 끝나면
+    /// 검색 결과를 폴더 목록으로 덮는다
+    fn start_search(&mut self, ctx: &egui::Context) {
+        let needle = self.list.filter().to_lowercase();
+        if needle.is_empty() {
+            return;
+        }
+        let Some(root) = self
+            .tabs
+            .active()
+            .source
+            .local_path()
+            .map(Path::to_path_buf)
+        else {
+            return;
+        };
+        self.abandon_local_load();
+        let (show_hidden, show_system) = self.list.hidden_rules();
+        self.sizes.reset();
+        self.list.begin_search(root.clone());
+        self.search.start(
+            root,
+            needle,
+            crate::fs::search::SearchRules {
+                show_hidden,
+                show_system,
+            },
+            ctx,
+        );
+    }
+
+    /// 필터란 글자가 바뀌었다 (FR-65). 검색 결과를 보이는 중이면 검색을 접고 이 폴더를 다시
+    /// 읽는다 (FR-70) — 같은 폴더라 필터는 남는다(`start_load`)
+    fn change_filter(&mut self, text: &str, ctx: &egui::Context) {
+        if self.list.is_searching() {
+            let dir = self.dir().to_path_buf();
+            self.start_load(dir, PendingNav::None, ctx);
+        }
+        // 폴더를 다시 읽지 않는다 — 목록이 원본에서 그 자리에서 다시 만든다 (D1)
+        self.list.set_filter(text);
+    }
+
+    /// 검색 워커가 보낸 결과를 목록에 붙인다 (FR-70) — 한 프레임에 온 것은 모아 한 번에 붙인다
+    /// (`poll_load`와 같은 이유 — 붙일 때마다 병합이 돈다)
+    fn poll_search(&mut self, icons: &mut IconCache) {
+        let mut hits: Vec<FileEntry> = Vec::new();
+        while let Some(event) = self.search.poll() {
+            icons.accept_ext_info(self.search.take_ext_infos());
+            if let crate::fs::search::SearchEvent::Hits(entries) = event {
+                hits.extend(entries);
+            }
+        }
+        // 그새 폴더 목록이 섰으면(탭 전환·원격 전환) 이 결과는 갈 곳이 없다
+        if !self.list.is_searching() {
+            if self.search.is_running() {
+                self.search.cancel();
+            }
+            return;
+        }
+        if !hits.is_empty() {
+            self.list.append_entries(hits, icons);
+        }
+    }
+
+    /// 검색 결과 한 줄을 연다 (FR-70) — 파일이든 폴더든 **그 항목이 있는 폴더로 옮겨 그것을 고른다**.
+    ///
+    /// 필터는 비운다 — 남기면 옮겨 간 폴더가 걸러진 채 보인다. 그 사이 항목이 사라졌어도
+    /// 폴더로 옮길 뿐 실행하지 않는다
+    fn open_search_hit(&mut self, index: usize, ctx: &egui::Context) -> Option<()> {
+        let entry = self.list.entry_at(index)?;
+        let root = self.list.dir().to_path_buf();
+        let folder = match entry.location() {
+            Some(sub) => root.join(sub),
+            None => root,
+        };
+        self.pending_select = Some((folder.clone(), entry.name.to_vec()));
+        self.list.set_filter("");
+        let nav = if folder == self.dir() {
+            PendingNav::None
+        } else {
+            PendingNav::Push
+        };
+        self.start_load(folder, nav, ctx);
+        Some(())
+    }
+
     /// 진행 중인 로컬 열거를 버리고 그에 딸린 상태(대기 경로·이동 방향·상태 문구)를 지운다
     fn abandon_local_load(&mut self) {
         self.load.cancel();
+        self.search.cancel();
+        self.pending_select = None;
         self.pending_dir = PathBuf::new();
         self.pending_nav = PendingNav::None;
         self.streamed = false;
@@ -1830,7 +1966,7 @@ impl PanelState {
         let dir = self.tabs.active().source.local_path()?;
         let entry = self.list.entry_at(*index)?;
         Some(RenameRequest {
-            path: dir.join(entry.name_string()),
+            path: entry.path_in(dir),
             new_name: new_name.clone(),
         })
     }
@@ -1871,6 +2007,10 @@ impl PanelState {
                     self.open_remote_entry(index);
                     return None;
                 }
+                if self.list.is_searching() {
+                    self.open_search_hit(index, ctx);
+                    return None;
+                }
                 let entry = self.list.entry_at(index)?;
                 let dir = self.tabs.active().source.local_path()?;
                 // 첫 줄(`..`)은 위 폴더로 간다. `dir.join("..")`을 그대로 넘기지 않는 이유는
@@ -1880,7 +2020,7 @@ impl PanelState {
                     self.navigate(parent, ctx);
                     return None;
                 }
-                let target = dir.join(entry.name_string());
+                let target = entry.path_in(dir);
                 if entry.is_dir {
                     self.navigate(target, ctx);
                 } else {
@@ -1906,7 +2046,8 @@ impl PanelState {
                     self.remote_menu_at = Some(pos);
                     return None;
                 };
-                let folder = folder.to_path_buf();
+                let (folder, items, dirs) =
+                    narrow_to_first_folder(folder.to_path_buf(), items, dirs);
                 Some(MenuRequest {
                     folder,
                     items,
@@ -2020,8 +2161,10 @@ impl PanelState {
             .show(ui, target, can_back, can_forward, self.list.filter());
         let nav = address.nav;
         if let Some(text) = address.filter {
-            // 폴더를 다시 읽지 않는다 — 목록이 원본에서 그 자리에서 다시 만든다 (D1)
-            self.list.set_filter(&text);
+            self.change_filter(&text, ctx);
+        }
+        if address.filter_submitted {
+            self.start_search(ctx);
         }
 
         // 상태 줄은 트리 위까지 걸쳐 **패널 전폭**을 쓴다 — 트리 토글이 자기가 여는 트리
@@ -2207,6 +2350,15 @@ impl PanelState {
                     ui.spinner();
                     ui.colored_label(theme::TEXT_MUTED, crate::i18n::tree_loading());
                 }
+                if self.search.is_running() {
+                    ui.spinner();
+                    ui.colored_label(theme::TEXT_MUTED, crate::i18n::search_running());
+                } else if self.list.is_searching() && self.search.truncated() {
+                    ui.colored_label(
+                        theme::TEXT_MUTED,
+                        crate::i18n::dynamic::search_truncated(workers::SEARCH_LIMIT),
+                    );
+                }
                 if !self.status.is_empty() {
                     ui.colored_label(theme::TEXT_MUTED, &self.status);
                 }
@@ -2220,12 +2372,19 @@ impl PanelState {
                     // "빈 폴더"라는 없는 말을 하게 된다 (인벤토리 #95)
                     ui.colored_label(theme::TEXT_MUTED, remote_states::UNKNOWN_COUNT);
                 } else if !self.load.is_loading() {
-                    // 읽는 중에는 세지 않는다 — 이전 폴더의 수가 남아 새 폴더의 것처럼 보인다
-                    let (dirs, files) = self.list.counts();
-                    ui.colored_label(
-                        theme::TEXT_MUTED,
-                        crate::i18n::dynamic::item_counts(dirs, files),
-                    );
+                    // 읽는 중에는 세지 않는다 — 이전 폴더의 수가 남아 새 폴더의 것처럼 보인다.
+                    // 고른 것이 있으면 그 수와 파일 크기 합을 대신 보인다 (FR-72)
+                    let text = match self.list.selection_summary() {
+                        Some((count, bytes)) => crate::i18n::dynamic::selection_summary(
+                            count,
+                            &crate::panel::file_list::format_size(bytes),
+                        ),
+                        None => {
+                            let (dirs, files) = self.list.counts();
+                            crate::i18n::dynamic::item_counts(dirs, files)
+                        }
+                    };
+                    ui.colored_label(theme::TEXT_MUTED, text);
                 }
             },
         );
@@ -2334,9 +2493,21 @@ impl PanelState {
         // 유일한 지점이다(그리기는 텍스처만 보고 픽셀 캐시를 건드리지 않는다)
         let mut visible = Vec::new();
         let list_rect = ui.available_rect_before_wrap();
-        let interaction = self
-            .list
-            .show(ui, icons, textures, &self.thumb_textures, &mut visible);
+        let mut sizes = DirSizes {
+            known: self.sizes.known(),
+            wanted: Vec::new(),
+        };
+        let interaction = self.list.show(
+            ui,
+            icons,
+            textures,
+            &self.thumb_textures,
+            &mut visible,
+            &mut sizes,
+        );
+        // 보이는 폴더 행 중 크기를 모르는 것만 요청한다 (FR-71)
+        let wanted = sizes.wanted;
+        self.sizes.request(wanted, ui.ctx());
         // 도장이 바뀐 파일(같은 이름의 새 내용)은 `request`가 다시 만든다
         for (path, stamp) in visible {
             self.thumbs.request(&path, stamp);
@@ -2534,7 +2705,33 @@ fn with_local_parent_first(dir: &Path, entries: Vec<FileEntry>) -> Vec<FileEntry
         // 실제 파일이 아니라 화면 장치다 — 어떤 필터에도 걸리지 않게 속성을 비운다.
         // 숨김 항목을 꺼도 `..`는 첫 줄에 남아야 한다 (FR-31)
         attributes: 0,
+        location: None,
     });
     out.extend(entries.into_iter().filter(|entry| !entry.is_parent()));
     out
+}
+
+/// 셸 메뉴 대상을 **첫 항목과 같은 폴더의 것으로** 좁힌다 — 검색 결과는 여러 폴더에 걸칠 수 있다 (FR-70).
+///
+/// 셸 메뉴는 대상들의 공통 부모 폴더에서 만들어진다(`fs::shell_menu`) — 부모가 다른 항목을 섞어
+/// 넘기면 첫 항목의 폴더에 없는 이름을 묻게 된다. 그 폴더가 메뉴의 폴더가 된다.
+/// 한 폴더의 목록이면 아무것도 빠지지 않는다
+fn narrow_to_first_folder(
+    folder: PathBuf,
+    items: Vec<PathBuf>,
+    dirs: Vec<bool>,
+) -> (PathBuf, Vec<PathBuf>, Vec<bool>) {
+    let Some(parent) = items
+        .first()
+        .and_then(|first| first.parent())
+        .map(Path::to_path_buf)
+    else {
+        return (folder, items, dirs);
+    };
+    let (items, dirs) = items
+        .into_iter()
+        .zip(dirs)
+        .filter(|(item, _)| item.parent() == Some(parent.as_path()))
+        .unzip();
+    (parent, items, dirs)
 }

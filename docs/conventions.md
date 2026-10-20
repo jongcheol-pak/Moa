@@ -94,6 +94,7 @@
 - [2026-08-18] **`i18n::LanguageGuard::lock`은 비재진입 `Mutex`다** — 한 시험 함수 안에서 두 언어를 잇달아 잠그면(`let _guard = lock(한국어); let _guard = lock(English);`) 두 번째에서 **영구 대기**하고, `cargo test`에 상한이 없어 스위트가 통째로 멎는다(2026-08-18 실측 10분 초과). 두 언어를 견주는 시험은 각 잠금을 **별도 `{ }` 블록**으로 끊어 앞 guard를 drop시킨다. 멎은 뒤 남은 시험 프로세스가 출력 파일을 잡고 있으면 다음 빌드가 `link.exe exit 1104`로 실패하므로 그 프로세스를 먼저 정리한다. 셸 잠금(`fs::icons::shell_guard`)의 재진입 데드락과 같은 부류이며, **이 레포에는 그런 전역 잠금이 둘 있다**는 것을 기억할 것.
 
 - [2026-08-17] **셸 직렬화 잠금은 자원을 만지는 함수가 잡고, 조합 함수와 private 내부는 잡지 않는다** — 잡는 곳 8(`IconCache::new`·`ext_icon`·`lookup_by_path`·`lookup_ext`·`shell_display_name`·`type_name`·`known_folders::known_folder`·`ui::icon_tex::icon_to_image`), **잡지 않는 곳 6**(`system_image_list`·`lookup_by_attributes`는 위 함수 안에서만 불리는 private, `icon_index`·`icon_index_for_path`는 `ext_icon`·`lookup_by_path`를 부르는 조합 메서드, `fs::drives::list_drives`·`fs::known_folders::default_favorites`는 안에서 잠금 함수를 부르는 조합 함수 — 2026-09-28 갱신). `lookup_by_path`·`lookup_ext`·`icon_to_image`는 **워커 스레드**(경로 아이콘·열거·텍스처 변환)에서도 불려, 시험 빌드에서는 그 조회 동안 다른 시험의 셸 호출이 기다린다. **여섯 중 하나라도 잠그면 `std::sync::Mutex` 재진입으로 `cargo test`가 상한 없이 멎는다.** 잡는 자리도 정해져 있다 — **캐시 조회·조기 반환 뒤(셸 호출 직전)**이며, 함수 첫 줄에 두면 렌더 경로가 프레임마다 전역 잠금을 잡아 **스위트가 10분을 넘긴다**(실측). 이 영역을 고칠 때는 `--no-run`으로 빌드를 분리하고 lib 하네스에 시간 제한을 씌워 돌린다(하네스는 `--message-format=json`의 `executable`로 특정 — `moa-*.exe`가 6개라 와일드카드로 고르면 시험 0건짜리를 집는다).
+- [2026-10-20] **`fs::shell_menu_worker::tests::배경_메뉴의_하위_메뉴를_채운다`는 전체 `cargo test`에서 간헐 실패하는 기존 시험이다** — 「펼친 결과가 와야 한다: None」(`shell_menu_worker.rs:442`, 실제 셸 확장 `새로 만들기`의 펼침 답을 10초 기다리다 놓침). BASE `45f9edd`에서도 전체 실행 4회 중 2회 실패하고 단독 실행은 통과한다 — **그 파일을 건드리지 않은 회차의 실패를 자기 변경 탓으로 읽지 말고 BASE 반복 실행으로 가른다.** 원인(병렬 부하에서 셸 확장 로드가 10초를 넘는가)은 미확정이다 (실측)
 
 ### 실행 시간·하네스
 
@@ -114,6 +115,9 @@
 - [2026-08-15] **죽은 `pub` 함수·상수를 `cargo clippy --all-targets -- -D warnings`가 잡지 못한다** — `src/lib.rs`가 `pub mod ui;` 등으로 재수출하는 bin+lib 구성이라 lib의 공개 표면은 dead_code 대상이 아니다(2026-08-27까지 실행 경로 밖 Win32 구현이 남은 채 린트가 통과해 온 이유다 — 그 코드는 지금 삭제됐지만 이 성질은 그대로다). 반대로 **비공개(`const`·`fn`)는 여전히 경고 대상**이라, 시험만 참조하게 되는 비공개 상수를 남기면 `-D warnings`가 깨진다. 즉 호출부가 사라지는 심볼은 계획이 직접 제거 여부를 정해야 한다
 
 - [2026-10-19] 「열어 둔 파일은 지우지 못한다」에 기대는 시험은 `std::fs::File::open`으로 열면 성립하지 않는다 — Rust 표준은 Windows에서 FILE_SHARE_DELETE를 허용해 열린 채로도 지워진다. 지우기 실패를 결정적으로 만들려면 `std::os::windows::fs::OpenOptionsExt::share_mode(0)`으로 연다(`remote::transfer`의 `.part` 재시도 시험 선례) (실측)
+- [2026-10-20] **`src/ui/panel/tests.rs`는 `mod tests { }`로 감싸지 않은 파일이다** — 다른 시험 파일처럼 「끝 `}`를 떼고 시험을 붙인 뒤 `}`를 다시 단다」로 덧붙이면 새 시험이 **마지막 시험 함수 안에** 들어가 한 번도 돌지 않는다. 빌드·clippy·시험 모두 통과하고 남는 것은 `warning: cannot test inner items` 한 줄뿐이다(변이 확인에서 드러났다). 그 파일에는 맨 끝에 그대로 덧붙인다 (실측)
+- [2026-10-20] **이 PC의 Git Bash에서 `git grep`은 한글 패턴에 0건을 낸다** — `git grep -n '하위 폴더를 훑는' docs/prd.md`가 0인데 `grep -c` 는 1이었다. 0을 「없다」로 읽으면 계획의 착수값과 잔존 확인이 틀린다. 한글 리터럴의 계수·잔존 확인은 `grep -c`(또는 `rg`)로 한다 (실측)
+- [2026-10-20] **verify-moa에서 Karina `click --modifiers CmdOrCtrl|Shift`는 MOA에 수식 키로 닿지 않는다** — 두 번 모두 단일 클릭으로 처리돼 선택이 바뀌기만 했다. 여러 항목을 고른 화면은 화면 조작으로 만들 수 없으니, 그 규칙은 패널 시험(`toggle_select`로 고른 뒤 프레임을 그려 글자를 재는 형태)으로 잰다. 병렬 두 클릭 더블클릭도 직전 `shot.ps1`의 창 올리기 바로 뒤에는 선택만 됐다 — 빈 자리를 한 번 누르고 0.8초 쉰 뒤 120ms 간격으로 띄우면 열렸다 (실측)
 
 ## conventions — egui·화면 계층
 

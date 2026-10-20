@@ -304,6 +304,8 @@ strings! {
     address_up => "상위 폴더" / "Up";
     /// 주소창 오른쪽 이름 필터 입력란의 자리표시자 (FR-65)
     address_filter_hint => "이름으로 거르기" / "Filter by name";
+    /// 필터란 Enter 로 시작한 하위 폴더 검색이 도는 동안 상태 줄에 붙는다 (FR-70)
+    search_running => "하위 폴더에서 찾는 중…" / "Searching subfolders…";
 
     // ── 폴더 트리 (FR-9) ──
     /// 아직 읽는 중인 노드의 자리 표시 — 로컬·원격 트리가 같은 문구를 쓴다
@@ -330,6 +332,8 @@ strings! {
     column_modified => "수정한 날짜" / "Date modified";
     column_permissions => "권한" / "Permissions";
     column_owner => "소유자" / "Owner";
+    /// 하위 폴더 검색 결과에만 서는 열 — 검색 시작 폴더 기준 상대 폴더 (FR-70)
+    column_location => "경로" / "Path";
     /// 상태 표시줄의 큐 토글 (인벤토리 #53)
     status_queue => "전송 큐" / "Transfer queue";
     /// 실패 알약의 낱말 (인벤토리 #57) — 건수는 `dynamic::status_failed_count`가 붙인다
@@ -863,6 +867,22 @@ pub mod dynamic {
             Language::Korean => format!("구성 요소 {count}개"),
             Language::English if count == 1 => "1 component".to_owned(),
             Language::English => format!("{count} components"),
+        }
+    }
+
+    /// 하위 폴더 검색이 상한에서 끊겼을 때 상태 줄 문구 (FR-70)
+    pub fn search_truncated(limit: usize) -> String {
+        match current() {
+            Language::Korean => format!("결과가 많아 처음 {limit}개만 보입니다"),
+            Language::English => format!("Too many results — showing the first {limit}"),
+        }
+    }
+
+    /// 상태 줄의 선택 통계 — 고른 수와 파일 크기 합 (FR-72). 크기 문자열은 호출부가 만든다
+    pub fn selection_summary(count: usize, size: &str) -> String {
+        match current() {
+            Language::Korean => format!("{count}개 선택 · {size}"),
+            Language::English => format!("{count} selected · {size}"),
         }
     }
 
@@ -1678,6 +1698,34 @@ mod tests {
         // 영어는 한 개일 때 복수형을 쓰지 않는다
         assert_eq!(dynamic::local_copy_cancelled(1), "Copy stopped — 1 item");
         assert_eq!(dynamic::local_copy_cancelled(3), "Copy stopped — 3 items");
+    }
+
+    #[test]
+    fn 검색과_선택_통계_문구는_두_언어를_모두_낸다() {
+        // FR-70·FR-72 — 기대값은 원문 리터럴이고 언어를 잠근다
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(search_running(), "하위 폴더에서 찾는 중…");
+        assert_eq!(column_location(), "경로");
+        assert_eq!(
+            dynamic::search_truncated(100_000),
+            "결과가 많아 처음 100000개만 보입니다"
+        );
+        assert_eq!(
+            dynamic::selection_summary(3, "1.20 MB"),
+            "3개 선택 · 1.20 MB"
+        );
+
+        set_language(LanguageSetting::English);
+        assert_eq!(search_running(), "Searching subfolders…");
+        assert_eq!(column_location(), "Path");
+        assert_eq!(
+            dynamic::search_truncated(100_000),
+            "Too many results — showing the first 100000"
+        );
+        assert_eq!(
+            dynamic::selection_summary(3, "1.20 MB"),
+            "3 selected · 1.20 MB"
+        );
     }
 
     #[test]
