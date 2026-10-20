@@ -1129,7 +1129,15 @@ fn 열_차례가_세션을_왕복한다() {
     // 빠진 키는 기본 차례대로 뒤에 채워진다
     assert_eq!(
         round.column_order,
-        vec!["modified", "name", "size", "type", "permissions", "owner"]
+        vec![
+            "modified",
+            "name",
+            "size",
+            "type",
+            "permissions",
+            "owner",
+            "location"
+        ]
     );
 }
 
@@ -1144,7 +1152,15 @@ fn 저장된_열_차례가_없으면_기본_차례로_연다() {
     let panel = PanelState::from_tabs(&saved).expect("탭이 있으니 되살아난다");
     assert_eq!(
         panel.to_tabs().column_order,
-        vec!["name", "size", "type", "modified", "permissions", "owner"]
+        vec![
+            "name",
+            "size",
+            "type",
+            "modified",
+            "permissions",
+            "owner",
+            "location"
+        ]
     );
 }
 
@@ -4639,4 +4655,169 @@ fn 한_프레임에_쌓인_배치를_합쳐_반영해도_목록이_온전하다(
     assert_eq!(names, sorted, "합쳐 반영한 목록이 정렬돼 있지 않다");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 검색 결과 한 줄 — 뿌리 기준 상대 폴더 `sub`(없으면 뿌리 바로 아래)에 든 파일
+fn search_hit(name: &str, sub: Option<&str>) -> crate::fs::enumerate::FileEntry {
+    let mut row = batch(&[name]).remove(0);
+    row.location = sub.map(|sub| std::sync::Arc::from(std::path::Path::new(sub)));
+    row
+}
+
+/// `C:\Docs`를 그려 둔 패널에서 필터 `a`로 검색을 시작하고 결과를 붙인 상태 (FR-70).
+/// 워커가 보낼 결과를 시험이 직접 붙인다 — 워커 경로는 `fs::search` 시험이 잰다
+fn searching_panel(
+    icons: &mut IconCache,
+    hits: Vec<crate::fs::enumerate::FileEntry>,
+) -> (PanelState, egui::Context) {
+    let ctx = egui::Context::default();
+    let mut panel = docs_panel(icons);
+    panel.list.set_filter("a");
+    panel.start_search(&ctx);
+    assert!(panel.list.is_searching(), "검색이 시작되지 않았다");
+    panel.list.append_entries(hits, icons);
+    (panel, ctx)
+}
+
+#[test]
+fn 검색_결과는_폴더_목록으로_캐시에_담기지_않는다() {
+    let mut icons = IconCache::new();
+    let (mut panel, ctx) = searching_panel(&mut icons, vec![search_hit("a.txt", Some("sub"))]);
+    assert!(
+        panel.list.entries().is_none(),
+        "검색 결과를 폴더 목록으로 내줬다"
+    );
+    // 같은 폴더를 다시 읽는 길(캐시 적중 판정)이 결과를 그 폴더의 목록으로 보지 않는다
+    let mut cache = crate::panel::dir_cache::DirCache::new();
+    panel.pending_dir = std::path::PathBuf::from(r"C:\Docs");
+    panel.load.start(std::path::PathBuf::from(r"C:\Docs"), &ctx);
+    panel.try_cache_hit(&mut icons, &mut cache);
+    assert!(cache.get(std::path::Path::new(r"C:\Docs")).is_none());
+}
+
+#[test]
+fn 결과를_열면_그_폴더로_옮겨_그_항목을_고른다() {
+    // FR-70 성공 ① — 필터는 비우고, 다 읽은 뒤 그 이름이 골라진다
+    let mut icons = IconCache::new();
+    let (mut panel, ctx) = searching_panel(&mut icons, vec![search_hit("a.txt", Some("sub"))]);
+    panel.handle_list_action(FileListAction::Open(0), &ctx);
+    assert_eq!(panel.pending_dir, std::path::PathBuf::from(r"C:\Docs\sub"));
+    assert_eq!(panel.list.filter(), "", "필터가 남았다");
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["a.txt", "b.txt"])),
+        &mut icons,
+        &mut crate::panel::dir_cache::DirCache::new(),
+        &ctx,
+    );
+    assert_eq!(panel.dir(), std::path::Path::new(r"C:\Docs\sub"));
+    assert_eq!(
+        panel.list.selected_paths(),
+        vec![std::path::PathBuf::from(r"C:\Docs\sub\a.txt")],
+        "옮긴 폴더에서 그 항목이 골라지지 않았다"
+    );
+}
+
+#[test]
+fn 사라진_결과를_열어도_그_폴더로_옮길_뿐이다() {
+    // 결과는 작업 뒤 저절로 갱신되지 않는다(D12) — 없어진 파일을 실행하지 않고 폴더만 연다
+    let mut icons = IconCache::new();
+    let (mut panel, ctx) = searching_panel(&mut icons, vec![search_hit("a.txt", Some("sub"))]);
+    panel.handle_list_action(FileListAction::Open(0), &ctx);
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["b.txt"])),
+        &mut icons,
+        &mut crate::panel::dir_cache::DirCache::new(),
+        &ctx,
+    );
+    assert_eq!(panel.dir(), std::path::Path::new(r"C:\Docs\sub"));
+    assert!(panel.list.selected_paths().is_empty());
+    assert!(
+        panel.pending_select.is_none(),
+        "고를 이름이 다음 탐색까지 남았다"
+    );
+}
+
+#[test]
+fn 필터를_고치면_검색을_접고_같은_폴더로_돌아온다() {
+    // 고른 `sub\a.txt`의 이름으로 뿌리의 `a.txt`가 골라지면 안 된다
+    let mut icons = IconCache::new();
+    let (mut panel, ctx) = searching_panel(&mut icons, vec![search_hit("a.txt", Some("sub"))]);
+    panel.list.toggle_select(0);
+    panel.change_filter("ab", &ctx);
+    assert!(!panel.search.is_running(), "검색이 멈추지 않았다");
+    assert_eq!(panel.pending_dir, std::path::PathBuf::from(r"C:\Docs"));
+    assert_eq!(panel.list.filter(), "ab");
+    panel.change_filter("", &ctx);
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["a.txt", "b.txt"])),
+        &mut icons,
+        &mut crate::panel::dir_cache::DirCache::new(),
+        &ctx,
+    );
+    assert!(!panel.list.is_searching());
+    assert!(
+        panel.list.selected_paths().is_empty(),
+        "검색 결과의 선택이 뿌리의 같은 이름 파일로 옮겨붙었다"
+    );
+}
+
+#[test]
+fn 검색_중에는_변경_감시가_결과를_덮지_않는다() {
+    let mut icons = IconCache::new();
+    let (mut panel, ctx) = searching_panel(&mut icons, vec![search_hit("a.txt", Some("sub"))]);
+    let (tx, rx) = channel();
+    let watcher = DirWatcher::start(std::env::temp_dir(), channel().0, None);
+    panel.watch = Some(DirWatch { watcher, rx });
+    tx.send(()).unwrap();
+    panel.poll_watch(&ctx);
+    assert!(
+        !panel.load.is_loading(),
+        "검색 중에 감시 통지로 폴더를 다시 읽었다"
+    );
+    assert!(panel.list.is_searching());
+}
+
+#[test]
+fn 검색이_아니면_변경_감시가_종전대로_다시_읽는다() {
+    // 음성 짝 — 감시 무시는 검색 결과를 보일 때만이다
+    let mut icons = IconCache::new();
+    let ctx = egui::Context::default();
+    let mut panel = docs_panel(&mut icons);
+    let (tx, rx) = channel();
+    let watcher = DirWatcher::start(std::env::temp_dir(), channel().0, None);
+    panel.watch = Some(DirWatch { watcher, rx });
+    tx.send(()).unwrap();
+    panel.poll_watch(&ctx);
+    assert!(panel.load.is_loading());
+}
+
+#[test]
+fn 원격_탭에서는_필터_enter가_검색을_시작하지_않는다() {
+    let (mut panel, _sites) = remote_panel_in(TabPhase::Ok);
+    panel.list.set_filter("a");
+    panel.start_search(&egui::Context::default());
+    assert!(!panel.list.is_searching());
+    assert!(!panel.search.is_running());
+}
+
+#[test]
+fn 여러_폴더에_걸친_선택의_셸_메뉴는_첫_항목의_폴더로_좁힌다() {
+    let (folder, items, dirs) = narrow_to_first_folder(
+        std::path::PathBuf::from(r"C:\Docs"),
+        vec![
+            std::path::PathBuf::from(r"C:\Docs\sub\a.txt"),
+            std::path::PathBuf::from(r"C:\Docs\b.txt"),
+            std::path::PathBuf::from(r"C:\Docs\sub\c"),
+        ],
+        vec![false, false, true],
+    );
+    assert_eq!(folder, std::path::PathBuf::from(r"C:\Docs\sub"));
+    assert_eq!(
+        items,
+        vec![
+            std::path::PathBuf::from(r"C:\Docs\sub\a.txt"),
+            std::path::PathBuf::from(r"C:\Docs\sub\c"),
+        ]
+    );
+    assert_eq!(dirs, vec![false, true]);
 }

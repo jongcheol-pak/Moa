@@ -304,6 +304,8 @@ strings! {
     address_up => "상위 폴더" / "Up";
     /// 주소창 오른쪽 이름 필터 입력란의 자리표시자 (FR-65)
     address_filter_hint => "이름으로 거르기" / "Filter by name";
+    /// 필터란 Enter 로 시작한 하위 폴더 검색이 도는 동안 상태 줄에 붙는다 (FR-70)
+    search_running => "하위 폴더에서 찾는 중…" / "Searching subfolders…";
 
     // ── 폴더 트리 (FR-9) ──
     /// 아직 읽는 중인 노드의 자리 표시 — 로컬·원격 트리가 같은 문구를 쓴다
@@ -865,6 +867,14 @@ pub mod dynamic {
             Language::Korean => format!("구성 요소 {count}개"),
             Language::English if count == 1 => "1 component".to_owned(),
             Language::English => format!("{count} components"),
+        }
+    }
+
+    /// 하위 폴더 검색이 상한에서 끊겼을 때 상태 줄 문구 (FR-70)
+    pub fn search_truncated(limit: usize) -> String {
+        match current() {
+            Language::Korean => format!("결과가 많아 처음 {limit}개만 보입니다"),
+            Language::English => format!("Too many results — showing the first {limit}"),
         }
     }
 

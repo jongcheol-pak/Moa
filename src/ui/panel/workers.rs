@@ -1,13 +1,16 @@
-//! 패널이 워커 스레드에 맡기는 일 — 폴더 열거와 새 폴더·새 파일 만들기.
+//! 패널이 워커 스레드에 맡기는 일 — 폴더 열거·하위 폴더 검색과 새 폴더·새 파일 만들기.
 //!
 //! 둘 다 **UI 스레드에서 부르면 안 되는 블로킹 I/O**라 같은 방식(워커 + 채널 + 다시 그리기 요청)으로
 //! 감싼다. 본체(`ui::panel`)의 자식 모듈이며, 상태를 들고 결과를 거두는 일만 한다.
 
 use crate::fs::enumerate::{EnumChunk, EnumOutcome, FileEntry, enumerate_dir_batched};
 use crate::fs::icons::{ExtInfo, lookup_ext};
+use crate::fs::search::{SearchEvent, SearchRules, search_tree};
 use eframe::egui;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 
@@ -148,6 +151,124 @@ impl DirLoad {
     }
 
     /// 워커가 미리 물어 둔 확장자 정보를 꺼낸다 — 조각을 반영하기 전에 UI 캐시에 넣는다
+    pub(super) fn take_ext_infos(&mut self) -> Vec<ExtInfo> {
+        std::mem::take(&mut self.ext_infos)
+    }
+}
+
+/// 검색 결과를 이만큼에서 끊는다 (FR-70) — 드라이브 뿌리에서 한 글자로 찾으면 수백만 항목이
+/// 메모리에 쌓인다. 점진 표시(FR-69)가 다루는 규모에 맞췄다
+pub(super) const SEARCH_LIMIT: usize = 100_000;
+
+/// 하위 폴더 이름 검색 상태 (FR-70) — `DirLoad`와 같은 방식(워커 + 세대 + 조각 채널)이다.
+///
+/// 멈춤 깃발을 따로 드는 이유: 일치가 드문 검색은 오래도록 아무것도 보내지 않아, 받는 쪽이
+/// 사라진 것(전송 실패)으로는 워커를 세우지 못한다
+pub(super) struct TreeSearch {
+    generation: u64,
+    stop: Arc<AtomicBool>,
+    pending: Option<Receiver<(u64, SearchEvent, Vec<ExtInfo>)>>,
+    ext_infos: Vec<ExtInfo>,
+    /// 마지막 검색이 상한에서 끊겼는가 — 상태 줄이 알린다
+    truncated: bool,
+}
+
+impl TreeSearch {
+    pub(super) fn new() -> TreeSearch {
+        TreeSearch {
+            generation: 0,
+            stop: Arc::new(AtomicBool::new(false)),
+            pending: None,
+            ext_infos: Vec::new(),
+            truncated: false,
+        }
+    }
+
+    /// 워커에서 `root` 아래를 찾기 시작한다 — 앞선 검색은 멈추고 그 결과는 세대로 버린다
+    pub(super) fn start(
+        &mut self,
+        root: PathBuf,
+        needle_lower: String,
+        rules: SearchRules,
+        ctx: &egui::Context,
+    ) {
+        self.cancel();
+        let generation = self.generation;
+        let stop = Arc::clone(&self.stop);
+        let (tx, rx) = channel();
+        self.pending = Some(rx);
+        self.truncated = false;
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            // 확장자 선조회(`lookup_ext`)가 COM을 쓴다 — `DirLoad`와 같은 이유로 초기화한다.
+            // 안전성: 이 스레드에서 열고 검색이 끝난 뒤 짝을 맞춰 닫는다
+            let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+            let mut seen = HashSet::new();
+            search_tree(
+                &root,
+                &needle_lower,
+                rules,
+                SEARCH_LIMIT,
+                || stop.load(Ordering::Relaxed),
+                |event| {
+                    let infos = match &event {
+                        SearchEvent::Hits(entries) => new_ext_infos(entries, &mut seen),
+                        SearchEvent::Done { .. } => Vec::new(),
+                    };
+                    let sent = tx.send((generation, event, infos)).is_ok();
+                    if sent {
+                        ctx.request_repaint();
+                    }
+                    sent
+                },
+            );
+            if com {
+                // 안전성: 위에서 성공한 초기화와 짝을 맞춘다
+                unsafe { CoUninitialize() };
+            }
+        });
+    }
+
+    /// 진행 중인 검색을 멈추고 이미 채널에 실린 결과도 버린다
+    pub(super) fn cancel(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        // 다음 검색은 새 깃발을 쓴다 — 멈춘 워커가 늦게 깃발을 읽어도 새 검색이 서지 않게
+        self.stop = Arc::new(AtomicBool::new(false));
+        self.generation += 1;
+        self.pending = None;
+    }
+
+    /// 도착한 사건을 하나 꺼낸다. `Done`을 꺼내면 대기가 끝난다
+    pub(super) fn poll(&mut self) -> Option<SearchEvent> {
+        let rx = self.pending.as_ref()?;
+        match rx.try_recv() {
+            Ok((generation, event, infos)) => {
+                self.ext_infos.extend(infos);
+                if let SearchEvent::Done { truncated, .. } = &event {
+                    self.pending = None;
+                    if generation == self.generation {
+                        self.truncated = *truncated;
+                    }
+                }
+                (generation == self.generation).then_some(event)
+            }
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                self.pending = None;
+                None
+            }
+        }
+    }
+
+    pub(super) fn is_running(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    pub(super) fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// 워커가 미리 물어 둔 확장자 정보를 꺼낸다 — 결과를 붙이기 전에 UI 캐시에 넣는다
     pub(super) fn take_ext_infos(&mut self) -> Vec<ExtInfo> {
         std::mem::take(&mut self.ext_infos)
     }
