@@ -1468,7 +1468,9 @@ fn 로컬_상위_이동을_더블클릭하면_위_폴더로_간다() {
         crate::ui::file_list::ListModel::Local(rows) => {
             rows.iter().map(|e| e.name_string()).collect()
         }
-        crate::ui::file_list::ListModel::Remote(_) => Vec::new(),
+        crate::ui::file_list::ListModel::Remote(_) | crate::ui::file_list::ListModel::Zip(_) => {
+            Vec::new()
+        }
     };
     assert_eq!(names, vec!["..", "Documents"], "첫 줄이 상위 이동이 아니다");
     assert_eq!(

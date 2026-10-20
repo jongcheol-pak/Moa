@@ -2235,7 +2235,8 @@ impl ExplorerApp {
             .iter()
             .map(|item| match item {
                 list_common::DragItem::Local { path, .. } => Some(path.clone()),
-                list_common::DragItem::Remote { .. } => None,
+                // zip 항목은 탐색기로 내보내지 않는다 — 실제 경로가 없다(FR-78 범위 밖)
+                list_common::DragItem::Remote { .. } | list_common::DragItem::Zip { .. } => None,
             })
             .collect::<Option<Vec<std::path::PathBuf>>>()
         else {

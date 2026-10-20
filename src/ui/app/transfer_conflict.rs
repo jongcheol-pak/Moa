@@ -233,7 +233,7 @@ impl ExplorerApp {
                     .filter(|item| list_common::drop_direction(item, &drop.target).is_some())
                     .filter_map(|item| match item {
                         DragItem::Local { path, .. } => Some(path.clone()),
-                        DragItem::Remote { .. } => None,
+                        DragItem::Remote { .. } | DragItem::Zip { .. } => None,
                     })
                     .collect();
                 if roots.is_empty() {

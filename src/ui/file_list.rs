@@ -30,6 +30,9 @@ use crate::ui::remote_menu::RemoteTarget;
 pub enum ListModel {
     Local(Vec<FileEntry>),
     Remote(Vec<RemoteEntry>),
+    /// zip 안 항목 (FR-78) — 행 타입은 로컬과 같지만 **로컬 경로가 없다**: 경로로 하는 일
+    /// (셸 메뉴·썸네일·폴더 크기·이름 편집·미리보기)은 이 갈래를 비켜 간다
+    Zip(Vec<FileEntry>),
 }
 
 impl ListModel {
@@ -37,6 +40,7 @@ impl ListModel {
         match self {
             ListModel::Local(rows) => rows.len(),
             ListModel::Remote(rows) => rows.len(),
+            ListModel::Zip(rows) => rows.len(),
         }
     }
 
@@ -126,6 +130,12 @@ pub struct FileListView {
     scroll_to: Option<usize>,
     /// 하위 폴더 검색 결과를 담고 있는가 (FR-70) — 참이면 `entries()`가 폴더 목록을 내주지 않는다
     searching: bool,
+    /// 지금 담긴 zip 안 자리 `(zip 파일, 안 경로)` (FR-78) — zip 목록일 때만 뜻이 있다.
+    /// 같은 자리를 다시 읽었는지 가리고, 끌기가 zip 안 경로를 짓는 데 쓴다
+    zip_dir: Option<(PathBuf, String)>,
+    /// 목록 판 번호 — 항목을 갈아 끼우거나 이어 붙일 때마다 오른다. 두 패널 비교(FR-79)가
+    /// 이 번호로 다시 견줄지를 가린다(10만 항목을 매 프레임 견주지 않는다)
+    version: u64,
 }
 
 impl Default for FileListView {
@@ -164,6 +174,8 @@ impl FileListView {
             order: Vec::new(),
             scroll_to: None,
             searching: false,
+            zip_dir: None,
+            version: 0,
         }
     }
 
@@ -259,7 +271,9 @@ impl FileListView {
                 .collect()
         }
         let keep = match &self.all_entries {
-            ListModel::Local(rows) => keep_indices(rows, &self.order, self, &needle),
+            ListModel::Local(rows) | ListModel::Zip(rows) => {
+                keep_indices(rows, &self.order, self, &needle)
+            }
             ListModel::Remote(rows) => keep_indices(rows, &self.order, self, &needle),
         };
         self.type_names = keep
@@ -274,9 +288,12 @@ impl FileListView {
             ListModel::Remote(rows) => {
                 ListModel::Remote(keep.iter().map(|&index| rows[index].clone()).collect())
             }
+            ListModel::Zip(rows) => {
+                ListModel::Zip(keep.iter().map(|&index| rows[index].clone()).collect())
+            }
         };
         (self.dir_count, self.file_count) = match &self.model {
-            ListModel::Local(rows) => count_kinds(rows),
+            ListModel::Local(rows) | ListModel::Zip(rows) => count_kinds(rows),
             ListModel::Remote(rows) => count_kinds(rows),
         };
         self.selection.clear();
@@ -289,7 +306,9 @@ impl FileListView {
     fn rebuild_order(&mut self) {
         let (key, asc) = (self.sort_key, self.ascending);
         self.order = match &self.all_entries {
-            ListModel::Local(rows) => sorted_order(rows, &self.all_type_names, key, asc),
+            ListModel::Local(rows) | ListModel::Zip(rows) => {
+                sorted_order(rows, &self.all_type_names, key, asc)
+            }
             ListModel::Remote(rows) => sorted_order(rows, &self.all_type_names, key, asc),
         };
     }
@@ -363,6 +382,7 @@ impl FileListView {
             .map(|e| icons.type_name(&e.extension(), e.is_dir))
             .collect();
         self.all_entries = ListModel::Local(entries);
+        self.version += 1;
         self.rebuild_order();
         // 숨김·시스템·이름 필터를 여기서 한 번에 건다 (FR-13·FR-65)
         self.rebuild_visible();
@@ -377,9 +397,7 @@ impl FileListView {
 
     /// 그 행의 이름 키 — 다시 읽은 뒤 같은 행을 찾는 데 쓴다
     fn row_key(&self, index: Option<usize>) -> Option<Vec<u16>> {
-        let ListModel::Local(rows) = &self.model else {
-            return None;
-        };
+        let rows = self.file_rows()?;
         index
             .and_then(|index| rows.get(index))
             .map(|row| row.name_sort_key().into_owned())
@@ -387,9 +405,7 @@ impl FileListView {
 
     /// 그 이름 키를 가진 행의 자리
     fn index_of_key(&self, key: Option<&[u16]>) -> Option<usize> {
-        let ListModel::Local(rows) = &self.model else {
-            return None;
-        };
+        let rows = self.file_rows()?;
         let key = key?;
         rows.iter().position(|row| *row.name_sort_key() == *key)
     }
@@ -452,6 +468,7 @@ impl FileListView {
         else {
             // 원본이 로컬이면 보이는 목록도 로컬이다 — 어긋났으면 통째로 다시 세운다
             self.all_entries = ListModel::Local(rows);
+            self.version += 1;
             self.rebuild_order();
             self.rebuild_visible();
             return;
@@ -499,6 +516,7 @@ impl FileListView {
         self.file_count += files;
         self.model = ListModel::Local(model);
         self.all_entries = ListModel::Local(rows);
+        self.version += 1;
         self.selection = self
             .selection
             .iter()
@@ -538,7 +556,8 @@ impl FileListView {
         }
         match &self.all_entries {
             ListModel::Local(rows) => Some(rows),
-            ListModel::Remote(_) => None,
+            // zip 안 목록은 그 로컬 폴더의 목록이 아니다 — 캐시에 담기면 안 된다 (FR-78)
+            ListModel::Remote(_) | ListModel::Zip(_) => None,
         }
     }
 
@@ -555,6 +574,7 @@ impl FileListView {
         // 원본도 함께 비운다 — 두면 다음 필터 변경이 옛 폴더의 항목을 되살린다
         self.all_type_names.clear();
         self.all_entries = ListModel::Remote(Vec::new());
+        self.version += 1;
         self.order.clear();
         self.selection.clear();
         self.anchor = None;
@@ -594,11 +614,77 @@ impl FileListView {
             .map(|e| icons.type_name(&e.extension(), e.is_dir))
             .collect();
         self.all_entries = ListModel::Remote(entries);
+        self.version += 1;
         self.rebuild_order();
         self.rebuild_visible();
         if let Some(keep) = keep {
             // 기준점(anchor)은 되살리지 않는다 — 로컬과 같은 이유다
             self.selection = self.matching_selection(&keep);
+        }
+    }
+
+    /// zip 안 자리의 항목으로 교체한다 (FR-78)
+    ///
+    /// 같은 자리를 다시 읽었으면 고른 것·기준점·포커스 행을 이름으로 되살린다 — 로컬 목록의
+    /// `set_entries`와 같은 규칙이다
+    pub fn set_zip_entries(
+        &mut self,
+        archive: PathBuf,
+        inner: String,
+        entries: Vec<FileEntry>,
+        icons: &mut IconCache,
+    ) {
+        let place = (archive, inner);
+        let same =
+            matches!(self.all_entries, ListModel::Zip(_)) && self.zip_dir.as_ref() == Some(&place);
+        let keep = same.then(|| self.selected_name_keys());
+        let marks = keep
+            .as_ref()
+            .map(|_| (self.row_key(self.anchor), self.row_key(self.cursor)));
+        self.searching = false;
+        // 이름 편집은 로컬 목록에만 있다 (FR-64) — zip 안은 읽기 전용이다
+        self.rename = None;
+        self.zip_dir = Some(place);
+        self.all_type_names = entries
+            .iter()
+            .map(|e| icons.type_name(&e.extension(), e.is_dir))
+            .collect();
+        self.all_entries = ListModel::Zip(entries);
+        self.version += 1;
+        self.rebuild_order();
+        self.rebuild_visible();
+        if let Some(keep) = keep {
+            self.selection = self.matching_selection(&keep);
+        }
+        if let Some((anchor, cursor)) = marks {
+            self.anchor = self.index_of_key(anchor.as_deref());
+            self.cursor = self.index_of_key(cursor.as_deref());
+        }
+    }
+
+    /// zip 항목 하나 — zip 목록이 아니면 `None`. 더블클릭으로 안 폴더에 들어갈 때 쓴다
+    pub fn zip_at(&self, index: usize) -> Option<&FileEntry> {
+        match &self.model {
+            ListModel::Zip(rows) => rows.get(index),
+            ListModel::Local(_) | ListModel::Remote(_) => None,
+        }
+    }
+
+    /// 자세히 보기에 원격 열(권한·소유자)을 세우는가 — 원격 목록일 때만이다
+    pub fn shows_remote_columns(&self) -> bool {
+        matches!(self.model, ListModel::Remote(_))
+    }
+
+    /// 목록 판 번호 (FR-79)
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// 지금 보이는 행이 로컬 파일 항목 형식인가 — 로컬·zip 목록이면 그 행들
+    fn file_rows(&self) -> Option<&[FileEntry]> {
+        match &self.model {
+            ListModel::Local(rows) | ListModel::Zip(rows) => Some(rows),
+            ListModel::Remote(_) => None,
         }
     }
 
@@ -611,7 +697,7 @@ impl FileListView {
     pub fn remote_at(&self, index: usize) -> Option<&RemoteEntry> {
         match &self.model {
             ListModel::Remote(rows) => rows.get(index),
-            ListModel::Local(_) => None,
+            ListModel::Local(_) | ListModel::Zip(_) => None,
         }
     }
 
@@ -620,7 +706,7 @@ impl FileListView {
     pub fn entry_at(&self, index: usize) -> Option<&FileEntry> {
         match &self.model {
             ListModel::Local(rows) => rows.get(index),
-            ListModel::Remote(_) => None,
+            ListModel::Remote(_) | ListModel::Zip(_) => None,
         }
     }
 
@@ -666,7 +752,7 @@ impl FileListView {
                 .collect()
         }
         match &self.model {
-            ListModel::Local(rows) => collect(rows, &self.selection),
+            ListModel::Local(rows) | ListModel::Zip(rows) => collect(rows, &self.selection),
             ListModel::Remote(rows) => collect(rows, &self.selection),
         }
     }
@@ -674,7 +760,7 @@ impl FileListView {
     /// 이름 키가 남아 있는 항목들의 새 인덱스
     fn matching_selection(&self, keep: &HashSet<Vec<u16>>) -> BTreeSet<usize> {
         match &self.model {
-            ListModel::Local(rows) => restore_selection(rows, keep),
+            ListModel::Local(rows) | ListModel::Zip(rows) => restore_selection(rows, keep),
             ListModel::Remote(rows) => restore_selection(rows, keep),
         }
     }
@@ -712,12 +798,12 @@ impl FileListView {
         Some((row.path_in(&self.dir), crate::ui::list_grid::row_stamp(row)))
     }
 
-    /// 화살표로 포커스 행을 옮긴다 (FR-77) — 로컬 목록에서만.
+    /// 화살표로 포커스 행을 옮긴다 (FR-77) — 로컬·zip 목록에서만(원격은 아니다).
     ///
     /// 무수식이면 옮긴 행 하나를 고르고 기준점도 거기로, `extend`(Shift)면 기준점을 두고
     /// `anchor..=cursor` 를 고른다. 끝에서 멈추며, 고른 행이 보이게 굴린다
     pub fn move_selection(&mut self, down: bool, extend: bool) {
-        let ListModel::Local(rows) = &self.model else {
+        let Some(rows) = self.file_rows() else {
             return;
         };
         let len = rows.len();
@@ -827,10 +913,13 @@ impl FileListView {
             thumbnails,
             visible,
             local_paths: model.is_local(),
+            is_remote: matches!(model, ListModel::Remote(_)),
             show_extensions: self.show_extensions,
         };
         let outcome = match model {
-            ListModel::Local(rows) => render_rows(ui, rows, request, icons, textures, sizes),
+            ListModel::Local(rows) | ListModel::Zip(rows) => {
+                render_rows(ui, rows, request, icons, textures, sizes)
+            }
             ListModel::Remote(rows) => render_rows(ui, rows, request, icons, textures, sizes),
         };
 
@@ -1022,6 +1111,25 @@ impl FileListView {
                     })
                     .collect()
             }
+            ListModel::Zip(rows) => {
+                let Some((archive, inner)) = &self.zip_dir else {
+                    return Vec::new();
+                };
+                indices
+                    .iter()
+                    .filter_map(|index| rows.get(*index))
+                    .filter(|row| !row.is_parent())
+                    .map(|row| DragItem::Zip {
+                        archive: archive.clone(),
+                        path: if inner.is_empty() {
+                            row.name_string()
+                        } else {
+                            format!("{inner}/{}", row.name_string())
+                        },
+                        is_dir: row.is_dir,
+                    })
+                    .collect()
+            }
         }
     }
 }
@@ -1041,6 +1149,7 @@ impl FileListView {
         self.file_count = 0;
         self.scroll_to = None;
         self.searching = true;
+        self.version += 1;
     }
 
     /// 검색 결과를 보이는 중인가 (FR-70)
@@ -1064,7 +1173,7 @@ impl FileListView {
                 })
         }
         let (count, bytes) = match &self.model {
-            ListModel::Local(rows) => sum(rows, &self.selection),
+            ListModel::Local(rows) | ListModel::Zip(rows) => sum(rows, &self.selection),
             ListModel::Remote(rows) => sum(rows, &self.selection),
         };
         (count > 0).then_some((count, bytes))
@@ -1295,6 +1404,9 @@ struct RenderRequest<'a> {
     thumbnails: &'a ThumbnailTextures,
     visible: &'a mut Vec<(PathBuf, FileStamp)>,
     local_paths: bool,
+    /// 원격 목록인가 — 권한·소유자 열은 여기서만 선다. `local_paths`의 부정이 아니다:
+    /// zip 목록(FR-78)은 로컬 경로가 없지만 원격도 아니다
+    is_remote: bool,
     /// 이름 뒤 확장자를 보일지 (FR-52)
     show_extensions: bool,
 }
@@ -1339,9 +1451,7 @@ fn render_rows<R: ListRow>(
                 sort_key: request.sort_key,
                 ascending: request.ascending,
                 columns: request.columns,
-                // 원격 목록을 담고 있다는 것이 곧 원격 패널이라는 뜻이다 —
-                // 별도 플래그를 하나 더 들면 둘이 어긋날 수 있다
-                is_remote: !request.local_paths,
+                is_remote: request.is_remote,
                 column_flags: request.column_flags,
                 local_paths: request.local_paths,
                 show_extensions: request.show_extensions,
@@ -1442,6 +1552,7 @@ mod tests {
         match v.model() {
             ListModel::Local(rows) => rows.iter().map(|e| e.name_string()).collect(),
             ListModel::Remote(rows) => rows.iter().map(|e| e.name.clone()).collect(),
+            ListModel::Zip(rows) => rows.iter().map(|e| e.name_string()).collect(),
         }
     }
 
@@ -2696,5 +2807,157 @@ mod tests {
         v.rebuild_visible();
         v.select(0, egui::Modifiers::NONE);
         assert_eq!(v.preview_item(), None);
+    }
+
+    /// zip 안 목록 — `C:\받은 파일\자료.zip` 의 `inner` 자리, 첫 줄은 `..`
+    fn zipped(inner: &str, names: &[&str], icons: &mut IconCache) -> FileListView {
+        let mut v = FileListView::new();
+        let mut rows = vec![entry("..", true, 0, 0)];
+        rows.extend(names.iter().map(|name| entry(name, false, 3, 1)));
+        v.set_zip_entries(
+            PathBuf::from(r"C:\받은 파일\자료.zip"),
+            inner.to_owned(),
+            rows,
+            icons,
+        );
+        v
+    }
+
+    #[test]
+    fn zip_목록은_경로를_내주지_않는다() {
+        // FR-78 — zip 안 항목에는 로컬 경로가 없다: 셸 메뉴·삭제·복사·이름 편집·미리보기가 닿지 않는다
+        let mut icons = IconCache::new();
+        let mut v = zipped("문서", &["a.txt", "b.txt"], &mut icons);
+        assert_eq!(v.len(), 3, "zip 목록이 서지 않았다");
+        v.toggle_select(1);
+        assert!(v.selected_paths().is_empty());
+        assert!(v.selected_local().is_empty());
+        assert!(v.entries().is_none(), "폴더 캐시에 담기면 안 된다");
+        assert!(v.entry_at(1).is_none());
+        assert!(v.preview_item().is_none());
+        assert!(!v.begin_rename(1), "zip 안에서 이름 편집이 열렸다");
+        assert_eq!(
+            v.zip_at(1).map(FileEntry::name_string),
+            Some("a.txt".to_owned())
+        );
+    }
+
+    #[test]
+    fn zip_목록에서도_화살표가_선택을_옮긴다() {
+        let mut icons = IconCache::new();
+        let mut v = zipped("", &["a.txt", "b.txt"], &mut icons);
+        v.move_selection(true, false);
+        v.move_selection(true, false);
+        assert_eq!(v.selection.iter().copied().collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
+    fn zip_목록은_원격_열을_세우지_않는다() {
+        let mut icons = IconCache::new();
+        let v = zipped("", &["a.txt"], &mut icons);
+        assert!(!v.shows_remote_columns());
+    }
+
+    #[test]
+    fn 원격_목록은_원격_열을_세운다() {
+        let mut icons = IconCache::new();
+        let mut v = FileListView::new();
+        v.set_remote_entries(
+            crate::remote::types::RemotePath::new("/pub"),
+            Vec::new(),
+            &mut icons,
+        );
+        assert!(v.shows_remote_columns());
+        assert!(!FileListView::new().shows_remote_columns());
+    }
+
+    #[test]
+    fn zip_목록을_다시_읽어도_선택이_남는다() {
+        let mut icons = IconCache::new();
+        let mut v = zipped("문서", &["a.txt", "b.txt"], &mut icons);
+        let b = names(&v)
+            .iter()
+            .position(|name| name == "b.txt")
+            .expect("b");
+        v.select(b, egui::Modifiers::NONE);
+        // 같은 자리를 다시 읽는다 — 앞에 새 항목이 끼어도 고른 것은 이름으로 따라간다
+        v.set_zip_entries(
+            PathBuf::from(r"C:\받은 파일\자료.zip"),
+            "문서".to_owned(),
+            vec![
+                entry("..", true, 0, 0),
+                entry("0.txt", false, 1, 1),
+                entry("a.txt", false, 3, 1),
+                entry("b.txt", false, 3, 1),
+            ],
+            &mut icons,
+        );
+        let now = names(&v)
+            .iter()
+            .position(|name| name == "b.txt")
+            .expect("b");
+        assert_eq!(v.selection.iter().copied().collect::<Vec<_>>(), vec![now]);
+        assert_eq!(v.cursor, Some(now));
+    }
+
+    #[test]
+    fn zip_항목을_끌면_zip_안_경로가_실린다() {
+        let mut icons = IconCache::new();
+        let archive = PathBuf::from(r"C:\받은 파일\자료.zip");
+        let v = zipped("문서", &["a.txt"], &mut icons);
+        let a = names(&v)
+            .iter()
+            .position(|name| name == "a.txt")
+            .expect("a");
+        assert_eq!(
+            v.drag_items(a, None),
+            vec![DragItem::Zip {
+                archive: archive.clone(),
+                path: "문서/a.txt".to_owned(),
+                is_dir: false,
+            }]
+        );
+        // `..` 줄은 싣지 않는다
+        let parent = names(&v).iter().position(|name| name == "..").expect("..");
+        assert!(v.drag_items(parent, None).is_empty());
+        // 뿌리면 이름만이다
+        let root = zipped("", &["a.txt"], &mut icons);
+        let a = names(&root)
+            .iter()
+            .position(|name| name == "a.txt")
+            .expect("a");
+        assert!(matches!(
+            &root.drag_items(a, None)[..],
+            [DragItem::Zip { path, .. }] if path == "a.txt"
+        ));
+    }
+
+    #[test]
+    fn 항목을_갈아_끼우면_판_번호가_오른다() {
+        // 두 패널 비교(FR-79)가 이 번호로 다시 견줄지를 가린다
+        let mut icons = IconCache::new();
+        let mut v = FileListView::new();
+        let start = v.version();
+        v.set_entries(
+            PathBuf::from(r"C:\a"),
+            vec![entry("x", false, 1, 1)],
+            &mut icons,
+        );
+        let after_set = v.version();
+        assert!(after_set > start);
+        v.append_entries(vec![entry("y", false, 1, 1)], &mut icons);
+        assert!(v.version() > after_set);
+        let before_clear = v.version();
+        v.clear_entries();
+        assert!(v.version() > before_clear);
+        let before_zip = v.version();
+        let _ = zipped("", &[], &mut icons);
+        v.set_zip_entries(
+            PathBuf::from(r"C:\z.zip"),
+            String::new(),
+            Vec::new(),
+            &mut icons,
+        );
+        assert!(v.version() > before_zip);
     }
 }

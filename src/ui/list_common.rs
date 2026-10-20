@@ -52,13 +52,21 @@ pub enum DragItem {
         is_dir: bool,
         size: u64,
     },
+    /// zip 안 항목 (FR-78) — `path`는 `/`로 잇는 zip 안 경로다. 앱의 로컬 패널에 놓으면 풀린다
+    Zip {
+        archive: std::path::PathBuf,
+        path: String,
+        is_dir: bool,
+    },
 }
 
 impl DragItem {
     /// 폴더인가 — 로컬·원격 어느 쪽이든 같은 물음이다
     pub fn is_dir(&self) -> bool {
         match self {
-            DragItem::Local { is_dir, .. } | DragItem::Remote { is_dir, .. } => *is_dir,
+            DragItem::Local { is_dir, .. }
+            | DragItem::Remote { is_dir, .. }
+            | DragItem::Zip { is_dir, .. } => *is_dir,
         }
     }
 
@@ -70,6 +78,7 @@ impl DragItem {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             DragItem::Remote { path, .. } => path.file_name().unwrap_or_default().to_owned(),
+            DragItem::Zip { path, .. } => path.rsplit('/').next().unwrap_or_default().to_owned(),
         }
     }
 }
@@ -172,7 +181,7 @@ pub fn local_drop(drop: &DropOutcome, shift: bool) -> Option<LocalDrop> {
     for item in &drop.items {
         match item {
             DragItem::Local { path, .. } => paths.push(path.clone()),
-            DragItem::Remote { .. } => return None,
+            DragItem::Remote { .. } | DragItem::Zip { .. } => return None,
         }
     }
     let sources = outside_of(paths, dir);
