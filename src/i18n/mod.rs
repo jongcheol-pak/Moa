@@ -399,6 +399,8 @@ strings! {
     bulk_apply => "적용" / "Apply";
     /// 앱 안에서 Shift 를 든 채 끄는 동안 그림 옆에 붙는 표시 (FR-60 — 놓으면 이동한다)
     drag_moving => "이동" / "Move";
+    /// `Ctrl+Z`를 눌렀는데 되돌릴 기록이 없을 때 (FR-74)
+    undo_nothing => "되돌릴 작업이 없습니다" / "Nothing to undo";
     /// 되돌릴 항목을 하나도 셸에 걸지 못했을 때 (FR-74)
     undo_no_source => "되돌릴 파일을 찾지 못했습니다" / "Could not find the files to undo";
     /// 같은 이름이 이미 여럿이라 번호를 붙일 자리를 다 써 버렸을 때 —
@@ -1025,6 +1027,28 @@ pub mod dynamic {
             Language::Korean => format!("복사를 그만뒀습니다 — {count}개 항목"),
             Language::English if count == 1 => "Copy stopped — 1 item".to_owned(),
             Language::English => format!("Copy stopped — {count} items"),
+        }
+    }
+
+    /// 되돌리기가 끝났을 때 (FR-74) — 상태가 바뀌어 건너뛴 수가 있으면 함께 적는다 (사용자 답 Q6)
+    pub fn undo_done(done: usize, skipped: usize) -> String {
+        match (current(), skipped) {
+            (Language::Korean, 0) => format!("되돌렸습니다 — {done}개"),
+            (Language::Korean, _) => {
+                format!("되돌렸습니다 — {done}개 · {skipped}개는 상태가 바뀌어 건너뛰었습니다")
+            }
+            (Language::English, 0) => format!("Undone — {done}"),
+            (Language::English, _) => {
+                format!("Undone — {done} · skipped {skipped} that changed since")
+            }
+        }
+    }
+
+    /// 되돌리기가 셸 오류로 끝났을 때 (FR-74)
+    pub fn undo_failed(detail: &str) -> String {
+        match current() {
+            Language::Korean => format!("되돌리지 못했습니다 — {detail}"),
+            Language::English => format!("Could not undo — {detail}"),
         }
     }
 
@@ -1757,6 +1781,23 @@ mod tests {
         // 영어는 한 개일 때 복수형을 쓰지 않는다
         assert_eq!(dynamic::local_copy_cancelled(1), "Copy stopped — 1 item");
         assert_eq!(dynamic::local_copy_cancelled(3), "Copy stopped — 3 items");
+    }
+
+    #[test]
+    fn 되돌리기_문구는_건너뛴_수를_적는다() {
+        // 사용자 답 Q6 — 건너뛴 것이 있으면 그 수를 알린다
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(dynamic::undo_done(3, 0), "되돌렸습니다 — 3개");
+        assert_eq!(
+            dynamic::undo_done(2, 1),
+            "되돌렸습니다 — 2개 · 1개는 상태가 바뀌어 건너뛰었습니다"
+        );
+        assert_eq!(undo_nothing(), "되돌릴 작업이 없습니다");
+        set_language(LanguageSetting::English);
+        assert_eq!(
+            dynamic::undo_done(2, 1),
+            "Undone — 2 · skipped 1 that changed since"
+        );
     }
 
     #[test]

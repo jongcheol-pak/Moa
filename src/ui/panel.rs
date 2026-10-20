@@ -231,6 +231,8 @@ pub struct PanelOutcome {
     /// 이 패널이 열어 본 드라이브와 그 결과 `(경로, 닿았는가)` (T6) — 드라이브 목록에
     /// 반영하는 것은 앱이다. 로컬 드라이브의 실패는 `DriveList::observe`가 걸러낸다
     pub drive_observed: Option<(PathBuf, bool)>,
+    /// 이 패널이 방금 만든 새 폴더·새 파일과 그 도장 (FR-74) — 되돌리기 기록은 앱이 한다
+    pub created: Option<(PathBuf, Option<crate::fs::undo::Stamp>)>,
     /// 원격 트리가 청한 하위 조회들 (FR-9 원격판) — 연결에 보내는 것은 앱이다.
     ///
     /// **여럿을 그대로 올린다** — 한 프레임에 형제 노드 여럿이 펼쳐져 있으면 요청도 여럿이다.
@@ -382,6 +384,8 @@ pub struct PanelState {
     ///
     /// 그 폴더의 목록이 서면(캐시 적중·완료 조각) 그 이름을 고르고, 완료 조각에서 비운다
     pending_select: Option<(PathBuf, Vec<u16>)>,
+    /// 방금 만든 새 폴더·새 파일 — 다음 결과(`PanelOutcome::created`)로 올려 보내고 비운다
+    created: Option<(PathBuf, Option<crate::fs::undo::Stamp>)>,
     /// 썸네일 픽셀 캐시 (FR-24) — 상한이 패널당이라 패널이 소유한다 (NFR-9)
     thumbs: ThumbnailCache,
     /// 올라간 썸네일 텍스처 — 픽셀 캐시와 함께 비워진다
@@ -446,6 +450,7 @@ impl PanelState {
             search: TreeSearch::new(),
             sizes: FolderSizes::new(),
             pending_select: None,
+            created: None,
             thumbs: ThumbnailCache::new(),
             thumb_textures: ThumbnailTextures::new(),
         }
@@ -1832,7 +1837,8 @@ impl PanelState {
             return;
         };
         match result {
-            Ok(_) => {
+            Ok(made) => {
+                self.created = Some(made);
                 // 만드는 동안 사용자가 원격 탭으로 옮겨 갔을 수 있다 — 그때 활성 탭 기준으로
                 // 다시 읽으면 빈 경로를 열거하게 된다. 로컬 탭일 때만 다시 읽는다
                 if let Some(dir) = self.tabs.active().source.local_path() {
@@ -1976,6 +1982,11 @@ impl PanelState {
     /// 메뉴의 아이콘 줄과 `F2`가 함께 쓰는 진입점이다
     pub fn begin_rename_selected(&mut self) -> bool {
         self.list.begin_rename_selected()
+    }
+
+    /// 파일 작업이 손댄 자리를 품은 폴더의 크기 값을 잊는다 (FR-71 · plan D14)
+    pub fn forget_sizes(&mut self, affected: &[PathBuf]) {
+        self.sizes.forget(affected);
     }
 
     /// 잘라내기로 담긴 경로들을 이 패널의 목록에 표시한다 (FR-64)
@@ -2280,6 +2291,7 @@ impl PanelState {
             favorite,
             tree_requests,
             drive_observed: self.observed_drive.take(),
+            created: self.created.take(),
         }
     }
 

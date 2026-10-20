@@ -686,6 +686,13 @@ pub struct ExplorerApp {
     /// 이름 바꾸기·삭제의 결과를 받는 자리 (FR-64) — 복사와 같은 방식이다
     file_op_tx: std::sync::mpsc::Sender<crate::fs::file_op::FileOpOutcome>,
     file_op_rx: std::sync::mpsc::Receiver<crate::fs::file_op::FileOpOutcome>,
+    /// 앱 자체 되돌리기 기록 (FR-74) — 메모리에만, 앱 전체 하나, 최근 50건(사용자 답 Q3)
+    undo_log: crate::fs::undo::UndoLog,
+    /// 되돌리기 결과를 받는 자리 — `pump_undo`가 거둔다
+    undo_tx: std::sync::mpsc::Sender<crate::fs::file_op::UndoOutcome>,
+    undo_rx: std::sync::mpsc::Receiver<crate::fs::file_op::UndoOutcome>,
+    /// 되돌리기가 돌고 있는가 — 한 번에 하나만 돈다(plan D5)
+    undo_running: bool,
     /// 셸 복사의 결과를 받는 자리 (FR-60) — `pump_local_copy`가 프레임마다 거둔다.
     /// 워커가 여럿 돌 수 있어 채널 하나를 나눠 쓴다
     copy_tx: std::sync::mpsc::Sender<crate::fs::file_op::CopyOutcome>,
@@ -773,6 +780,7 @@ impl ExplorerApp {
         let (conflict_tx, conflict_rx) = std::sync::mpsc::channel();
         let (copy_tx, copy_rx) = std::sync::mpsc::channel();
         let (file_op_tx, file_op_rx) = std::sync::mpsc::channel();
+        let (undo_tx, undo_rx) = std::sync::mpsc::channel();
         let (os_drop_tx, os_drop_rx) = std::sync::mpsc::channel();
         let repaint: Arc<dyn Fn() + Send + Sync> = {
             let ctx = cc.egui_ctx.clone();
@@ -872,6 +880,10 @@ impl ExplorerApp {
             frame_timer: crate::perf::FrameTimer::default(),
             file_op_tx,
             file_op_rx,
+            undo_log: crate::fs::undo::UndoLog::default(),
+            undo_tx,
+            undo_rx,
+            undo_running: false,
             pending_show_more: None,
             copy_tx,
             copy_rx,
@@ -2000,6 +2012,8 @@ impl ExplorerApp {
             Command::ClipboardCopy => self.clipboard_put(target, false),
             Command::ClipboardCut => self.clipboard_put(target, true),
             Command::ClipboardPaste => self.clipboard_paste(target),
+            // 기록이 앱 전체 하나라 대상 패널을 보지 않는다 (plan D7)
+            Command::Undo => self.undo_last(ctx.input(|input| input.time)),
             // 이 셋은 연결(`manager`)에 닿아야 해서 패널만 빌리는 아래 묶음에 들어갈 수 없다
             Command::OpenSiteTab(site) => self.open_site_tab_here(site, target),
             Command::Refresh => self.refresh_panel(target, ctx),
@@ -2250,6 +2264,12 @@ impl ExplorerApp {
     fn pump_local_copy(&mut self, now: f64) {
         use crate::fs::file_op::Transfer;
         while let Ok(outcome) = self.copy_rx.try_recv() {
+            // 된 것은 되돌리기 기록에 담는다 (FR-74) — 붙여넣기·OS 드롭도 이 길이다
+            let done = match outcome.how {
+                Transfer::Copy => crate::fs::undo::Done::Copied,
+                Transfer::Move => crate::fs::undo::Done::Moved,
+            };
+            self.record_undo(done, &outcome.applied);
             let text = match (&outcome.error, outcome.cancelled, outcome.how) {
                 (Some(detail), _, Transfer::Copy) => {
                     crate::i18n::dynamic::local_copy_failed(detail)
@@ -2269,13 +2289,6 @@ impl ExplorerApp {
         }
     }
 
-    /// 끝난 이름 바꾸기·삭제의 결과를 알린다 (FR-64).
-    ///
-    /// **성공도 취소도 알리지 않는다** — 셸이 자기 대화로 이미 알렸고, 목록에서 사라지거나
-    /// 이름이 바뀌는 것(또는 그대로 남는 것)이 곧 확인이라 여기서 또 띄우면 조작 하나에
-    /// 알림이 둘이 된다. 복사(`pump_local_copy`)가 취소를 알리는 것은 **여러 개를 끌어다
-    /// 놓은 뒤라 몇 개가 갔는지 목록만 보고는 알기 어렵기** 때문이며, 여기는 대상이 눈앞에
-    /// 그대로 있어 그 어려움이 없다
     /// 고른 것을 지운다 (FR-12·FR-64) — 확인 대화는 셸이 띄운다.
     ///
     /// 고른 것이 없으면 아무 일도 하지 않는다 — `Delete`를 헛눌렀을 때 대화만 뜨는 것보다
@@ -2453,12 +2466,77 @@ impl ExplorerApp {
         self.bulk_rename.open(items, ctx);
     }
 
+    /// 끝난 이름 바꾸기·삭제의 결과를 알린다 (FR-64).
+    ///
+    /// **성공도 취소도 알리지 않는다** — 셸이 자기 대화로 이미 알렸고, 목록에서 사라지거나
+    /// 이름이 바뀌는 것(또는 그대로 남는 것)이 곧 확인이라 여기서 또 띄우면 조작 하나에
+    /// 알림이 둘이 된다. 복사(`pump_local_copy`)가 취소를 알리는 것은 **여러 개를 끌어다
+    /// 놓은 뒤라 몇 개가 갔는지 목록만 보고는 알기 어렵기** 때문이며, 여기는 대상이 눈앞에
+    /// 그대로 있어 그 어려움이 없다
+    ///
+    /// 이름이 바뀐 것은 되돌리기 기록에 담는다 (FR-74) — 삭제는 `applied`가 비어 담기지 않는다
     fn pump_file_op(&mut self, now: f64) {
         while let Ok(outcome) = self.file_op_rx.try_recv() {
+            self.record_undo(crate::fs::undo::Done::Renamed, &outcome.applied);
             let Some(detail) = outcome.error else {
                 continue;
             };
             self.notice = Some((detail, now + NOTICE_SECS));
+        }
+    }
+
+    /// 셸 작업 결과를 되돌리기 기록에 담고, 손댄 자리를 품은 폴더 크기를 잊게 한다 (FR-74·FR-71)
+    fn record_undo(
+        &mut self,
+        done: crate::fs::undo::Done,
+        applied: &[crate::fs::file_op::Applied],
+    ) {
+        let affected: Vec<std::path::PathBuf> = applied
+            .iter()
+            .flat_map(|one| [one.from.clone(), one.to.clone()])
+            .collect();
+        self.forget_sizes(&affected);
+        if let Some(entry) = crate::fs::undo::entry_for(done, applied) {
+            self.undo_log.push(entry);
+        }
+    }
+
+    /// 모든 워크스페이스의 패널이 그 자리를 품은 폴더 크기를 잊는다 (plan D14)
+    fn forget_sizes(&mut self, affected: &[std::path::PathBuf]) {
+        if affected.is_empty() {
+            return;
+        }
+        for view in self.views.values_mut() {
+            for panel in view.panels.values_mut() {
+                panel.forget_sizes(affected);
+            }
+        }
+    }
+
+    /// 마지막 기록을 되돌린다 (FR-74) — 돌고 있는 되돌리기가 있으면 무시한다(plan D5)
+    fn undo_last(&mut self, now: f64) {
+        if self.undo_running {
+            return;
+        }
+        let Some(entry) = self.undo_log.pop() else {
+            self.notice = Some((crate::i18n::undo_nothing().to_owned(), now + NOTICE_SECS));
+            return;
+        };
+        let owner = self.owner_hwnd();
+        self.undo_running =
+            crate::fs::file_op::undo(entry, owner, self.undo_tx.clone(), self.repaint.clone());
+    }
+
+    /// 끝난 되돌리기를 알린다 (FR-74) — 건너뛴 것이 있으면 그 수를 함께 적는다 (사용자 답 Q6)
+    fn pump_undo(&mut self, now: f64) {
+        while let Ok(outcome) = self.undo_rx.try_recv() {
+            self.undo_running = false;
+            self.forget_sizes(&outcome.affected);
+            let text = match &outcome.error {
+                Some(detail) => crate::i18n::dynamic::undo_failed(detail),
+                None => crate::i18n::dynamic::undo_done(outcome.done, outcome.skipped),
+            };
+            self.notice = Some((text, now + NOTICE_SECS));
         }
     }
 
@@ -2731,6 +2809,7 @@ impl eframe::App for ExplorerApp {
         // 셸 복사가 끝났으면 그 사실을 알린다 (FR-60)
         self.pump_local_copy(now);
         self.pump_file_op(now);
+        self.pump_undo(now);
         // 폴더 여부를 다 잰 OS 드롭을 전송으로 보낸다 (FR-61)
         self.pump_os_drop_scan();
         // 자리가 나면 대기 중인 전송을 워커에 맡긴다 (FR-37)
@@ -2967,6 +3046,14 @@ impl eframe::App for ExplorerApp {
                     // 여럿을 모으는 것(`ui/splitter.rs`), 반영 규칙(`app/drives.rs`)
                     for (path, reachable) in outcome.drive_observed {
                         self.drives.observe(&path, reachable);
+                    }
+                    // 패널이 만든 새 폴더·새 파일을 되돌리기 기록에 담는다 (FR-74).
+                    // **이 홉도 리뷰가 지키는 자리다** — 위 드라이브 관측과 같은 이유로 시험이
+                    // 닿지 않는다. 앞뒤 층은 시험이 덮는다 — 패널이 올리는 것(`ui/panel/tests.rs`),
+                    // 모으는 것(`ui/splitter.rs`), 기록으로 바꾸는 것(`fs::undo`)
+                    for (path, stamp) in outcome.created {
+                        self.undo_log
+                            .push(crate::fs::undo::entry_for_created(&path, stamp));
                     }
 
                     // OS에서 끌어온 파일이 창 위를 지나는 동안 놓일 패널을 두른다 (FR-61).

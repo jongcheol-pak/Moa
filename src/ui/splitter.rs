@@ -101,6 +101,8 @@ pub struct LayoutOutcome {
     /// 한 프레임에 두 패널이 서로 다른 드라이브를 열어 볼 수 있어 first-wins로 하나만
     /// 남기면 한쪽 관측이 버려진다(`tree_requests`와 같은 이유)
     pub drive_observed: Vec<(PathBuf, bool)>,
+    /// 패널들이 방금 만든 새 폴더·새 파일과 그 도장 (FR-74) — 앱이 되돌리기 기록에 담는다
+    pub created: Vec<(PathBuf, Option<crate::fs::undo::Stamp>)>,
     /// 원격 트리가 청한 하위 조회들 (T24) — **모아서** 올린다.
     ///
     /// first-wins로 하나만 남기면 두 패널이 같은 프레임에 노드를 펼쳤을 때 한쪽이 영영
@@ -138,6 +140,7 @@ fn merge_panel_outcome(outcome: &mut LayoutOutcome, id: PanelId, panel: PanelOut
         favorite,
         tree_requests,
         drive_observed,
+        created,
     } = panel;
     // 한 프레임에 메뉴는 하나만 뜬다 — 먼저 요청한 패널 것을 쓴다
     if outcome.menu.is_none() {
@@ -191,6 +194,8 @@ fn merge_panel_outcome(outcome: &mut LayoutOutcome, id: PanelId, panel: PanelOut
     // 열어 본 드라이브도 모아서 올린다 (T6) — 어느 패널이 열었는지는 쓰지 않는다
     // (드라이브 목록이 앱에 하나뿐이라 모든 패널이 같은 것을 본다)
     outcome.drive_observed.extend(drive_observed);
+    // 새로 만든 것도 모아서 올린다 — 두 패널이 같은 프레임에 만들기를 끝낼 수 있다 (FR-74)
+    outcome.created.extend(created);
     // 닫힌 연결은 **모아서** 올린다 — 한 프레임에 여러 패널이 각자의 마지막 원격 탭을 닫을 수
     // 있고, first-wins로 하나만 남기면 나머지 연결의 워커·소켓이 그대로 남는다
     outcome.closed_conns.extend(closed_conn);
@@ -467,6 +472,7 @@ mod tests {
                     favorite: None,
                     tree_requests: Vec::new(),
                     drive_observed: Some((PathBuf::from(path), reachable)),
+                    created: None,
                 },
             );
         }
@@ -499,6 +505,7 @@ mod tests {
                 favorite: None,
                 tree_requests: Vec::new(),
                 drive_observed: None,
+                created: None,
             },
         );
         assert!(outcome.drive_observed.is_empty());
@@ -529,6 +536,7 @@ mod tests {
                 favorite: None,
                 tree_requests: Vec::new(),
                 drive_observed: None,
+                created: None,
             },
         );
         merge_panel_outcome(
@@ -546,6 +554,7 @@ mod tests {
                 favorite: None,
                 tree_requests: Vec::new(),
                 drive_observed: None,
+                created: None,
             },
         );
 
@@ -586,6 +595,7 @@ mod tests {
                     favorite: None,
                     tree_requests: Vec::new(),
                     drive_observed: None,
+                    created: None,
                 },
             );
         }
@@ -617,6 +627,7 @@ mod tests {
                     favorite: None,
                     tree_requests: Vec::new(),
                     drive_observed: None,
+                    created: None,
                 },
             );
         }
@@ -659,6 +670,7 @@ mod tests {
                 favorite: None,
                 tree_requests: requests.clone(),
                 drive_observed: None,
+                created: None,
             },
         );
         assert_eq!(
@@ -688,6 +700,7 @@ mod tests {
                 favorite: Some(FavoriteAction::Add(std::path::PathBuf::from(r"D:\작업"))),
                 tree_requests: Vec::new(),
                 drive_observed: None,
+                created: None,
             },
         );
         merge_panel_outcome(
@@ -707,6 +720,7 @@ mod tests {
                 ))),
                 tree_requests: Vec::new(),
                 drive_observed: None,
+                created: None,
             },
         );
 
