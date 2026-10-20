@@ -538,6 +538,28 @@ mod tests {
         assert_eq!(복사_자리(&대소문자_다름), None);
     }
 
+    #[test]
+    fn 밖에서_끌어온_것도_같은_폴더면_뺀다() {
+        // 탐색기에서 끌어온 것을 그 폴더에 그대로 놓으면 `- 복사본`이 생기던 것 (대장 2026-08-21)
+        let 남은 = outside_of(
+            vec![
+                std::path::PathBuf::from(r"C:\Work\a.txt"),
+                std::path::PathBuf::from(r"C:\work\b.txt"),
+            ],
+            std::path::Path::new(r"C:\work"),
+        );
+        assert!(남은.is_empty(), "{남은:?}");
+    }
+
+    #[test]
+    fn 밖에서_끌어온_다른_폴더_것은_그대로_보낸다() {
+        let 남은 = outside_of(
+            vec![std::path::PathBuf::from(r"C:\Users\me\Desktop\a.txt")],
+            std::path::Path::new(r"C:\work"),
+        );
+        assert_eq!(남은.len(), 1);
+    }
+
     /// 로컬 드롭이면 놓인 폴더 — 종전 판정(복사인가·어디로)을 그대로 견주는 시험용
     fn 복사_자리(drop: &DropOutcome) -> Option<std::path::PathBuf> {
         local_drop(drop, false).map(|local| local.dest)

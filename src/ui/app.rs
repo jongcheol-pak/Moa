@@ -2164,8 +2164,12 @@ impl ExplorerApp {
             // 원격 탭 — 폴더 여부를 워커가 재고 그 결과로 전송을 건다
             Some(OsDropTarget::Remote { site, dir }) => self.spawn_os_drop_scan(site, dir, dropped),
             // 로컬 탭 — `IFileOperation`은 경로만 받으므로 재 볼 것이 없다
+            // 그 폴더에서 끌어온 것은 뺀다 — 앱 안 드롭과 같은 규칙이다 (FR-61 ⓐ · 2026-10-20)
             Some(OsDropTarget::Local(dest)) => {
-                self.start_local_transfer(dest, dropped, crate::fs::file_op::Transfer::Copy)
+                let sources = list_common::outside_of(dropped, &dest);
+                if !sources.is_empty() {
+                    self.start_local_transfer(dest, sources, crate::fs::file_op::Transfer::Copy)
+                }
             }
             None => {}
         }
