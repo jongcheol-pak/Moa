@@ -371,6 +371,8 @@ strings! {
     copy_no_source => "복사할 파일을 찾지 못했습니다" / "Could not find the files to copy";
     /// 이름을 바꿀 항목을 하나도 셸에 걸지 못했을 때 (FR-73) — 그 사이 전부 사라진 경우다
     rename_no_source => "이름을 바꿀 파일을 찾지 못했습니다" / "Could not find the files to rename";
+    /// 앱 안에서 Shift 를 든 채 끄는 동안 그림 옆에 붙는 표시 (FR-60 — 놓으면 이동한다)
+    drag_moving => "이동" / "Move";
     /// 되돌릴 항목을 하나도 셸에 걸지 못했을 때 (FR-74)
     undo_no_source => "되돌릴 파일을 찾지 못했습니다" / "Could not find the files to undo";
     /// 같은 이름이 이미 여럿이라 번호를 붙일 자리를 다 써 버렸을 때 —
@@ -997,6 +999,23 @@ pub mod dynamic {
             Language::Korean => format!("복사를 그만뒀습니다 — {count}개 항목"),
             Language::English if count == 1 => "Copy stopped — 1 item".to_owned(),
             Language::English => format!("Copy stopped — {count} items"),
+        }
+    }
+
+    /// 앱 안 드래그 이동(Shift)이 셸 오류로 끝났을 때 (FR-60) — 복사와 같은 틀이다
+    pub fn local_move_failed(detail: &str) -> String {
+        match current() {
+            Language::Korean => format!("옮기지 못했습니다 — {detail}"),
+            Language::English => format!("Could not move — {detail}"),
+        }
+    }
+
+    /// 사용자가 셸 이동 대화에서 그만뒀을 때 (FR-60) — `count`는 걸었던 항목 수다
+    pub fn local_move_cancelled(count: usize) -> String {
+        match current() {
+            Language::Korean => format!("옮기기를 그만뒀습니다 — {count}개 항목"),
+            Language::English if count == 1 => "Move stopped — 1 item".to_owned(),
+            Language::English => format!("Move stopped — {count} items"),
         }
     }
 
@@ -1712,6 +1731,22 @@ mod tests {
         // 영어는 한 개일 때 복수형을 쓰지 않는다
         assert_eq!(dynamic::local_copy_cancelled(1), "Copy stopped — 1 item");
         assert_eq!(dynamic::local_copy_cancelled(3), "Copy stopped — 3 items");
+    }
+
+    #[test]
+    fn 이동_문구는_복사와_다르다() {
+        // Shift 이동(FR-60)이 실패·취소되면 「복사」라고 알리지 않는다 (후보 5)
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(dynamic::local_move_failed("x"), "옮기지 못했습니다 — x");
+        assert_eq!(
+            dynamic::local_move_cancelled(2),
+            "옮기기를 그만뒀습니다 — 2개 항목"
+        );
+        assert_eq!(drag_moving(), "이동");
+        set_language(LanguageSetting::English);
+        assert_eq!(dynamic::local_move_failed("x"), "Could not move — x");
+        assert_eq!(dynamic::local_move_cancelled(1), "Move stopped — 1 item");
+        assert_eq!(drag_moving(), "Move");
     }
 
     #[test]

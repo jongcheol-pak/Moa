@@ -12,6 +12,7 @@
 use crate::fs::icons::{IconCache, IconSize};
 use crate::ui::icon_tex::{IconTextures, ThumbnailTextures};
 use crate::ui::list_common::DragItem;
+use crate::ui::theme;
 use eframe::egui;
 
 /// 그림 한 변의 논리 픽셀.
@@ -59,6 +60,9 @@ pub fn next_item(
 
 /// 커서 자리에 그림 한 장을 그린다. 그릴 것이 없으면 아무 일도 하지 않는다.
 ///
+/// Shift 를 든 채 로컬 항목을 끌면 그림 아래에 「이동」 표시를 붙인다 — 놓으면 옮긴다는
+/// 뜻이다(FR-60). 그림은 놓일 자리를 모르므로 원격 패널 위에서도 붙는다(plan D9).
+///
 /// **HWND·실제 그리기가 걸려 테스트 비대상이다** — 수명 판정은 위 `next_item`이 맡는다
 pub fn show(
     ctx: &egui::Context,
@@ -67,6 +71,7 @@ pub fn show(
     thumbs: &ThumbnailTextures,
     item: &DragItem,
 ) {
+    let moving = matches!(item, DragItem::Local { .. }) && ctx.input(|input| input.modifiers.shift);
     let Some(pos) = ctx.pointer_interact_pos() else {
         return;
     };
@@ -96,6 +101,22 @@ pub fn show(
                 uv,
                 egui::Color32::from_white_alpha(PREVIEW_ALPHA),
             );
+            if moving {
+                egui::Frame::new()
+                    .fill(theme::CONTROL_BG)
+                    .corner_radius(4)
+                    .inner_margin(egui::Margin::symmetric(6, 2))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} {}",
+                                egui_phosphor::regular::ARROW_RIGHT,
+                                crate::i18n::drag_moving()
+                            ))
+                            .color(theme::TEXT),
+                        );
+                    });
+            }
         });
 }
 

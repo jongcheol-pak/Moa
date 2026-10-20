@@ -2164,7 +2164,9 @@ impl ExplorerApp {
             // 원격 탭 — 폴더 여부를 워커가 재고 그 결과로 전송을 건다
             Some(OsDropTarget::Remote { site, dir }) => self.spawn_os_drop_scan(site, dir, dropped),
             // 로컬 탭 — `IFileOperation`은 경로만 받으므로 재 볼 것이 없다
-            Some(OsDropTarget::Local(dest)) => self.start_local_copy_paths(dest, dropped),
+            Some(OsDropTarget::Local(dest)) => {
+                self.start_local_transfer(dest, dropped, crate::fs::file_op::Transfer::Copy)
+            }
             None => {}
         }
     }
@@ -2210,17 +2212,23 @@ impl ExplorerApp {
         }
     }
 
-    /// 경로 목록을 셸 복사에 건다 — **복사를 거는 유일한 자리다**.
+    /// 끌어다 놓은 경로들을 셸 복사·이동에 건다 — **드롭이 셸 작업을 거는 유일한 자리다**.
     ///
-    /// 앱 안의 드래그(FR-60)는 `start_local_copy`가 `DropOutcome`에서 경로를 뽑아
-    /// 여기로 넘기고, OS 드롭(FR-61)은 받은 목록을 그대로 넘긴다
-    fn start_local_copy_paths(
+    /// 앱 안의 드래그(FR-60)는 `list_common::local_drop`이 고른 것을, OS 드롭(FR-61)은 받은
+    /// 목록을 넘긴다. **FR-55의 같은 이름 확인을 거치지 않는다** — `IFileOperation`이 자기 충돌
+    /// 대화를 띄우므로 앞에 하나 더 두면 같은 것을 두 번 묻게 된다
+    fn start_local_transfer(
         &mut self,
         dest: std::path::PathBuf,
         sources: Vec<std::path::PathBuf>,
+        how: crate::fs::file_op::Transfer,
     ) {
         let owner = self.owner_hwnd();
-        crate::fs::file_op::copy_into(
+        let start = match how {
+            crate::fs::file_op::Transfer::Copy => crate::fs::file_op::copy_into,
+            crate::fs::file_op::Transfer::Move => crate::fs::file_op::move_into,
+        };
+        start(
             dest,
             sources,
             owner,
@@ -2229,33 +2237,27 @@ impl ExplorerApp {
         );
     }
 
-    /// 로컬끼리의 복사를 셸에 건다 (FR-60).
-    ///
-    /// **FR-55의 같은 이름 확인을 거치지 않는다** — `IFileOperation`이 자기 충돌 대화를
-    /// 띄우므로 앞에 하나 더 두면 같은 것을 두 번 묻게 되고, 앱 대화에서 `덮어쓰기`를 골라도
-    /// 셸이 다시 묻는다 (plan D9)
-    fn start_local_copy(&mut self, dest: std::path::PathBuf, drop: &list_common::DropOutcome) {
-        let sources: Vec<std::path::PathBuf> = drop
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                list_common::DragItem::Local { path, .. } => Some(path.clone()),
-                list_common::DragItem::Remote { .. } => None,
-            })
-            .collect();
-        self.start_local_copy_paths(dest, sources);
-    }
-
-    /// 끝난 셸 복사의 결과를 알린다 (FR-60).
+    /// 끝난 셸 복사·이동의 결과를 알린다 (FR-60).
     ///
     /// **성공은 알리지 않는다** — 셸이 자기 진행률 대화로 이미 알렸고 대상 목록에 파일이
     /// 나타나는 것이 곧 확인이라, 여기서 또 띄우면 조작 하나에 알림이 둘이 된다
     fn pump_local_copy(&mut self, now: f64) {
+        use crate::fs::file_op::Transfer;
         while let Ok(outcome) = self.copy_rx.try_recv() {
-            let text = match (&outcome.error, outcome.cancelled) {
-                (Some(detail), _) => crate::i18n::dynamic::local_copy_failed(detail),
-                (None, true) => crate::i18n::dynamic::local_copy_cancelled(outcome.requested),
-                (None, false) => continue,
+            let text = match (&outcome.error, outcome.cancelled, outcome.how) {
+                (Some(detail), _, Transfer::Copy) => {
+                    crate::i18n::dynamic::local_copy_failed(detail)
+                }
+                (Some(detail), _, Transfer::Move) => {
+                    crate::i18n::dynamic::local_move_failed(detail)
+                }
+                (None, true, Transfer::Copy) => {
+                    crate::i18n::dynamic::local_copy_cancelled(outcome.requested)
+                }
+                (None, true, Transfer::Move) => {
+                    crate::i18n::dynamic::local_move_cancelled(outcome.requested)
+                }
+                (None, false, _) => continue,
             };
             self.notice = Some((text, now + NOTICE_SECS));
         }
@@ -2966,12 +2968,15 @@ impl eframe::App for ExplorerApp {
                 // 끌어다 놓은 것을 처리한다 — 어느 패널에 놓였는지는 쓰지 않는다(항목의
                 // 종류와 놓은 자리의 종류만으로 무엇을 할지가 정해진다).
                 //
-                // **로컬끼리는 전송이 아니라 셸 복사다** (FR-60) — `start_transfer`보다
+                // **로컬끼리는 전송이 아니라 셸 복사·이동이다** (FR-60) — `start_transfer`보다
                 // 먼저 갈라야 한다. 그쪽은 전송 큐에 넣는 앞문이라 복사할 것이 흘러들면
-                // 옮기지도 못한 채 큐에 쌓인다
+                // 옮기지도 못한 채 큐에 쌓인다. 이동인가는 **놓는 프레임의 Shift**다 (plan D9)
                 if let Some((_, drop)) = dropped.take() {
-                    match list_common::local_copy_target(&drop) {
-                        Some(dir) => self.start_local_copy(dir.to_path_buf(), &drop),
+                    let shift = ctx.input(|input| input.modifiers.shift);
+                    match list_common::local_drop(&drop, shift) {
+                        Some(local) => {
+                            self.start_local_transfer(local.dest, local.sources, local.how)
+                        }
                         None => self.start_transfer(drop),
                     }
                 }
