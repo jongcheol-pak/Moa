@@ -576,6 +576,8 @@ pub struct ExplorerApp {
     license_dialog: LicenseDialog,
     /// 정보 대화 (FR-58) — 같은 메뉴의 `정보`가 연다
     about_dialog: AboutDialog,
+    /// 일괄 이름 바꾸기 대화 (FR-73) — 둘 이상 고르고 `F2`·우클릭 메뉴 줄이 연다
+    bulk_rename: crate::ui::bulk_rename_dialog::BulkRenameDialog,
     /// 고를 수 있는 글꼴 목록 (FR-48) — 워커가 만든다. 앱이 시작할 때 한 번만 읽는다
     font_scan: FontScan,
     /// 알림 영역 아이콘 (FR-50) — `종료` 토글이 켜져 있을 때만 있다. 없애면 아이콘이 사라진다
@@ -842,6 +844,7 @@ impl ExplorerApp {
             settings_dialog: SettingsDialog::new(),
             license_dialog: LicenseDialog::new(),
             about_dialog: AboutDialog::new(),
+            bulk_rename: crate::ui::bulk_rename_dialog::BulkRenameDialog::new(),
             font_scan: FontScan::new(),
             tray: None,
             tray_rx,
@@ -1985,9 +1988,8 @@ impl ExplorerApp {
                 if self.route_to_remote(command, target) {
                     return;
                 }
-                if let Some(panel) = self.command_panel_mut(target) {
-                    panel.begin_rename_selected();
-                }
+                // 둘 이상 골랐으면 일괄 이름 바꾸기 대화, 하나면 종전 인라인 편집이다 (FR-73 · Q5)
+                self.open_bulk_rename(target, ctx);
             }
             Command::Delete { permanent } => {
                 if self.route_to_remote(command, target) {
@@ -2420,6 +2422,35 @@ impl ExplorerApp {
             self.file_op_tx.clone(),
             self.repaint.clone(),
         );
+    }
+
+    /// 고른 것들의 이름을 셸에 한 번에 건다 (FR-73) — 결과는 이름 바꾸기와 같은 채널로 온다
+    fn start_rename_many(&mut self, pairs: Vec<(std::path::PathBuf, String)>) {
+        let owner = self.owner_hwnd();
+        crate::fs::file_op::rename_many(
+            pairs,
+            owner,
+            self.file_op_tx.clone(),
+            self.repaint.clone(),
+        );
+    }
+
+    /// 이름 바꾸기 진입점 — 둘 이상 골랐으면 일괄 대화를 열고, 하나면 목록 인라인 편집을 연다
+    /// (FR-73 · 사용자 답 Q5). `F2`와 우클릭 메뉴의 일괄 줄이 함께 쓴다
+    pub(super) fn open_bulk_rename(&mut self, target: Option<PanelId>, ctx: &egui::Context) {
+        let Some(panel) = self.command_panel_mut(target) else {
+            return;
+        };
+        let selected = panel.selected_local();
+        if selected.len() < 2 {
+            panel.begin_rename_selected();
+            return;
+        }
+        let items = selected
+            .into_iter()
+            .map(|(path, is_dir)| crate::app::bulk_rename::Item { path, is_dir })
+            .collect();
+        self.bulk_rename.open(items, ctx);
     }
 
     fn pump_file_op(&mut self, now: f64) {
@@ -3028,6 +3059,10 @@ impl eframe::App for ExplorerApp {
         self.show_settings_dialog(&ctx);
         // 오픈소스 라이선스 대화 (FR-57) — 상태를 저장하지 않아 배선이 한 줄이다
         self.license_dialog.show(&ctx);
+        // 일괄 이름 바꾸기 (FR-73) — `적용`을 누른 프레임에만 셸에 건다
+        if let Some(pairs) = self.bulk_rename.show(&ctx) {
+            self.start_rename_many(pairs);
+        }
         // 정보 대화 (FR-58) — 마찬가지로 상태를 저장하지 않는다
         self.about_dialog.show(&ctx);
         // 원격 파일 작업 대화 (FR-39)

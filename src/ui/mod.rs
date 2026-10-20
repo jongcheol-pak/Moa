@@ -6,6 +6,7 @@ pub mod about_dialog;
 pub mod address_bar;
 pub mod app;
 pub mod app_icon;
+pub mod bulk_rename_dialog;
 pub mod dialog;
 pub mod dock;
 pub mod drag_preview;

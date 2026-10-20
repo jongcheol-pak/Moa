@@ -371,6 +371,32 @@ strings! {
     copy_no_source => "복사할 파일을 찾지 못했습니다" / "Could not find the files to copy";
     /// 이름을 바꿀 항목을 하나도 셸에 걸지 못했을 때 (FR-73) — 그 사이 전부 사라진 경우다
     rename_no_source => "이름을 바꿀 파일을 찾지 못했습니다" / "Could not find the files to rename";
+    /// 일괄 이름 바꾸기 대화 (FR-73)
+    bulk_rename_title => "이름 한꺼번에 바꾸기" / "Rename items";
+    /// 우클릭 메뉴의 진입 줄 — 둘 이상 골랐을 때만 선다 (FR-73)
+    menu_bulk_rename => "이름 한꺼번에 바꾸기…" / "Rename items…";
+    bulk_mode_replace => "찾아 바꾸기" / "Find and replace";
+    bulk_mode_number => "접두·접미·번호" / "Prefix, suffix, number";
+    bulk_mode_regex => "정규식" / "Regular expression";
+    bulk_find => "찾을 글자" / "Find";
+    bulk_with => "바꿀 글자" / "Replace with";
+    bulk_prefix => "앞에 붙일 글자" / "Prefix";
+    bulk_suffix => "뒤에 붙일 글자" / "Suffix";
+    bulk_start => "시작 번호" / "Start at";
+    bulk_digits => "자릿수" / "Digits";
+    bulk_keep_name => "원래 이름 남기기" / "Keep original name";
+    bulk_pattern => "정규식" / "Pattern";
+    bulk_include_ext => "확장자도 바꾸기" / "Include extension";
+    bulk_col_current => "현재 이름" / "Current name";
+    bulk_col_new => "새 이름" / "New name";
+    /// 충돌 판정에 쓸 폴더 안 이름 목록을 모으는 동안 — 그동안 `적용`은 흐리다
+    bulk_scanning => "폴더의 이름을 확인하는 중…" / "Checking names in the folder…";
+    bulk_block_empty => "이름이 비었습니다" / "Name is empty";
+    bulk_block_invalid => "쓸 수 없는 글자가 있습니다" / "Contains invalid characters";
+    bulk_block_duplicate => "새 이름끼리 겹칩니다" / "Duplicates another new name";
+    bulk_block_exists => "이미 있는 이름입니다" / "Name already exists";
+    bulk_block_pattern => "정규식이 잘못됐습니다" / "Invalid pattern";
+    bulk_apply => "적용" / "Apply";
     /// 앱 안에서 Shift 를 든 채 끄는 동안 그림 옆에 붙는 표시 (FR-60 — 놓으면 이동한다)
     drag_moving => "이동" / "Move";
     /// 되돌릴 항목을 하나도 셸에 걸지 못했을 때 (FR-74)

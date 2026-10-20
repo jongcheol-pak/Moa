@@ -139,6 +139,10 @@ pub enum AppMenuItem {
     /// **빈 곳 우클릭에서만 선다** — 탐색기도 파일을 골랐을 때는 이 줄을 보이지 않는다.
     /// 그 게이트는 [`arrange`](crate::ui::app)가 진다
     Paste,
+    /// 고른 것들의 이름을 한꺼번에 바꾸는 대화를 연다 (FR-73).
+    ///
+    /// **둘 이상 골랐을 때만 선다** — 하나면 아이콘 줄의 `이름 바꾸기`(인라인 편집)가 그 자리다
+    BulkRename,
 }
 
 impl AppMenuItem {
@@ -150,6 +154,8 @@ impl AppMenuItem {
             AppMenuItem::Paste => 1,
             AppMenuItem::OpenInNewTab => 2,
             AppMenuItem::AddFavorite => 7,
+            // 차례 8은 `시작 화면에 고정`이 빠진 뒤 비어 있던 자리다
+            AppMenuItem::BulkRename => 8,
         }
     }
 
@@ -160,6 +166,8 @@ impl AppMenuItem {
     pub fn shortcut(self) -> &'static str {
         match self {
             AppMenuItem::Paste => "Ctrl+V",
+            // 둘 이상 고르고 `F2`를 눌러도 같은 대화가 열린다
+            AppMenuItem::BulkRename => "F2",
             AppMenuItem::OpenInNewTab | AppMenuItem::AddFavorite => "",
         }
     }
@@ -170,6 +178,7 @@ impl AppMenuItem {
             AppMenuItem::OpenInNewTab => crate::i18n::menu_open_new_tab(),
             AppMenuItem::AddFavorite => crate::i18n::menu_add_favorite(),
             AppMenuItem::Paste => crate::i18n::menu_paste(),
+            AppMenuItem::BulkRename => crate::i18n::menu_bulk_rename(),
         }
     }
 
@@ -179,6 +188,7 @@ impl AppMenuItem {
             AppMenuItem::OpenInNewTab => egui_phosphor::regular::ARROW_SQUARE_OUT,
             AppMenuItem::AddFavorite => egui_phosphor::regular::STAR,
             AppMenuItem::Paste => egui_phosphor::regular::CLIPBOARD,
+            AppMenuItem::BulkRename => egui_phosphor::regular::PENCIL_LINE,
         }
     }
 }
