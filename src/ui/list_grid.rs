@@ -12,7 +12,7 @@ use crate::ui::list_common::{
     elided_galley_rows, rename_editor,
 };
 use crate::ui::theme;
-use crate::ui::view_mode::{GRID_NAME_ROWS, ViewMode, grid_metrics};
+use crate::ui::view_mode::{Flow, GRID_NAME_ROWS, ViewMode, grid_metrics};
 use eframe::egui;
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -60,6 +60,10 @@ pub struct GridInput<'a, R: ListRow> {
     pub local_paths: bool,
     /// 이름 뒤 확장자를 보일지 (FR-52)
     pub show_extensions: bool,
+    /// 이번 그리기에서 이 칸이 보이게 굴린다 (FR-77 — 화살표로 옮긴 칸)
+    pub scroll_to: Option<usize>,
+    /// 칸마다의 비교 표시 (FR-79) — `entries`와 같은 인덱스, 비교 중이 아니면 비었다
+    pub compare: &'a [Option<crate::app::compare::Mark>],
 }
 
 /// 이번 프레임에 일어난 조작 — 목록 상태 변경은 호출부가 한다
@@ -72,6 +76,9 @@ pub struct GridOutcome {
     pub drag_started: Option<usize>,
     /// 이름 편집이 이번 프레임에 끝난 방식 (FR-64) — 상태를 접는 것은 호출부가 한다
     pub rename_end: Option<RenameEnd>,
+    /// 화살표 `↑`·`↓` 한 걸음의 칸 수 (FR-77) — 가로로 흐르는 격자는 그린 한 행의 칸 수다.
+    /// 세로로 흐르는 목록 보기·한 줄 하나인 보기는 다음 칸이 곧 아래 칸이라 1이다
+    pub row_step: usize,
 }
 
 /// 격자 보기를 그린다.
@@ -99,6 +106,8 @@ pub fn show<R: ListRow>(
         thumbnails,
         visible,
         local_paths,
+        scroll_to,
+        compare,
     } = input;
     let wants_thumbnails = local_paths && mode.uses_thumbnails();
     let count = entries.len();
@@ -112,6 +121,10 @@ pub fn show<R: ListRow>(
         .auto_shrink([false, false]);
     let output = scroll.show_viewport(ui, |ui, viewport| {
         let metrics = grid_metrics(mode, viewport.size(), count);
+        outcome.row_step = match mode.flow() {
+            Flow::Horizontal => metrics.columns.max(1),
+            Flow::Vertical | Flow::Rows => 1,
+        };
         let content = metrics.content_size();
         // 콘텐츠 전체를 한 번에 잡는다 — 스크롤 막대의 범위가 이 크기에서 나온다.
         // 항목이 뷰포트보다 적어도 뷰포트만큼은 잡아 빈 영역 클릭이 먹히게 한다
@@ -120,6 +133,9 @@ pub fn show<R: ListRow>(
             content.y.max(viewport.height()),
         ));
         let origin = area.min.to_vec2();
+        if let Some(index) = scroll_to.filter(|&index| index < count) {
+            ui.scroll_to_rect(metrics.item_rect(index).translate(origin), None);
+        }
         // 항목 밖 빈 영역 클릭 — 선택 해제, 우클릭이면 폴더 배경 메뉴 (자세히 보기와 같은 규칙).
         //
         // **칸보다 먼저 등록한다.** egui는 겹친 위젯 중 **나중에 등록된 것**을 위로 보므로
@@ -174,6 +190,11 @@ pub fn show<R: ListRow>(
                     pos,
                 };
             }
+            // 비교 표시는 선택·hover 아래에 깐다 (FR-79)
+            if let Some(mark) = compare.get(index).copied().flatten() {
+                ui.painter()
+                    .rect_filled(cell, 2.0, theme::compare_fill(mark));
+            }
             if selection.contains(&index) {
                 ui.painter().rect_filled(cell, 2.0, sel_bg);
             } else if resp.hovered() {
@@ -184,11 +205,11 @@ pub fn show<R: ListRow>(
             // 잘라내기 표시 (FR-64). **표시가 하나도 없으면 경로를 짓지 않는다** —
             // 그 문자열 만들기가 보이는 칸마다 붙는데 대부분의 프레임에서 헛일이다
             let cut =
-                local_paths && !cut_marks.is_empty() && cut_marks.contains(&dir.join(entry.name()));
+                local_paths && !cut_marks.is_empty() && cut_marks.contains(&entry.path_in(dir));
             let editing = rename.as_ref().is_some_and(|edit| edit.index == index);
             // 썸네일은 파일만 — 폴더는 폴더 아이콘이 맞다
             let thumb = if wants_thumbnails && !entry.is_dir() {
-                let path = dir.join(entry.name());
+                let path = entry.path_in(dir);
                 let ready = thumbnails.get(&path).map(CellArt::thumbnail);
                 // **텍스처가 이미 있어도 담는다** — 이 목록은 "요청 대상"이자 "지금 화면에
                 // 보인다"는 신호다. 없을 때만 담으면 텍스처가 올라간 뒤로는 최근 사용
@@ -287,7 +308,7 @@ pub(super) fn resolve_icon<R: ListRow>(
     match icon_indices[index] {
         Some(cached) => cached,
         None => {
-            let full = local_paths.then(|| dir.join(entry.name()).to_string_lossy().into_owned());
+            let full = local_paths.then(|| entry.path_in(dir).to_string_lossy().into_owned());
             // 도장을 함께 넘긴다 — 같은 이름의 exe가 새 내용으로 바뀌면 다시 묻는다
             let looked_up = icons.icon_index(
                 &entry.extension(),
@@ -647,6 +668,7 @@ mod tests {
             size: 10,
             modified: 0,
             attributes: 0,
+            location: None,
         }
     }
 
@@ -707,6 +729,8 @@ mod tests {
                     thumbnails: &textures,
                     visible: &mut visible,
                     local_paths: true,
+                    scroll_to: None,
+                    compare: &[],
                 },
                 &mut icons,
                 &mut icon_textures,
@@ -855,6 +879,8 @@ mod tests {
                     thumbnails: &textures,
                     visible: &mut visible,
                     local_paths: true,
+                    scroll_to: None,
+                    compare: &[],
                 },
                 &mut icons,
                 &mut icon_textures,
@@ -862,6 +888,57 @@ mod tests {
         });
         assert_eq!(visible.len(), 1, "폴더까지 요청했다: {visible:?}");
         assert!(visible[0].0.ends_with("사진.jpg"));
+    }
+
+    #[test]
+    fn 비교_강조는_격자_칸에_칠해진다() {
+        // FR-79 — 자세히 보기와 같은 색이 칸 배경에 깔린다
+        use crate::app::compare::Mark;
+        let dir = PathBuf::from(r"C:\테스트");
+        let ctx = egui::Context::default();
+        let entries = vec![entry("a.txt", false), entry("b.txt", false)];
+        let mut icon_indices = vec![None; entries.len()];
+        let type_names = vec!["파일".to_owned(), "파일".to_owned()];
+        let selection = BTreeSet::new();
+        let mut visible = Vec::new();
+        let textures = ThumbnailTextures::new();
+        let mut icons = IconCache::new();
+        let mut icon_textures = IconTextures::inline();
+        let marks = [Some(Mark::Differs), Some(Mark::OnlyHere)];
+
+        let output = ctx.run_ui(Default::default(), |ui| {
+            show(
+                ui,
+                GridInput {
+                    rename: None,
+                    cut_marks: &HashSet::new(),
+                    dir: &dir,
+                    entries: &entries,
+                    icon_indices: &mut icon_indices,
+                    selection: &selection,
+                    type_names: &type_names,
+                    show_extensions: true,
+                    mode: ViewMode::MediumIcons,
+                    thumbnails: &textures,
+                    visible: &mut visible,
+                    local_paths: true,
+                    scroll_to: None,
+                    compare: &marks,
+                },
+                &mut icons,
+                &mut icon_textures,
+            );
+        });
+        let fills: Vec<egui::Color32> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) => Some(rect.fill),
+                _ => None,
+            })
+            .collect();
+        assert!(fills.contains(&theme::COMPARE_ONLY), "{fills:?}");
+        assert!(fills.contains(&theme::COMPARE_DIFF), "{fills:?}");
     }
 
     #[test]
@@ -1024,6 +1101,8 @@ mod tests {
                     thumbnails: &textures,
                     visible: &mut visible,
                     local_paths: false,
+                    compare: &[],
+                    scroll_to: None,
                 },
                 &mut icons,
                 &mut icon_textures,

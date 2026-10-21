@@ -5,6 +5,8 @@
 
 ## 셸 통합·Win32 API
 
+- [2026-10-20] **`IFileOperation`이 실제로 만든 자리는 `IFileOperationProgressSink`의 `Post{Copy,Move,Rename}Item` 이 주는 `psiNewlyCreated`로 받는다** — 「둘 다 유지」로 `(2)`가 붙은 이름도 그대로 온다(`FOF_RENAMEONCOLLISION` 시험으로 확인). 폴더를 옮기면 하위 항목 통지도 올 수 있어 `psiItem`이 우리가 건 원본인지 걸러야 하고, **덮어쓰기·폴더 병합은 그 통지의 HRESULT 로 가르지 말고 작업 직전 대상 자리의 존재로 가른다**(`fs::file_op::perform`). 삭제 통지는 모으지 않으므로 휴지통으로 보낸 수는 작업 뒤 그 자리가 사라졌는가로 센다 (실측)
+
 - [2026-09-29] **셸 메뉴처럼 STA에 묶인 COM 객체를 워커 스레드로 옮길 때 그 스레드를 `PostThreadMessageW`로 깨우지 않는다** — 큐가 생기기 전 게시는 실패하고, 그 스레드가 `InvokeCommand`가 띄운 모달 대화 안에 있으면 스레드 메시지가 버려져 요청이 멈춘다. 자동 리셋 이벤트 + `MsgWaitForMultipleObjectsEx(QS_ALLINPUT, MWMO_INPUTAVAILABLE)` + 깨어날 때마다 `PeekMessageW` 비우기·채널 비우기로 돈다(`fs::shell_menu_worker`). 화면 쪽은 응답 대기 중 `request_repaint_after`로 스스로 깨어나야 한다 (문서 대조)
 - [2026-09-29] **썸네일·경로별 아이콘 캐시는 경로만 키로 삼으면 안 된다** — `IShellItemImageFactory::GetImage(SIIGBF_RESIZETOFIT)`는 복사 중(0바이트)·만들 수 없는 파일에 실패 대신 형식 아이콘(256x256)을 돌려주고, exe도 0바이트면 기본 exe 아이콘을 준다. 경로 키 캐시는 내용이 다 쓰이거나 덮어써진 뒤에도 그 그림을 폴더를 떠날 때까지 준다 — 크기·수정 시각(`fs::enumerate::FileStamp`)을 함께 보고 바뀌면 다시 만든다. 셸 자체는 다시 물으면 새 그림을 준다(무효화 호출 불요) (실측)
 - [2026-09-28] **셸 아이콘·종류 문자열 조회는 UI 스레드에서 하지 않는다 — 첫 조회가 비싸고 그 비용은 종류 수에 매인다** — 처음 보는 exe의 경로 아이콘(`SHGetFileInfoW` 실경로) 한 건 10~93ms·재조회 2~3ms, 속성만으로 묻는 확장자별 종류 문자열도 프로세스 첫 조회가 3~60ms(folder 53~62·txt 18~31·ico 10~22·exe 5~9ms)·재조회 0.4~0.7ms다. 지금은 경로 아이콘은 `fs::icons`의 워커, 확장자 정보는 폴더 열거 워커(`DirLoad`)가 `lookup_ext`로 미리 물어 `accept_ext_info`로 넘긴다. **성능은 매번 새 사본 폴더로 잰다** — 같은 파일을 다시 재면 셸·백신 캐시로 개선이 과대 측정된다 (실측)
@@ -64,6 +66,14 @@
 
 - [2026-08-04] **디자인 자산 안에서 README와 HTML 프로토타입이 어긋나는 지점이 3곳 있다** — 사이드바 폭(README 260px / HTML 300px) · 큐의 연결별 탭 문구(README `전체` / HTML·스크린샷 `전체 (8)`처럼 건수 포함) · 사이트 드롭다운 팝업 색(다른 팝업은 배경 `#1E1E1E`·hover `#383838`인데 이것만 `#252525`·`#333333`, 캡션도 11px). README가 "Every hex value and pixel size in this README is authoritative"를 선언하므로 값은 README 우선이지만, **README에 없는 항목(문구·전용 색)은 HTML이 유일 근거**이고 스크린샷 렌더가 뒷받침하면 그쪽을 채택했다. 공용 팝업 부품으로 뭉뚱그리면 드롭다운만 어긋난다
 
+## 스크립트로 소스를 고칠 때
+
+- [2026-10-20] **Bash 도구에서 `python - <<'PY' … PY` 나 `"$(cat <<'EOF' … EOF)"` 에 Rust 소스 조각을 담으면 「unexpected EOF while looking for matching `'`」로 실패할 수 있다** — plan 4 에서 3회 났다. 따옴표 heredoc 이어도 명령 치환 `$( )` 안에서는 bash 가 본문의 짝 없는 `'`(Rust 수명 `'a`·문자 리터럴)를 따옴표로 읽는다. 소스 조각이 든 편집 스크립트는 Write 도구로 스크래치 `.py` 파일에 쓰고 `python -I <경로>` 로 돌린다 (실측)
+
+- [2026-10-20] **파이썬으로 Rust 소스를 고칠 때 Windows 경로가 든 Rust 원시 문자열(`r"C:\w\a.txt"`)을 파이썬 보통 문자열에 담으면 `\a`·`\b`·`\f`·`\n` 이 제어 문자로 바뀐다** — `\a.txt` 가 BEL(0x07)+`.txt` 가 돼 시험 리터럴이 조용히 깨졌다(컴파일은 통과, 시험 기대가 달라진다). 파이썬 쪽도 `r"..."` 로 쓰거나 Edit 도구로 고치고, 고친 뒤 `grep -cP '[\x00-\x08\x0b\x0c\x0e-\x1f]' <파일>` 이 0 인지 본다. bash 큰따옴표 안의 `python3 -c` 는 백슬래시를 한 번 더 먹어 바로잡기도 어긋났다 — 스크립트는 파일로 써서 돌린다 (실측)
+  - **2026-10-20 plan 3 에서 같은 원인으로 다시 났다**(`r"C:\문서\b.txt"` 의 `\b` 가 백스페이스 0x08 로) — 처방은 파이썬 쪽도 원시 문자열(`r'''…'''`)로 쓰거나 역슬래시를 `chr(92)` 로 넣는 것이다. 고친 뒤 `grep -c $'\x08\|\x07' <파일>` 로 제어 문자가 0 인지 본다 (실측)
+- [2026-10-20] **작업 사본의 줄바꿈이 파일마다 다르다 — 인덱스는 전부 LF 인데 `core.autocrlf=true` 로 일부만 CRLF 로 풀려 있다**(`git ls-files --eol` 로 `src/ui/file_list.rs`·`panel.rs`·`list_grid.rs` 가 `w/crlf`, `app.rs`·`menu.rs` 는 `w/lf` — 2026-10-20 실측). 스크립트가 `\n` 고정 패턴으로 찾으면 CRLF 파일에서 0건이 나 편집이 실패한다 — 파일을 바이트로 읽어 `\r\n` 유무로 줄바꿈을 정하고 패턴·새 글을 그것으로 바꿔 쓴다 (실측)
+
 ## 코드 구조
 
 **정본은 conventions — 코드 구조의 「코드 구조」이다** — 본문 2936자를 옮겼다(§7-2 발동 처방).
@@ -94,6 +104,7 @@
 - [2026-08-18] **`i18n::LanguageGuard::lock`은 비재진입 `Mutex`다** — 한 시험 함수 안에서 두 언어를 잇달아 잠그면(`let _guard = lock(한국어); let _guard = lock(English);`) 두 번째에서 **영구 대기**하고, `cargo test`에 상한이 없어 스위트가 통째로 멎는다(2026-08-18 실측 10분 초과). 두 언어를 견주는 시험은 각 잠금을 **별도 `{ }` 블록**으로 끊어 앞 guard를 drop시킨다. 멎은 뒤 남은 시험 프로세스가 출력 파일을 잡고 있으면 다음 빌드가 `link.exe exit 1104`로 실패하므로 그 프로세스를 먼저 정리한다. 셸 잠금(`fs::icons::shell_guard`)의 재진입 데드락과 같은 부류이며, **이 레포에는 그런 전역 잠금이 둘 있다**는 것을 기억할 것.
 
 - [2026-08-17] **셸 직렬화 잠금은 자원을 만지는 함수가 잡고, 조합 함수와 private 내부는 잡지 않는다** — 잡는 곳 8(`IconCache::new`·`ext_icon`·`lookup_by_path`·`lookup_ext`·`shell_display_name`·`type_name`·`known_folders::known_folder`·`ui::icon_tex::icon_to_image`), **잡지 않는 곳 6**(`system_image_list`·`lookup_by_attributes`는 위 함수 안에서만 불리는 private, `icon_index`·`icon_index_for_path`는 `ext_icon`·`lookup_by_path`를 부르는 조합 메서드, `fs::drives::list_drives`·`fs::known_folders::default_favorites`는 안에서 잠금 함수를 부르는 조합 함수 — 2026-09-28 갱신). `lookup_by_path`·`lookup_ext`·`icon_to_image`는 **워커 스레드**(경로 아이콘·열거·텍스처 변환)에서도 불려, 시험 빌드에서는 그 조회 동안 다른 시험의 셸 호출이 기다린다. **여섯 중 하나라도 잠그면 `std::sync::Mutex` 재진입으로 `cargo test`가 상한 없이 멎는다.** 잡는 자리도 정해져 있다 — **캐시 조회·조기 반환 뒤(셸 호출 직전)**이며, 함수 첫 줄에 두면 렌더 경로가 프레임마다 전역 잠금을 잡아 **스위트가 10분을 넘긴다**(실측). 이 영역을 고칠 때는 `--no-run`으로 빌드를 분리하고 lib 하네스에 시간 제한을 씌워 돌린다(하네스는 `--message-format=json`의 `executable`로 특정 — `moa-*.exe`가 6개라 와일드카드로 고르면 시험 0건짜리를 집는다).
+- [2026-10-20] **`fs::shell_menu_worker::tests::배경_메뉴의_하위_메뉴를_채운다`는 전체 `cargo test`에서 간헐 실패하는 기존 시험이다** — 「펼친 결과가 와야 한다: None」(`shell_menu_worker.rs:442`, 실제 셸 확장 `새로 만들기`의 펼침 답을 10초 기다리다 놓침). BASE `45f9edd`에서도 전체 실행 4회 중 2회 실패하고 단독 실행은 통과한다 — **그 파일을 건드리지 않은 회차의 실패를 자기 변경 탓으로 읽지 말고 BASE 반복 실행으로 가른다.** 원인(병렬 부하에서 셸 확장 로드가 10초를 넘는가)은 미확정이다 (실측)
 
 ### 실행 시간·하네스
 
@@ -114,6 +125,12 @@
 - [2026-08-15] **죽은 `pub` 함수·상수를 `cargo clippy --all-targets -- -D warnings`가 잡지 못한다** — `src/lib.rs`가 `pub mod ui;` 등으로 재수출하는 bin+lib 구성이라 lib의 공개 표면은 dead_code 대상이 아니다(2026-08-27까지 실행 경로 밖 Win32 구현이 남은 채 린트가 통과해 온 이유다 — 그 코드는 지금 삭제됐지만 이 성질은 그대로다). 반대로 **비공개(`const`·`fn`)는 여전히 경고 대상**이라, 시험만 참조하게 되는 비공개 상수를 남기면 `-D warnings`가 깨진다. 즉 호출부가 사라지는 심볼은 계획이 직접 제거 여부를 정해야 한다
 
 - [2026-10-19] 「열어 둔 파일은 지우지 못한다」에 기대는 시험은 `std::fs::File::open`으로 열면 성립하지 않는다 — Rust 표준은 Windows에서 FILE_SHARE_DELETE를 허용해 열린 채로도 지워진다. 지우기 실패를 결정적으로 만들려면 `std::os::windows::fs::OpenOptionsExt::share_mode(0)`으로 연다(`remote::transfer`의 `.part` 재시도 시험 선례) (실측)
+- [2026-10-20] **`src/ui/panel/tests.rs`는 `mod tests { }`로 감싸지 않은 파일이다** — 다른 시험 파일처럼 「끝 `}`를 떼고 시험을 붙인 뒤 `}`를 다시 단다」로 덧붙이면 새 시험이 **마지막 시험 함수 안에** 들어가 한 번도 돌지 않는다. 빌드·clippy·시험 모두 통과하고 남는 것은 `warning: cannot test inner items` 한 줄뿐이다(변이 확인에서 드러났다). 그 파일에는 맨 끝에 그대로 덧붙인다 (실측)
+- [2026-10-20] **이 PC의 Git Bash에서 `git grep`은 한글 패턴에 0건을 낸다** — `git grep -n '하위 폴더를 훑는' docs/prd.md`가 0인데 `grep -c` 는 1이었다. 0을 「없다」로 읽으면 계획의 착수값과 잔존 확인이 틀린다. 한글 리터럴의 계수·잔존 확인은 `grep -c`(또는 `rg`)로 한다 (실측)
+- [2026-10-20] **verify-moa에서 Karina `click --modifiers CmdOrCtrl|Shift`는 MOA에 수식 키로 닿지 않는다** — 두 번 모두 단일 클릭으로 처리돼 선택이 바뀌기만 했다. 여러 항목을 고른 화면은 화면 조작으로 만들 수 없으니, 그 규칙은 패널 시험(`toggle_select`로 고른 뒤 프레임을 그려 글자를 재는 형태)으로 잰다. 병렬 두 클릭 더블클릭도 직전 `shot.ps1`의 창 올리기 바로 뒤에는 선택만 됐다 — 빈 자리를 한 번 누르고 0.8초 쉰 뒤 120ms 간격으로 띄우면 열렸다 (실측)
+- [2026-10-20] **verify-moa 의 `shot.ps1` 캡처가 창 크기 그대로 전부 검은 화면이면 좌표를 읽을 수 없어 화면 시나리오를 돌리지 못한다** — `doctor.ps1` 은 `DOCTOR: OK` 였고 `query user` 가 활성·`LogonUI` 프로세스 없음(잠금 화면 아님)인데 두 번 찍어 모두 검었다(표시 장치가 그리지 않는 상태로 추정). 그때 좌표 없이 단축키(`Ctrl+Shift+N` 등)를 보내면 앱이 처음 연 **사용자 홈 폴더**에 파일이 생기므로 보내지 말고 HUMAN-VERIFY 로 넘긴다 (실측)
+- [2026-10-20] **다른 앱이 포그라운드를 쥐고 있으면 verify-moa 가 MOA 창을 앞으로 올리지 못해 캡처도 클릭도 못 한다** — `doctor.ps1` 은 `DOCTOR: OK` 인데 `shot.ps1` 이 「전경 창이 MOA 가 아니다」로, Karina `click --restore-window` 가 `window_not_focused`(「앞에 있는 앱이 포그라운드를 쥐고 있으면 Windows 가 막습니다」)로 실패했다. 사용자 앱을 내리지 말고 HUMAN-VERIFY 로 넘긴다 (실측)
+  - **2026-10-20 plan 4 에서 다시 났다** — 전경을 쥔 것은 상주 데스크톱 앱 `NapCat`(창 「쉼냥」, WinUI)이었고 `shot.ps1` 기본·`-NoRaise` 모두 「전경 0x2092E」로 거부됐다. 시나리오를 돌리기 전에 `GetForegroundWindow` 의 프로세스를 먼저 보면 빌드·사본 비용을 아낀다
 
 ## conventions — egui·화면 계층
 

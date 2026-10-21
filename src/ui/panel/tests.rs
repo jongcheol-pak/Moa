@@ -443,6 +443,7 @@ fn batch(names: &[&str]) -> Vec<crate::fs::enumerate::FileEntry> {
                 size: 0,
                 modified: 0,
                 attributes: 0,
+                location: None,
             }
         })
         .collect()
@@ -1128,7 +1129,15 @@ fn 열_차례가_세션을_왕복한다() {
     // 빠진 키는 기본 차례대로 뒤에 채워진다
     assert_eq!(
         round.column_order,
-        vec!["modified", "name", "size", "type", "permissions", "owner"]
+        vec![
+            "modified",
+            "name",
+            "size",
+            "type",
+            "permissions",
+            "owner",
+            "location"
+        ]
     );
 }
 
@@ -1143,7 +1152,15 @@ fn 저장된_열_차례가_없으면_기본_차례로_연다() {
     let panel = PanelState::from_tabs(&saved).expect("탭이 있으니 되살아난다");
     assert_eq!(
         panel.to_tabs().column_order,
-        vec!["name", "size", "type", "modified", "permissions", "owner"]
+        vec![
+            "name",
+            "size",
+            "type",
+            "modified",
+            "permissions",
+            "owner",
+            "location"
+        ]
     );
 }
 
@@ -1401,6 +1418,7 @@ fn local_entry(name: &str, is_dir: bool) -> FileEntry {
         size: 0,
         modified: 0,
         attributes: 0,
+        location: None,
     }
 }
 
@@ -1450,7 +1468,9 @@ fn 로컬_상위_이동을_더블클릭하면_위_폴더로_간다() {
         crate::ui::file_list::ListModel::Local(rows) => {
             rows.iter().map(|e| e.name_string()).collect()
         }
-        crate::ui::file_list::ListModel::Remote(_) => Vec::new(),
+        crate::ui::file_list::ListModel::Remote(_) | crate::ui::file_list::ListModel::Zip(_) => {
+            Vec::new()
+        }
     };
     assert_eq!(names, vec!["..", "Documents"], "첫 줄이 상위 이동이 아니다");
     assert_eq!(
@@ -1816,7 +1836,7 @@ fn 연결_단계는_그_연결을_쓰는_모든_탭에_퍼진다() {
         .iter()
         .filter_map(|source| match source {
             TabSource::Remote { phase, .. } => Some(phase.clone()),
-            TabSource::Local(_) => None,
+            TabSource::Local(_) | TabSource::Zip { .. } => None,
         })
         .collect();
     assert_eq!(
@@ -4637,4 +4657,835 @@ fn 한_프레임에_쌓인_배치를_합쳐_반영해도_목록이_온전하다(
     assert_eq!(names, sorted, "합쳐 반영한 목록이 정렬돼 있지 않다");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 검색 결과 한 줄 — 뿌리 기준 상대 폴더 `sub`(없으면 뿌리 바로 아래)에 든 파일
+fn search_hit(name: &str, sub: Option<&str>) -> crate::fs::enumerate::FileEntry {
+    let mut row = batch(&[name]).remove(0);
+    row.location = sub.map(|sub| std::sync::Arc::from(std::path::Path::new(sub)));
+    row
+}
+
+/// `C:\Docs`를 그려 둔 패널에서 필터 `a`로 검색을 시작하고 결과를 붙인 상태 (FR-70).
+/// 워커가 보낼 결과를 시험이 직접 붙인다 — 워커 경로는 `fs::search` 시험이 잰다
+fn searching_panel(
+    icons: &mut IconCache,
+    hits: Vec<crate::fs::enumerate::FileEntry>,
+) -> (PanelState, egui::Context) {
+    let ctx = egui::Context::default();
+    let mut panel = docs_panel(icons);
+    panel.list.set_filter("a");
+    panel.start_search(&ctx);
+    assert!(panel.list.is_searching(), "검색이 시작되지 않았다");
+    panel.list.append_entries(hits, icons);
+    (panel, ctx)
+}
+
+#[test]
+fn 검색_결과는_폴더_목록으로_캐시에_담기지_않는다() {
+    let mut icons = IconCache::new();
+    let (mut panel, ctx) = searching_panel(&mut icons, vec![search_hit("a.txt", Some("sub"))]);
+    assert!(
+        panel.list.entries().is_none(),
+        "검색 결과를 폴더 목록으로 내줬다"
+    );
+    // 같은 폴더를 다시 읽는 길(캐시 적중 판정)이 결과를 그 폴더의 목록으로 보지 않는다
+    let mut cache = crate::panel::dir_cache::DirCache::new();
+    panel.pending_dir = std::path::PathBuf::from(r"C:\Docs");
+    panel.load.start(std::path::PathBuf::from(r"C:\Docs"), &ctx);
+    panel.try_cache_hit(&mut icons, &mut cache);
+    assert!(cache.get(std::path::Path::new(r"C:\Docs")).is_none());
+}
+
+#[test]
+fn 결과를_열면_그_폴더로_옮겨_그_항목을_고른다() {
+    // FR-70 성공 ① — 필터는 비우고, 다 읽은 뒤 그 이름이 골라진다
+    let mut icons = IconCache::new();
+    let (mut panel, ctx) = searching_panel(&mut icons, vec![search_hit("a.txt", Some("sub"))]);
+    panel.handle_list_action(FileListAction::Open(0), &ctx);
+    assert_eq!(panel.pending_dir, std::path::PathBuf::from(r"C:\Docs\sub"));
+    assert_eq!(panel.list.filter(), "", "필터가 남았다");
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["a.txt", "b.txt"])),
+        &mut icons,
+        &mut crate::panel::dir_cache::DirCache::new(),
+        &ctx,
+    );
+    assert_eq!(panel.dir(), std::path::Path::new(r"C:\Docs\sub"));
+    assert_eq!(
+        panel.list.selected_paths(),
+        vec![std::path::PathBuf::from(r"C:\Docs\sub\a.txt")],
+        "옮긴 폴더에서 그 항목이 골라지지 않았다"
+    );
+}
+
+#[test]
+fn 사라진_결과를_열어도_그_폴더로_옮길_뿐이다() {
+    // 결과는 작업 뒤 저절로 갱신되지 않는다(D12) — 없어진 파일을 실행하지 않고 폴더만 연다
+    let mut icons = IconCache::new();
+    let (mut panel, ctx) = searching_panel(&mut icons, vec![search_hit("a.txt", Some("sub"))]);
+    panel.handle_list_action(FileListAction::Open(0), &ctx);
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["b.txt"])),
+        &mut icons,
+        &mut crate::panel::dir_cache::DirCache::new(),
+        &ctx,
+    );
+    assert_eq!(panel.dir(), std::path::Path::new(r"C:\Docs\sub"));
+    assert!(panel.list.selected_paths().is_empty());
+    assert!(
+        panel.pending_select.is_none(),
+        "고를 이름이 다음 탐색까지 남았다"
+    );
+}
+
+#[test]
+fn 필터를_고치면_검색을_접고_같은_폴더로_돌아온다() {
+    // 고른 `sub\a.txt`의 이름으로 뿌리의 `a.txt`가 골라지면 안 된다
+    let mut icons = IconCache::new();
+    let (mut panel, ctx) = searching_panel(&mut icons, vec![search_hit("a.txt", Some("sub"))]);
+    panel.list.toggle_select(0);
+    panel.change_filter("ab", &ctx);
+    assert!(!panel.search.is_running(), "검색이 멈추지 않았다");
+    assert_eq!(panel.pending_dir, std::path::PathBuf::from(r"C:\Docs"));
+    assert_eq!(panel.list.filter(), "ab");
+    panel.change_filter("", &ctx);
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["a.txt", "b.txt"])),
+        &mut icons,
+        &mut crate::panel::dir_cache::DirCache::new(),
+        &ctx,
+    );
+    assert!(!panel.list.is_searching());
+    assert!(
+        panel.list.selected_paths().is_empty(),
+        "검색 결과의 선택이 뿌리의 같은 이름 파일로 옮겨붙었다"
+    );
+}
+
+#[test]
+fn 검색_중에는_변경_감시가_결과를_덮지_않는다() {
+    let mut icons = IconCache::new();
+    let (mut panel, ctx) = searching_panel(&mut icons, vec![search_hit("a.txt", Some("sub"))]);
+    let (tx, rx) = channel();
+    let watcher = DirWatcher::start(std::env::temp_dir(), channel().0, None);
+    panel.watch = Some(DirWatch { watcher, rx });
+    tx.send(()).unwrap();
+    panel.poll_watch(&ctx);
+    assert!(
+        !panel.load.is_loading(),
+        "검색 중에 감시 통지로 폴더를 다시 읽었다"
+    );
+    assert!(panel.list.is_searching());
+}
+
+#[test]
+fn 검색이_아니면_변경_감시가_종전대로_다시_읽는다() {
+    // 음성 짝 — 감시 무시는 검색 결과를 보일 때만이다
+    let mut icons = IconCache::new();
+    let ctx = egui::Context::default();
+    let mut panel = docs_panel(&mut icons);
+    let (tx, rx) = channel();
+    let watcher = DirWatcher::start(std::env::temp_dir(), channel().0, None);
+    panel.watch = Some(DirWatch { watcher, rx });
+    tx.send(()).unwrap();
+    panel.poll_watch(&ctx);
+    assert!(panel.load.is_loading());
+}
+
+#[test]
+fn 원격_탭에서는_필터_enter가_검색을_시작하지_않는다() {
+    let (mut panel, _sites) = remote_panel_in(TabPhase::Ok);
+    panel.list.set_filter("a");
+    panel.start_search(&egui::Context::default());
+    assert!(!panel.list.is_searching());
+    assert!(!panel.search.is_running());
+}
+
+#[test]
+fn 여러_폴더에_걸친_선택의_셸_메뉴는_첫_항목의_폴더로_좁힌다() {
+    let (folder, items, dirs) = narrow_to_first_folder(
+        std::path::PathBuf::from(r"C:\Docs"),
+        vec![
+            std::path::PathBuf::from(r"C:\Docs\sub\a.txt"),
+            std::path::PathBuf::from(r"C:\Docs\b.txt"),
+            std::path::PathBuf::from(r"C:\Docs\sub\c"),
+        ],
+        vec![false, false, true],
+    );
+    assert_eq!(folder, std::path::PathBuf::from(r"C:\Docs\sub"));
+    assert_eq!(
+        items,
+        vec![
+            std::path::PathBuf::from(r"C:\Docs\sub\a.txt"),
+            std::path::PathBuf::from(r"C:\Docs\sub\c"),
+        ]
+    );
+    assert_eq!(dirs, vec![false, true]);
+}
+
+#[test]
+fn 다른_폴더로_옮기면_폴더_크기를_버린다() {
+    // FR-71 — 세션에 담지 않고, 그 폴더를 떠나면 값도 계산도 버린다
+    let mut icons = IconCache::new();
+    let mut panel = docs_panel(&mut icons);
+    let ctx = egui::Context::default();
+    panel
+        .sizes
+        .request(vec![std::path::PathBuf::from(r"C:\Docs\사진")], &ctx);
+    assert_eq!(
+        panel
+            .sizes
+            .request(vec![std::path::PathBuf::from(r"C:\Docs\사진")], &ctx),
+        0
+    );
+    commit_dir(&mut panel, r"C:\Other", &mut icons);
+    assert_eq!(
+        panel
+            .sizes
+            .request(vec![std::path::PathBuf::from(r"C:\Docs\사진")], &ctx),
+        1,
+        "옮긴 뒤에도 옛 폴더의 요청 기록이 남았다"
+    );
+}
+
+#[test]
+fn 고른_것이_있으면_상태_줄에_선택_통계가_선다() {
+    // FR-72 — 고르면 `N개 선택 · 합계`, 풀면 종전 `폴더 N 파일 N`
+    let _guard = crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+    let mut icons = IconCache::new();
+    let mut panel = docs_panel(&mut icons);
+    panel.list.toggle_select(1);
+    panel.list.toggle_select(2);
+    let 고름 = drawn_texts(&draw_once(&mut panel, &SiteStore::new()));
+    assert!(
+        고름.iter().any(|t| t == "2개 선택 · 0.00 KB"),
+        "선택 통계가 상태 줄에 없다: {고름:?}"
+    );
+    assert!(
+        !고름.iter().any(|t| is_item_count(t)),
+        "고른 것이 있는데 항목 수를 보였다"
+    );
+
+    panel.list.toggle_select(1);
+    panel.list.toggle_select(2);
+    let 풂 = drawn_texts(&draw_once(&mut panel, &SiteStore::new()));
+    assert!(
+        풂.iter().any(|t| is_item_count(t)),
+        "선택을 풀었는데 항목 수가 없다: {풂:?}"
+    );
+}
+
+#[test]
+fn 새_폴더를_만들면_경로가_올라온다() {
+    // 되돌리기 기록(FR-74)은 앱이 한다 — 패널은 만든 자리와 도장을 다음 결과로 올려 보낸다
+    use std::time::{Duration, Instant};
+
+    let ctx = egui::Context::default();
+    let dir = std::env::temp_dir().join(format!("fe_undo_created_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("임시 폴더");
+    let mut panel = PanelState::new(dir.clone());
+    panel.new_folder(&ctx);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while panel.create.is_running() && Instant::now() < deadline {
+        panel.poll_create(&ctx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let sites = SiteStore::new();
+    let tree = crate::remote::tree_cache::TreeCache::new();
+    let mut icons = crate::fs::icons::IconCache::new();
+    let mut textures = crate::ui::icon_tex::IconTextures::inline();
+    let mut 올라온 = Vec::new();
+    for _ in 0..2 {
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let ctx = ui.ctx().clone();
+                let outcome = panel.show(
+                    ui,
+                    &ctx,
+                    &mut icons,
+                    &mut textures,
+                    RemoteView {
+                        sites: &sites,
+                        connected: &[],
+                        tree: &tree,
+                    },
+                    PanelMenuState::for_panes(1),
+                    crate::ui::tabs::TransferTargets::default(),
+                    &[],
+                    drive_rows(),
+                );
+                올라온.extend(outcome.created);
+            });
+        });
+    }
+    assert_eq!(올라온.len(), 1, "한 번만 올라온다: {올라온:?}");
+    let (path, stamp) = &올라온[0];
+    assert!(path.exists(), "{}", path.display());
+    assert!(stamp.is_some(), "도장은 워커가 잰다");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn 폴더로_옮기면_가_본_곳이_남는다() {
+    // FR-75 — 빠른 이동 팔레트의 최근 경로는 실제로 옮겨 간 폴더다. 한 번 거두면 비워진다
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let target = std::path::PathBuf::from(r"C:\간곳");
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\처음곳"));
+    panel.start_load(target.clone(), PendingNav::Push, &ctx);
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["a.txt"])),
+        &mut icons,
+        &mut cache,
+        &ctx,
+    );
+    assert_eq!(panel.take_visited(), Some(target.clone()));
+    assert_eq!(panel.take_visited(), None, "거둔 뒤에도 남았다");
+
+    // 캐시로 먼저 옮긴 이동은 실제 결과가 와서 확정될 때 남는다
+    let cached = std::path::PathBuf::from(r"C:\캐시곳");
+    cache.put(&cached, &batch(&["..", "b.txt"]));
+    panel.start_load(cached.clone(), PendingNav::Push, &ctx);
+    panel.try_cache_hit(&mut icons, &mut cache);
+    assert_eq!(panel.take_visited(), None, "확정 전에 남겼다");
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["b.txt"])),
+        &mut icons,
+        &mut cache,
+        &ctx,
+    );
+    assert_eq!(panel.take_visited(), Some(cached));
+}
+
+#[test]
+fn 새로_고침은_가_본_곳을_남기지_않는다() {
+    // 같은 폴더를 다시 읽는 길(F5·감시)은 이동이 아니다
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\처음곳"));
+    panel.pending_dir = std::path::PathBuf::from(r"C:\처음곳");
+    panel.pending_nav = PendingNav::None;
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["a.txt"])),
+        &mut icons,
+        &mut cache,
+        &ctx,
+    );
+    assert_eq!(panel.take_visited(), None);
+}
+
+#[test]
+fn 열지_못한_폴더는_가_본_곳이_아니다() {
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\처음곳"));
+    panel.start_load(
+        std::path::PathBuf::from(r"C:\막힌곳"),
+        PendingNav::Push,
+        &ctx,
+    );
+    panel.apply_enumerated(EnumOutcome::AccessDenied, &mut icons, &mut cache, &ctx);
+    assert_eq!(panel.take_visited(), None);
+}
+
+#[test]
+fn 캐시로_먼저_옮긴_뒤_되돌리면_가_본_곳이_아니다() {
+    // FR-68 의 되돌리기 — 없는 폴더로 판명나 직전 폴더로 돌아갔으면 남기지 않는다
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let ghost = std::path::PathBuf::from(r"C:\사라진곳");
+    cache.put(&ghost, &batch(&["a.txt"]));
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\처음곳"));
+    panel.start_load(ghost, PendingNav::Push, &ctx);
+    panel.try_cache_hit(&mut icons, &mut cache);
+    panel.apply_enumerated(EnumOutcome::NotFound, &mut icons, &mut cache, &ctx);
+    assert_eq!(panel.take_visited(), None);
+}
+
+#[test]
+fn switch_tab_은_그_탭으로_바꾼다() {
+    // FR-75 — 팔레트에서 고른 탭으로 간다
+    let ctx = egui::Context::default();
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\첫탭"));
+    panel.open_local_tab(std::path::PathBuf::from(r"C:\둘째탭"), &ctx);
+    assert_eq!(panel.active_tab(), 1);
+    panel.switch_tab(0, &ctx);
+    assert_eq!(panel.active_tab(), 0, "고른 탭으로 바뀌지 않았다");
+}
+
+#[test]
+fn navigate_to_는_히스토리에_남는다() {
+    // FR-75 — 팔레트에서 고른 경로는 주소창 이동과 같아 뒤로 가기로 돌아올 수 있다
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let start = std::path::PathBuf::from(r"C:\처음곳");
+    let target = std::path::PathBuf::from(r"C:\고른곳");
+    let mut panel = PanelState::new(start.clone());
+    panel.navigate_to(target.clone(), &ctx);
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["a.txt"])),
+        &mut icons,
+        &mut cache,
+        &ctx,
+    );
+    assert_eq!(panel.dir(), target);
+    assert_eq!(
+        panel.tabs.active_mut().history.back().cloned(),
+        Some(start),
+        "히스토리에 남지 않았다"
+    );
+}
+
+#[test]
+fn 감시_재읽기_뒤에도_포커스_행이_남는다() {
+    // FR-77 — 같은 폴더를 다시 읽어도(감시·F5) 화살표는 옮기던 자리에서 잇는다
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let docs = std::path::PathBuf::from(r"C:\Docs");
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\Users"));
+    panel.pending_dir = docs.clone();
+    panel.pending_nav = PendingNav::None;
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["b.txt", "c.txt", "d.txt"])),
+        &mut icons,
+        &mut cache,
+        &ctx,
+    );
+    // `..` 다음 b → c 로 옮긴다
+    panel.move_selection(true, false);
+    panel.move_selection(true, false);
+    panel.move_selection(true, false);
+    assert_eq!(panel.selected_local(), vec![(docs.join("c.txt"), false)]);
+
+    // 앞에 새 파일이 생겨 다시 읽힌다
+    panel.pending_dir = docs.clone();
+    panel.pending_nav = PendingNav::None;
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["a.txt", "b.txt", "c.txt", "d.txt"])),
+        &mut icons,
+        &mut cache,
+        &ctx,
+    );
+    panel.move_selection(true, false);
+    assert_eq!(
+        panel.selected_local(),
+        vec![(docs.join("d.txt"), false)],
+        "포커스 행을 잃어 다른 자리에서 시작했다"
+    );
+}
+
+#[test]
+fn 재읽기_뒤에도_미리보기_대상이_남는다() {
+    // FR-76 — 쓰이고 있는 파일을 미리보는 동안 감시가 폴더를 다시 읽어도 대상이 사라지지 않는다
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let docs = std::path::PathBuf::from(r"C:\Docs");
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\Users"));
+    for names in [&["b.txt", "c.txt"][..], &["a.txt", "b.txt", "c.txt"][..]] {
+        panel.pending_dir = docs.clone();
+        panel.pending_nav = PendingNav::None;
+        panel.apply_enumerated(EnumOutcome::Ok(batch(names)), &mut icons, &mut cache, &ctx);
+        if names.len() == 2 {
+            // `..` 다음 b → c
+            for _ in 0..3 {
+                panel.move_selection(true, false);
+            }
+        }
+    }
+    assert!(
+        matches!(
+            panel.preview_target(),
+            crate::ui::preview::PreviewTarget::File { ref path, .. } if *path == docs.join("c.txt")
+        ),
+        "{:?}",
+        panel.preview_target()
+    );
+}
+
+/// zip 에 들어간 패널 — 목차 워커를 거치지 않고 탭 모델만 zip 으로 세운다(세션·새 탭 시험용)
+fn zipped_panel(inner: &str) -> PanelState {
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\받은 파일"));
+    let tab = panel.tabs.active_mut();
+    tab.enter_zip(std::path::PathBuf::from(r"C:\받은 파일\자료.zip"));
+    if !inner.is_empty() {
+        tab.set_zip_inner(inner.to_owned());
+    }
+    panel
+}
+
+#[test]
+fn zip_탭은_세션에_zip이_있는_폴더로_저장된다() {
+    // FR-78 — 세션 스키마를 바꾸지 않는다: 다시 띄우면 zip 이 있는 폴더의 로컬 탭이다
+    let panel = zipped_panel("문서");
+    assert_eq!(
+        panel.tab_specs(),
+        vec![TabSpec::Local(std::path::PathBuf::from(r"C:\받은 파일"))]
+    );
+}
+
+#[test]
+fn zip_탭에서_새_탭은_zip이_있는_폴더다() {
+    let ctx = egui::Context::default();
+    let mut panel = zipped_panel("문서");
+    panel.new_tab(&ctx);
+    assert_eq!(
+        panel.tabs.active().source,
+        TabSource::Local(std::path::PathBuf::from(r"C:\받은 파일"))
+    );
+}
+
+/// 시험 zip 이 든 폴더 — `자료.zip`(문서/a.txt · 문서/사진/b.png · top.txt)과 zip 이 아닌 `가짜.zip`
+fn zip_fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join(format!("moa_zip_panel_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("시험 폴더");
+    let archive = dir.join("자료.zip");
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).expect("zip"));
+    let options = zip::write::SimpleFileOptions::default();
+    for (name, body) in [
+        ("문서/a.txt", &b"a"[..]),
+        ("문서/사진/b.png", &b"b"[..]),
+        ("top.txt", &b"top"[..]),
+    ] {
+        writer.start_file(name, options).expect("항목");
+        writer.write_all(body).expect("본문");
+    }
+    writer.finish().expect("zip 닫기");
+    std::fs::write(dir.join("가짜.zip"), b"not a zip").expect("가짜");
+    (dir, archive)
+}
+
+/// 폴더 열거·zip 목차 워커가 끝날 때까지 돌린다
+fn settle(
+    panel: &mut PanelState,
+    ctx: &egui::Context,
+    icons: &mut IconCache,
+    cache: &mut crate::panel::dir_cache::DirCache,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    panel.poll(ctx, icons, cache);
+    while (panel.load.is_loading() || panel.zip_load.is_loading())
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        panel.poll(ctx, icons, cache);
+    }
+    assert!(
+        !panel.load.is_loading() && !panel.zip_load.is_loading(),
+        "5초 안에 끝나지 않았다"
+    );
+}
+
+/// 지금 보이는 행 이름들 — 로컬·zip 목록
+fn shown(panel: &PanelState) -> Vec<String> {
+    match panel.list.model() {
+        crate::ui::file_list::ListModel::Local(rows)
+        | crate::ui::file_list::ListModel::Zip(rows) => {
+            rows.iter().map(|e| e.name_string()).collect()
+        }
+        crate::ui::file_list::ListModel::Remote(_) => Vec::new(),
+    }
+}
+
+/// 그 이름의 행을 더블클릭하고 워커가 끝날 때까지 돌린다
+fn open_row(
+    panel: &mut PanelState,
+    name: &str,
+    ctx: &egui::Context,
+    icons: &mut IconCache,
+    cache: &mut crate::panel::dir_cache::DirCache,
+) {
+    let rows = shown(panel);
+    let index = rows
+        .iter()
+        .position(|row| row == name)
+        .unwrap_or_else(|| panic!("{name} 행이 없다: {rows:?}"));
+    panel.handle_list_action(FileListAction::Open(index), ctx);
+    settle(panel, ctx, icons, cache);
+}
+
+/// 시험 폴더를 열고 `자료.zip` 에 들어간 패널
+fn entered_zip(
+    tag: &str,
+) -> (
+    PanelState,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    egui::Context,
+    IconCache,
+    crate::panel::dir_cache::DirCache,
+) {
+    let (dir, archive) = zip_fixture(tag);
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let mut panel = PanelState::new(dir.clone());
+    settle(&mut panel, &ctx, &mut icons, &mut cache);
+    open_row(&mut panel, "자료.zip", &ctx, &mut icons, &mut cache);
+    (panel, dir, archive, ctx, icons, cache)
+}
+
+#[test]
+fn zip_탭_더블클릭하면_zip_안으로_들어간다() {
+    // FR-78 — 목차를 다 읽은 뒤에 zip 탭으로 커밋한다
+    let (panel, dir, archive, ..) = entered_zip("enter");
+    assert_eq!(
+        panel.tabs.active().source.zip_location(),
+        Some((archive.as_path(), ""))
+    );
+    let mut names = shown(&panel);
+    names.sort();
+    assert_eq!(names, ["..", "top.txt", "문서"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_탭_안_폴더를_열면_그_안으로_간다() {
+    let (mut panel, dir, archive, ctx, mut icons, mut cache) = entered_zip("inner");
+    open_row(&mut panel, "문서", &ctx, &mut icons, &mut cache);
+    assert_eq!(
+        panel.tabs.active().source.zip_location(),
+        Some((archive.as_path(), "문서"))
+    );
+    let mut names = shown(&panel);
+    names.sort();
+    assert_eq!(names, ["..", "a.txt", "사진"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_탭_뿌리의_점점은_zip이_있는_폴더로_나온다() {
+    let (mut panel, dir, _archive, ctx, mut icons, mut cache) = entered_zip("parent");
+    open_row(&mut panel, "..", &ctx, &mut icons, &mut cache);
+    assert_eq!(panel.tabs.active().source, TabSource::Local(dir.clone()));
+    assert!(shown(&panel).iter().any(|name| name == "자료.zip"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_탭_뿌리에서_뒤로_가면_zip이_있는_폴더다() {
+    let (mut panel, dir, _archive, ctx, mut icons, mut cache) = entered_zip("back_out");
+    panel.go_back(&ctx);
+    settle(&mut panel, &ctx, &mut icons, &mut cache);
+    assert_eq!(panel.tabs.active().source, TabSource::Local(dir.clone()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_탭_안에서_뒤로_앞으로_오간다() {
+    let (mut panel, dir, archive, ctx, mut icons, mut cache) = entered_zip("history");
+    open_row(&mut panel, "문서", &ctx, &mut icons, &mut cache);
+    panel.go_back(&ctx);
+    settle(&mut panel, &ctx, &mut icons, &mut cache);
+    assert_eq!(
+        panel.tabs.active().source.zip_location(),
+        Some((archive.as_path(), ""))
+    );
+    panel.go_forward(&ctx);
+    settle(&mut panel, &ctx, &mut icons, &mut cache);
+    assert_eq!(
+        panel.tabs.active().source.zip_location(),
+        Some((archive.as_path(), "문서"))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_탭_위로_가기는_안의_부모로_간다() {
+    let (mut panel, dir, archive, ctx, mut icons, mut cache) = entered_zip("up");
+    open_row(&mut panel, "문서", &ctx, &mut icons, &mut cache);
+    open_row(&mut panel, "사진", &ctx, &mut icons, &mut cache);
+    panel.go_up(&ctx);
+    settle(&mut panel, &ctx, &mut icons, &mut cache);
+    assert_eq!(
+        panel.tabs.active().source.zip_location(),
+        Some((archive.as_path(), "문서"))
+    );
+    panel.go_up(&ctx);
+    settle(&mut panel, &ctx, &mut icons, &mut cache);
+    panel.go_up(&ctx);
+    settle(&mut panel, &ctx, &mut icons, &mut cache);
+    assert_eq!(panel.tabs.active().source, TabSource::Local(dir.clone()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_탭_열지_못하면_자리를_지키고_사유를_적는다() {
+    let (dir, _archive) = zip_fixture("broken");
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let mut panel = PanelState::new(dir.clone());
+    settle(&mut panel, &ctx, &mut icons, &mut cache);
+    open_row(&mut panel, "가짜.zip", &ctx, &mut icons, &mut cache);
+    assert_eq!(panel.tabs.active().source, TabSource::Local(dir.clone()));
+    assert!(shown(&panel).iter().any(|name| name == "가짜.zip"));
+    assert!(!panel.status.is_empty(), "실패 사유가 상태 줄에 없다");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_탭_새로_고침은_zip을_다시_읽는다() {
+    let (mut panel, dir, archive, ctx, mut icons, mut cache) = entered_zip("refresh");
+    panel.refresh(&ctx);
+    assert!(panel.zip_load.is_loading(), "zip 을 다시 읽지 않았다");
+    assert!(!panel.load.is_loading(), "zip 탭에서 로컬 열거가 떴다");
+    settle(&mut panel, &ctx, &mut icons, &mut cache);
+    assert_eq!(
+        panel.tabs.active().source.zip_location(),
+        Some((archive.as_path(), ""))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_탭에서_새_폴더는_만들지_않는다() {
+    let (mut panel, dir, _archive, ctx, ..) = entered_zip("new_folder");
+    panel.new_folder(&ctx);
+    assert!(!panel.create.is_running(), "zip 탭에서 새 폴더를 만들었다");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_탭에서_새_파일은_만들지_않는다() {
+    let (mut panel, dir, _archive, ctx, ..) = entered_zip("new_file");
+    panel.new_file(&ctx);
+    assert!(!panel.create.is_running(), "zip 탭에서 새 파일을 만들었다");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_탭에서_우클릭은_메뉴를_세우지_않는다() {
+    let (mut panel, dir, _archive, ctx, ..) = entered_zip("context");
+    for index in [None, Some(1)] {
+        let request = panel.handle_list_action(
+            FileListAction::Context {
+                index,
+                pos: egui::pos2(0.0, 0.0),
+            },
+            &ctx,
+        );
+        assert!(request.is_none(), "셸 메뉴를 청했다");
+        assert!(panel.remote_menu_at.is_none(), "원격 메뉴 자리를 세웠다");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_탭에서_드롭은_받지_않는다() {
+    let (panel, dir, ..) = entered_zip("drop");
+    assert_eq!(panel.drop_target(), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_탭에서_검색은_시작하지_않는다() {
+    let (mut panel, dir, _archive, ctx, ..) = entered_zip("search");
+    panel.change_filter("a", &ctx);
+    panel.start_search(&ctx);
+    assert!(
+        !panel.search.is_running(),
+        "zip 탭에서 하위 폴더 검색이 떴다"
+    );
+    assert!(!panel.list.is_searching());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_탭에서_감시_통지는_다시_읽지_않는다() {
+    let (mut panel, dir, _archive, ctx, ..) = entered_zip("watch");
+    assert!(
+        panel.watch.is_none(),
+        "zip 에 들어가도 옛 폴더 감시가 남았다"
+    );
+    // 남은 감시가 있다고 해도 zip 화면이 로컬 목록으로 덮이면 안 된다
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(()).expect("통지");
+    panel.watch = Some(DirWatch {
+        watcher: crate::fs::watcher::DirWatcher::start(
+            dir.clone(),
+            std::sync::mpsc::channel().0,
+            None,
+        ),
+        rx,
+    });
+    panel.poll_watch(&ctx);
+    assert!(
+        !panel.load.is_loading(),
+        "감시 통지로 로컬 열거 워커가 떴다"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_탭에서_미리보기_대상은_없다() {
+    let (mut panel, dir, ..) = entered_zip("preview");
+    let index = shown(&panel)
+        .iter()
+        .position(|name| name == "top.txt")
+        .expect("top");
+    panel.list.toggle_select(index);
+    assert!(matches!(
+        panel.preview_target(),
+        crate::ui::preview::PreviewTarget::Nothing
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_탭의_local_dir은_없다() {
+    let (panel, dir, ..) = entered_zip("local_dir");
+    assert_eq!(panel.local_dir(), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zip_탭은_local_dir이_없어_쓰기_대상이_아니다() {
+    // FR-78 — 붙여넣기·OS 드롭·새 폴더가 모두 이 값으로 가른다(앱 층 대입은 리뷰가 지키는 자리)
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\받은 파일"));
+    panel.enter_zip_for_test(std::path::PathBuf::from(r"C:\받은 파일\자료.zip"));
+    assert_eq!(panel.local_dir(), None);
+    assert!(!panel.is_remote());
+    assert!(panel.is_zip());
+}
+
+#[test]
+fn zip_탭에서_고른_것은_로컬_선택이_아니다() {
+    // 삭제·클립보드 담기·일괄 이름은 `selected_local()` 을 거친다 — zip 이면 빈 목록이다
+    let (mut panel, dir, ..) = entered_zip("selected");
+    for index in 0..shown(&panel).len() {
+        panel.list.toggle_select(index);
+    }
+    assert!(panel.selected_local().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn 로컬_탭의_local_dir은_그_폴더다() {
+    let panel = PanelState::new(std::path::PathBuf::from(r"C:\테스트"));
+    assert_eq!(panel.local_dir(), Some(std::path::Path::new(r"C:\테스트")));
+}
+
+#[test]
+fn 비교_중이면_상태_줄에_요약이_선다() {
+    // FR-79 — 같은 폴더끼리면 칠할 것이 없어 요약이 켜짐을 알린다
+    let _guard = crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+    let (ctx, mut icons, mut cache) = cache_fixture();
+    let mut panel = PanelState::new(std::path::PathBuf::from(r"C:\Users"));
+    panel.pending_dir = std::path::PathBuf::from(r"C:\Docs");
+    panel.pending_nav = PendingNav::None;
+    panel.apply_enumerated(
+        EnumOutcome::Ok(batch(&["a.txt", "b.txt"])),
+        &mut icons,
+        &mut cache,
+        &ctx,
+    );
+    let rows = panel.compare_snapshot().expect("로컬 목록").1.to_vec();
+    // 목록 맨 앞은 `..` 줄이라 이름으로 골라 상대 쪽을 만든다
+    let other: Vec<_> = rows
+        .iter()
+        .filter(|row| row.name_string() == "a.txt")
+        .cloned()
+        .collect();
+    let (marks, _) = crate::app::compare::compare(&rows, &other);
+    panel.set_compare_marks(Some(std::sync::Arc::new(marks)));
+    let texts = drawn_texts(&draw_once(&mut panel, &SiteStore::default()));
+    assert!(
+        texts
+            .iter()
+            .any(|text| text == "비교 · 한쪽에만 1 · 다름 0"),
+        "{texts:?}"
+    );
 }

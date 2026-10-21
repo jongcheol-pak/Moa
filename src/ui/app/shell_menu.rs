@@ -338,11 +338,18 @@ fn favorite_action_for(
         shell_context_menu::AppMenuItem::AddFavorite => Some(
             crate::app::favorites::FavoriteAction::Add(target?.to_path_buf()),
         ),
-        // 나머지 둘은 즐겨찾기와 무관하다 — 새 탭 열기와 붙여넣기는 패널을 만진다
-        shell_context_menu::AppMenuItem::OpenInNewTab | shell_context_menu::AppMenuItem::Paste => {
-            None
-        }
+        // 나머지는 즐겨찾기와 무관하다 — 새 탭 열기·붙여넣기·일괄 이름은 패널을 만진다
+        shell_context_menu::AppMenuItem::OpenInNewTab
+        | shell_context_menu::AppMenuItem::Paste
+        | shell_context_menu::AppMenuItem::BulkRename => None,
     }
+}
+
+/// 일괄 이름 바꾸기 줄 — **둘 이상 골랐을 때만** 선다 (FR-73 · 사용자 답 Q5).
+///
+/// 하나면 아이콘 줄의 `이름 바꾸기`가 그 자리이고, 빈 곳 우클릭에는 바꿀 것이 없다
+fn bulk_rename_row(selected: usize) -> Option<(shell_context_menu::AppMenuItem, bool)> {
+    (selected >= 2).then_some((shell_context_menu::AppMenuItem::BulkRename, true))
 }
 
 /// 그 문구를 숨길 것인가 — [`HIDDEN_LABELS`]의 2차 폴백
@@ -1064,6 +1071,10 @@ impl ExplorerApp {
                 // 것은 그 사이에 할 일이 없어서다
                 self.clipboard_paste(None);
             }
+            shell_context_menu::AppMenuItem::BulkRename => {
+                // 메뉴를 연 패널이 곧 활성 패널이다 — `F2`와 같은 길로 연다 (FR-73)
+                self.open_bulk_rename(None, ctx);
+            }
             shell_context_menu::AppMenuItem::OpenInNewTab => {
                 // 메뉴를 연 패널이 곧 활성 패널이다 — 우클릭이 그 패널을 활성으로 만든다
                 // (`MenuAction::Rename`이 쓰는 같은 길)
@@ -1172,6 +1183,7 @@ impl ExplorerApp {
         if new_tab.is_some() {
             app_rows.push((shell_context_menu::AppMenuItem::OpenInNewTab, true));
         }
+        app_rows.extend(bulk_rename_row(request.items.len()));
 
         // **업로드 대상도 메뉴를 열 때 한 번 모은다** (2026-08-28) — 즐겨찾기·클립보드와
         // 같은 판단이다. 빈 곳 우클릭에는 올릴 항목이 없어 그 줄을 세우지 않는다
@@ -3001,5 +3013,34 @@ mod tests {
             shell_context_menu::MenuIcons::for_test(),
         );
         assert!(already_expanded(Some(&펼침), ExpandTarget::Shell(손잡이)));
+    }
+
+    #[test]
+    fn 둘_이상_고르면_일괄_이름_줄이_선다() {
+        // 열 때 세우는 줄 (FR-73 · Q5) — 그 줄이 `arrange` 를 지나 메뉴에 실제로 선다
+        let row = bulk_rename_row(2);
+        assert_eq!(
+            row,
+            Some((shell_context_menu::AppMenuItem::BulkRename, true))
+        );
+        let app_rows: Vec<_> = row.into_iter().collect();
+        let Arranged { rows, .. } = arrange(&[], |_| None, false, &app_rows, false);
+        assert!(
+            rows.iter().any(|row| matches!(
+                row,
+                shell_context_menu::ShellMenuRow::App {
+                    item: shell_context_menu::AppMenuItem::BulkRename,
+                    enabled: true,
+                }
+            )),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn 하나만_고르면_일괄_이름_줄이_없다() {
+        // 하나면 아이콘 줄의 `이름 바꾸기`(인라인 편집)가 그 자리다 — 빈 곳 우클릭도 없다
+        assert_eq!(bulk_rename_row(1), None);
+        assert_eq!(bulk_rename_row(0), None);
     }
 }

@@ -4,7 +4,18 @@
 //! 배치 규칙을 쓴다. 한쪽에 두고 다른 쪽이 참조하면 두 렌더 모듈이 서로를 알게 되므로
 //! 공용 조각만 여기로 모은다.
 use eframe::egui;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+
+/// 자세히 보기가 한 프레임에 주고받는 폴더 크기 (FR-71).
+///
+/// 알려진 값은 패널의 크기 워커가 들고, 그리는 쪽은 **보이는 폴더 행 중 값이 없는 것**을
+/// `wanted`에 담아 돌려준다 — 계산을 요청하는 것은 패널이다
+pub struct DirSizes<'a> {
+    pub known: &'a HashMap<PathBuf, u64>,
+    pub wanted: Vec<PathBuf>,
+}
 
 /// 목록이 상위(패널)에 돌려주는 사용자 조작.
 /// 즉시 모드라 콜백을 등록하지 않고 이번 프레임의 조작을 값으로 반환한다
@@ -41,13 +52,21 @@ pub enum DragItem {
         is_dir: bool,
         size: u64,
     },
+    /// zip 안 항목 (FR-78) — `path`는 `/`로 잇는 zip 안 경로다. 앱의 로컬 패널에 놓으면 풀린다
+    Zip {
+        archive: std::path::PathBuf,
+        path: String,
+        is_dir: bool,
+    },
 }
 
 impl DragItem {
     /// 폴더인가 — 로컬·원격 어느 쪽이든 같은 물음이다
     pub fn is_dir(&self) -> bool {
         match self {
-            DragItem::Local { is_dir, .. } | DragItem::Remote { is_dir, .. } => *is_dir,
+            DragItem::Local { is_dir, .. }
+            | DragItem::Remote { is_dir, .. }
+            | DragItem::Zip { is_dir, .. } => *is_dir,
         }
     }
 
@@ -59,6 +78,7 @@ impl DragItem {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             DragItem::Remote { path, .. } => path.file_name().unwrap_or_default().to_owned(),
+            DragItem::Zip { path, .. } => path.rsplit('/').next().unwrap_or_default().to_owned(),
         }
     }
 }
@@ -113,7 +133,7 @@ pub struct DropOutcome {
 ///
 /// **로컬 → 원격은 올리기, 원격 → 로컬은 받기**뿐이다. 로컬끼리·원격끼리는 `None`이다 —
 /// 원격↔원격은 PRD Out of Scope이고, **로컬↔로컬은 전송이 아니라 셸 복사**라서
-/// 아래 `local_copy_target`이 따로 판정한다(FR-60).
+/// 아래 `local_drop`이 따로 판정한다(FR-60).
 ///
 /// **이 함수에 복사를 섞지 않는다** — 이 값은 전송 큐에 넣을 항목을 거르는 필터로도
 /// 쓰이므로(`ui::app::transfer_conflict`), 로컬↔로컬이 여기를 통과하면 복사할 것이
@@ -130,42 +150,104 @@ pub fn drop_direction(
     }
 }
 
-/// 이 드롭이 **로컬끼리의 복사**인가 — 맞으면 놓인 폴더를 돌려준다 (FR-60).
+/// 로컬끼리의 드롭 한 번 — 셸에 걸 것 (FR-60)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalDrop {
+    pub dest: PathBuf,
+    pub sources: Vec<PathBuf>,
+    pub how: crate::fs::file_op::Transfer,
+}
+
+/// 이 드롭이 **로컬끼리의 복사·이동**인가 — 맞으면 놓인 폴더와 보낼 항목을 돌려준다 (FR-60).
 ///
 /// 항목이 전부 로컬이고 놓인 자리도 로컬일 때만 성립한다. 원격이 하나라도 섞이면
-/// `None`이며 그 드롭은 종전대로 전송 경로(`drop_direction`)로 간다.
+/// `None`이며 그 드롭은 종전대로 전송 경로(`drop_direction`)로 간다. **`shift`를 든 채
+/// 놓았으면 이동**이고 아니면 복사다(2026-10-20 — 2026-08-20 「언제나 복사」 번복).
 ///
-/// **끌어온 자리에 그대로 놓으면 `None`이다** — 항목들이 있던 폴더가 놓인 폴더와 같으면
-/// 복사를 걸지 않는다(2026-08-21 사용자 요청). 종전에는 셸에 넘겨 `- 복사본`이 생겼는데
-/// 사본을 만들려던 조작이 아니었다. **탭이 아니라 폴더로 견주므로** 다른 탭이 우연히 같은
-/// 폴더를 보고 있을 때도 취소된다.
+/// **끌어온 자리에 그대로 놓은 항목은 뺀다** — 항목이 있던 폴더가 놓인 폴더와 같으면 그
+/// 항목을 걸지 않는다(2026-08-21 사용자 요청 — 사본을 만들려던 조작이 아니다). **항목마다
+/// 견준다** — 하위 폴더 검색 결과에서 고른 것은 부모가 제각각이다(plan D8). 남는 것이 없으면
+/// `None`이다. **탭이 아니라 폴더로 견주므로** 다른 탭이 우연히 같은 폴더를 보고 있을 때도
+/// 빠진다.
 ///
 /// `None`이 곧 "아무 일도 없음"인 이유: 호출부(`ui::app`)는 `None`을 전송 경로로 보내는데
 /// 로컬↔로컬은 `drop_direction`이 전부 `None`이라 보낼 것이 하나도 남지 않아 큐 등록도
-/// 확인 대화도 열리지 않는다.
-///
-/// 빈 항목도 `None`이다: 복사를 걸 것이 없으면 아무 일도 일어나지 않아야 한다
-pub fn local_copy_target(drop: &DropOutcome) -> Option<&std::path::Path> {
+/// 확인 대화도 열리지 않는다
+pub fn local_drop(drop: &DropOutcome, shift: bool) -> Option<LocalDrop> {
     let DropTarget::Local(dir) = &drop.target else {
         return None;
     };
-    if drop.items.is_empty()
-        || !drop
-            .items
-            .iter()
-            .all(|item| matches!(item, DragItem::Local { .. }))
-    {
+    let mut paths = Vec::with_capacity(drop.items.len());
+    for item in &drop.items {
+        match item {
+            DragItem::Local { path, .. } => paths.push(path.clone()),
+            DragItem::Remote { .. } | DragItem::Zip { .. } => return None,
+        }
+    }
+    let sources = outside_of(paths, dir);
+    if sources.is_empty() {
         return None;
     }
-    let from_same_dir = drop.items.iter().all(|item| match item {
-        DragItem::Local { path, .. } => path.parent().is_some_and(|from| same_dir(from, dir)),
-        // 위 `all`이 이미 걸렀으므로 닿지 않는다. 닿는다면 로컬 복사가 아니므로 제자리도 아니다
-        DragItem::Remote { .. } => false,
-    });
-    if from_same_dir {
+    Some(LocalDrop {
+        dest: dir.clone(),
+        sources,
+        how: if shift {
+            crate::fs::file_op::Transfer::Move
+        } else {
+            crate::fs::file_op::Transfer::Copy
+        },
+    })
+}
+
+/// zip 에서 끌어 로컬 패널에 놓은 것 — 워커가 `dest` 에 푼다 (FR-78)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZipPicks {
+    pub archive: PathBuf,
+    /// 고른 zip 안 경로들(`/` 로 잇는다)
+    pub paths: Vec<String>,
+    pub dest: PathBuf,
+}
+
+/// 이 드롭이 **zip 항목을 로컬 폴더에 푸는 것**인가 (FR-78).
+///
+/// 항목이 전부 같은 zip 의 것이고 놓인 자리가 로컬일 때만 성립한다 — 원격 패널·탐색기로는
+/// 나가지 않는다(범위 밖). 다른 종류가 섞이면 `None` 이다
+pub fn zip_picks(drop: &DropOutcome) -> Option<ZipPicks> {
+    let DropTarget::Local(dest) = &drop.target else {
         return None;
+    };
+    let mut archive: Option<&PathBuf> = None;
+    let mut paths = Vec::with_capacity(drop.items.len());
+    for item in &drop.items {
+        let DragItem::Zip {
+            archive: from,
+            path,
+            ..
+        } = item
+        else {
+            return None;
+        };
+        if archive.is_some_and(|first| first != from) {
+            return None;
+        }
+        archive = Some(from);
+        paths.push(path.clone());
     }
-    Some(dir.as_path())
+    Some(ZipPicks {
+        archive: archive?.clone(),
+        paths,
+        dest: dest.clone(),
+    })
+}
+
+/// `paths` 중 부모가 `dir`가 아닌 것만 남긴다 — 제자리에 놓은 항목을 빼는 규칙 (FR-60·FR-61).
+///
+/// 앱 안 드롭(`local_drop`)과 탐색기에서 끌어온 드롭(`ui::app::pump_os_drop`)이 같은 규칙을 쓴다
+pub fn outside_of(paths: Vec<PathBuf>, dir: &std::path::Path) -> Vec<PathBuf> {
+    paths
+        .into_iter()
+        .filter(|path| !path.parent().is_some_and(|from| same_dir(from, dir)))
+        .collect()
 }
 
 /// 두 경로가 같은 폴더를 가리키는가 — **ASCII 대소문자를 접어서** 견준다.
@@ -431,7 +513,7 @@ mod tests {
     #[test]
     fn 같은_쪽끼리_끌면_아무_일도_없다() {
         // Acceptance ② — 이 함수는 **전송 방향만** 답한다. 원격↔원격은 PRD Out of Scope이고,
-        // 로컬↔로컬은 전송이 아니라 셸 복사라 `local_copy_target`이 판정한다(FR-60)
+        // 로컬↔로컬은 전송이 아니라 셸 복사·이동이라 `local_drop`이 판정한다(FR-60)
         assert_eq!(drop_direction(&local_item(), &local_target()), None);
         assert_eq!(drop_direction(&remote_item(), &remote_target()), None);
     }
@@ -444,10 +526,7 @@ mod tests {
             source_site: None,
             target: local_target(),
         };
-        assert_eq!(
-            local_copy_target(&drop),
-            Some(std::path::Path::new(r"C:\down"))
-        );
+        assert_eq!(복사_자리(&drop), Some(std::path::PathBuf::from(r"C:\down")));
     }
 
     #[test]
@@ -459,7 +538,7 @@ mod tests {
             target: local_target(),
         };
         assert_eq!(
-            local_copy_target(&섞임),
+            복사_자리(&섞임),
             None,
             "원격이 하나라도 섞이면 복사가 아니다"
         );
@@ -469,7 +548,7 @@ mod tests {
             source_site: None,
             target: remote_target(),
         };
-        assert_eq!(local_copy_target(&원격_대상), None, "올리기는 전송이다");
+        assert_eq!(복사_자리(&원격_대상), None, "올리기는 전송이다");
     }
 
     #[test]
@@ -480,7 +559,7 @@ mod tests {
             source_site: None,
             target: local_target(),
         };
-        assert_eq!(local_copy_target(&빈_드롭), None);
+        assert_eq!(복사_자리(&빈_드롭), None);
     }
 
     #[test]
@@ -491,7 +570,7 @@ mod tests {
             source_site: None,
             target: DropTarget::Local(std::path::PathBuf::from(r"C:\work")),
         };
-        assert_eq!(local_copy_target(&제자리), None);
+        assert_eq!(복사_자리(&제자리), None);
     }
 
     #[test]
@@ -506,12 +585,58 @@ mod tests {
             source_site: None,
             target: DropTarget::Local(std::path::PathBuf::from(r"C:\work")),
         };
-        assert_eq!(local_copy_target(&대소문자_다름), None);
+        assert_eq!(복사_자리(&대소문자_다름), None);
     }
 
     #[test]
-    fn 여러_항목_중_하나라도_다른_폴더에서_왔으면_복사다() {
-        // 전부 제자리일 때만 취소다 — 하나라도 밖에서 왔으면 복사할 것이 있다
+    fn 밖에서_끌어온_것도_같은_폴더면_뺀다() {
+        // 탐색기에서 끌어온 것을 그 폴더에 그대로 놓으면 `- 복사본`이 생기던 것 (대장 2026-08-21)
+        let 남은 = outside_of(
+            vec![
+                std::path::PathBuf::from(r"C:\Work\a.txt"),
+                std::path::PathBuf::from(r"C:\work\b.txt"),
+            ],
+            std::path::Path::new(r"C:\work"),
+        );
+        assert!(남은.is_empty(), "{남은:?}");
+    }
+
+    #[test]
+    fn 밖에서_끌어온_다른_폴더_것은_그대로_보낸다() {
+        let 남은 = outside_of(
+            vec![std::path::PathBuf::from(r"C:\Users\me\Desktop\a.txt")],
+            std::path::Path::new(r"C:\work"),
+        );
+        assert_eq!(남은.len(), 1);
+    }
+
+    /// 로컬 드롭이면 놓인 폴더 — 종전 판정(복사인가·어디로)을 그대로 견주는 시험용
+    fn 복사_자리(drop: &DropOutcome) -> Option<std::path::PathBuf> {
+        local_drop(drop, false).map(|local| local.dest)
+    }
+
+    #[test]
+    fn shift_를_들고_놓으면_이동이다() {
+        let drop = DropOutcome {
+            items: vec![local_item()],
+            source_site: None,
+            target: local_target(),
+        };
+        assert_eq!(
+            local_drop(&drop, true).map(|local| local.how),
+            Some(crate::fs::file_op::Transfer::Move)
+        );
+        assert_eq!(
+            local_drop(&drop, false).map(|local| local.how),
+            Some(crate::fs::file_op::Transfer::Copy),
+            "Shift 없이는 종전대로 복사다"
+        );
+    }
+
+    #[test]
+    fn 제자리_항목만_빼고_나머지를_보낸다() {
+        // 하위 폴더 검색 결과에서 고른 것은 부모가 제각각이다 (plan D8) — 놓인 폴더에 있던
+        // 항목만 빼고 나머지는 보낸다. 종전에는 제자리 항목까지 복사해 `- 복사본`이 생겼다
         let 섞인_출처 = DropOutcome {
             items: vec![
                 DragItem::Local {
@@ -527,8 +652,8 @@ mod tests {
             target: DropTarget::Local(std::path::PathBuf::from(r"C:\work")),
         };
         assert_eq!(
-            local_copy_target(&섞인_출처),
-            Some(std::path::Path::new(r"C:\work"))
+            local_drop(&섞인_출처, false).map(|local| local.sources),
+            Some(vec![std::path::PathBuf::from(r"C:\other\b.txt")])
         );
     }
 
@@ -644,5 +769,67 @@ mod tests {
                 assert!(drawn <= rows, "폭 {width}·{rows}줄: 허용 줄 수를 넘겼다");
             }
         }
+    }
+
+    fn zip_item(path: &str) -> DragItem {
+        DragItem::Zip {
+            archive: std::path::PathBuf::from(r"C:\받은 파일\자료.zip"),
+            path: path.to_owned(),
+            is_dir: false,
+        }
+    }
+
+    #[test]
+    fn zip_항목을_로컬에_놓으면_풀_것이_선다() {
+        // FR-78 — 같은 zip 의 항목들을 놓인 폴더에 푼다
+        let drop = DropOutcome {
+            items: vec![zip_item("문서/a.txt"), zip_item("문서/사진")],
+            source_site: None,
+            target: local_target(),
+        };
+        assert_eq!(
+            zip_picks(&drop),
+            Some(ZipPicks {
+                archive: std::path::PathBuf::from(r"C:\받은 파일\자료.zip"),
+                paths: vec!["문서/a.txt".to_owned(), "문서/사진".to_owned()],
+                dest: std::path::PathBuf::from(r"C:\down"),
+            })
+        );
+    }
+
+    #[test]
+    fn zip_항목을_원격에_놓으면_아무것도_없다() {
+        let drop = DropOutcome {
+            items: vec![zip_item("a.txt")],
+            source_site: None,
+            target: remote_target(),
+        };
+        assert_eq!(zip_picks(&drop), None);
+        // 다른 종류가 섞인 드롭도 zip 풀기가 아니다
+        let mixed = DropOutcome {
+            items: vec![zip_item("a.txt"), local_item()],
+            source_site: None,
+            target: local_target(),
+        };
+        assert_eq!(zip_picks(&mixed), None);
+    }
+
+    #[test]
+    fn zip_항목은_로컬_복사가_아니다() {
+        // 셸 복사·이동(FR-60)으로 흘러가면 없는 경로를 셸에 넘긴다
+        let drop = DropOutcome {
+            items: vec![zip_item("a.txt")],
+            source_site: None,
+            target: local_target(),
+        };
+        assert_eq!(local_drop(&drop, false), None);
+        assert_eq!(local_drop(&drop, true), None);
+    }
+
+    #[test]
+    fn zip_항목은_전송_방향이_없다() {
+        // 전송 큐에 들면 안 된다 — 서버와 오가는 것이 아니다
+        assert_eq!(drop_direction(&zip_item("a.txt"), &local_target()), None);
+        assert_eq!(drop_direction(&zip_item("a.txt"), &remote_target()), None);
     }
 }

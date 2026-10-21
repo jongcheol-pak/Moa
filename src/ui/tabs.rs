@@ -145,7 +145,7 @@ pub fn show_tab_strip(
     egui::Sides::new().shrink_left().height(STRIP_HEIGHT).show(
         ui,
         |ui| show_tabs(ui, model, remote, targets, tab, open_site),
-        |ui| show_menu_button(ui, menu_state, command),
+        |ui| show_menu_button(ui, &menu_state, command),
     );
     // 사이드바에서 끌어온 사이트를 이 스트립에 놓으면 새 탭으로 연다 (FR-38·인벤토리 #15).
     // 스트립 전체가 드롭 대상이라 탭 사이 어디에 놓아도 받는다
@@ -211,7 +211,7 @@ fn show_tabs(
                         TabSource::Remote { phase, .. } => {
                             site.map(|record| (phase, record.protocol))
                         }
-                        TabSource::Local(_) => None,
+                        TabSource::Local(_) | TabSource::Zip { .. } => None,
                     };
                     let hit = show_tab(ui, index, &title, badge, active, tab_icon(tab.id, targets));
                     if hit.close {
@@ -557,7 +557,7 @@ fn draw_separator(painter: &egui::Painter, tab: egui::Rect) {
 /// 타이틀바 설정 버튼과 같이 아이콘 버튼에 팝업만 붙인다.
 /// **아이콘은 분할 도형 그대로 둔다** — 사용자가 이미 이 자리를 메뉴 진입점으로 쓰고 있어
 /// 모양이 바뀌면 찾지 못한다 (plan D10)
-fn show_menu_button(ui: &mut egui::Ui, state: PanelMenuState, command: &mut Option<Command>) {
+fn show_menu_button(ui: &mut egui::Ui, state: &PanelMenuState, command: &mut Option<Command>) {
     let response = widgets::icon_button(
         ui,
         "",

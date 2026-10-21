@@ -6,9 +6,9 @@
 //!
 //! 이 모듈은 상태를 바꾸지 않는다 — 무엇을 하라는 **명령만 값으로 돌려주고**,
 //! 실행은 `ui::app`이 한다(패널·워크스페이스 소유자가 거기이기 때문).
-use crate::app::layout::{SplitDir, SplitPlace};
+use crate::app::layout::{PanelId, SplitDir, SplitPlace};
 use crate::remote::types::SiteId;
-use crate::ui::list_details::{ALL_COLUMNS, ColumnFlags, ColumnKind};
+use crate::ui::list_details::{ColumnFlags, ColumnKind, MENU_COLUMNS};
 use crate::ui::queue_panel::QueueColumnKind;
 use crate::ui::shell_host::AppNav;
 use crate::ui::theme;
@@ -94,9 +94,10 @@ pub enum Command {
     /// 좌우로 나눠 열며(FR-35) 이 명령을 거치지 않는다.
     /// `SiteId`가 `Copy`라 이 열거형의 `Copy`도 유지된다
     OpenSiteTab(SiteId),
-    /// 고른 것 중 첫 항목의 이름을 목록에서 바로 고친다 (FR-12·FR-64) — `F2`.
+    /// 이름을 바꾼다 (FR-12·FR-64·FR-73) — `F2`.
     ///
-    /// 여러 개를 골라 두어도 하나만 고친다(새 이름은 하나뿐이다 — 탐색기와 같다)
+    /// 하나를 골랐으면 목록에서 바로 고치고, **둘 이상이면 일괄 이름 바꾸기 대화를 연다**
+    /// (2026-10-20 — 종전에는 여러 개여도 첫 항목 하나만 고쳤다)
     Rename,
     /// 고른 것을 지운다 (FR-12·FR-64) — `Delete`는 휴지통, `Shift+Delete`는 곧바로.
     ///
@@ -114,13 +115,65 @@ pub enum Command {
     ///
     /// 복사로 담겼으면 복사하고 잘라내기로 담겼으면 옮긴다
     ClipboardPaste,
+    /// 방금 한 파일 작업을 되돌린다 (FR-74) — `Ctrl+Z`.
+    ///
+    /// 기록은 앱 전체에 하나라 어느 패널에서 눌러도 마지막 것을 되돌린다(plan D7). 고른 항목이
+    /// 대상은 아니지만 **파일 목록이 키를 가졌을 때만** 나간다(사용자 답 Q3) — 주소창·이름
+    /// 편집의 `Ctrl+Z`(글자 되돌리기)와 겹치지 않게 한다
+    Undo,
+    /// 빠른 이동 팔레트를 연다 (FR-75) — `Ctrl+P`. 고른 항목이 아니라 앱 전체가 대상이다
+    QuickOpen,
+    /// 목록의 포커스 행을 한 걸음 옮긴다 (FR-77) — `↑`·`↓`, `Shift` 를 들면 범위를 넓힌다.
+    /// 고른 항목을 바꾸므로 파일 목록이 키를 쥔 때만 나간다
+    MoveSelection {
+        down: bool,
+        extend: bool,
+    },
+    /// 미리보기 창을 켜고 끈다 (FR-76) — `Space`. 창은 앱에 하나라 고른 항목을 바꾸지 않아
+    /// 파일 대상 명령이 아니다(사이드바가 키를 가져도 듣는다)
+    TogglePreview,
+    /// 이 패널(명령의 대상)을 그 패널과 비교한다 (FR-79) — 패널 메뉴의 `비교`
+    CompareWith(PanelId),
+    /// 두 패널 비교를 끈다 (FR-79) — 켜진 `비교`를 다시 누르면 나온다
+    CompareOff,
+    /// 비교 결과에서 이 패널에만 있는 항목을 고른다 (FR-79)
+    SelectCompareOnly,
+}
+
+/// 패널 메뉴의 `비교` 줄이 무엇을 하는가 (FR-79) — 트리를 아는 `ui::splitter`가 정해 내려 준다
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CompareMenu {
+    /// 비교할 다른 로컬 패널이 없다(또는 이 패널이 로컬 폴더를 보고 있지 않다) — 흐린 줄
+    #[default]
+    Unavailable,
+    /// 다른 로컬 패널이 하나뿐이다 — 누르면 곧바로 그것과 비교한다
+    With(PanelId),
+    /// 다른 로컬 패널이 여럿이다 — 하위 메뉴에서 고른다 (패널 id, 그 패널의 폴더 이름)
+    Pick(Vec<(PanelId, String)>),
+    /// 이 패널이 비교 중이다 — 체크된 줄이고 누르면 끈다
+    On,
+}
+
+impl CompareMenu {
+    /// 줄을 누르면 곧바로 나갈 명령 — 하위 메뉴·흐린 줄이면 `None`
+    pub fn direct_command(&self) -> Option<Command> {
+        match self {
+            CompareMenu::With(other) => Some(Command::CompareWith(*other)),
+            CompareMenu::On => Some(Command::CompareOff),
+            CompareMenu::Unavailable | CompareMenu::Pick(_) => None,
+        }
+    }
 }
 
 /// 패널 메뉴 항목의 활성/비활성을 가르는 현재 상태
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanelMenuState {
     /// 패널이 2개 이상인가 — 마지막 하나는 닫을 수 없다 (FR-2)
     pub can_close_panel: bool,
+    /// 활성 탭이 로컬 폴더인가 — zip 탭(읽기 전용)이면 새 파일·새 폴더가 흐리다 (FR-78)
+    pub can_write: bool,
+    /// `비교` 줄의 상태 (FR-79)
+    pub compare: CompareMenu,
 }
 
 impl PanelMenuState {
@@ -132,6 +185,8 @@ impl PanelMenuState {
     pub fn for_panes(pane_count: usize) -> PanelMenuState {
         PanelMenuState {
             can_close_panel: pane_count > 1,
+            can_write: true,
+            compare: CompareMenu::Unavailable,
         }
     }
 }
@@ -140,7 +195,7 @@ impl PanelMenuState {
 ///
 /// 항목 순서·구분선 위치는 plan `## 시각 요소 분해`의 인벤토리 표 13행 그대로다.
 /// 진입점이 이 메뉴 하나뿐이므로, 여기서 빠진 기능은 마우스로 닿을 수 없게 된다
-pub fn panel_menu_items(ui: &mut egui::Ui, state: PanelMenuState, out: &mut Option<Command>) {
+pub fn panel_menu_items(ui: &mut egui::Ui, state: &PanelMenuState, out: &mut Option<Command>) {
     // 보기 모드는 여기 두지 않는다 — 상태 줄의 보기 버튼이 진입점이다(2026-09-29 사용자 요청)
     split_items(ui, out);
     ui.separator();
@@ -152,12 +207,13 @@ pub fn panel_menu_items(ui: &mut egui::Ui, state: PanelMenuState, out: &mut Opti
         Command::Refresh,
         out,
     );
+    compare_items(ui, &state.compare, out);
     ui.separator();
     item(
         ui,
         crate::i18n::menu_new_file(),
         "",
-        true,
+        state.can_write,
         Command::NewFile,
         out,
     );
@@ -165,7 +221,7 @@ pub fn panel_menu_items(ui: &mut egui::Ui, state: PanelMenuState, out: &mut Opti
         ui,
         crate::i18n::menu_new_folder(),
         "",
-        true,
+        state.can_write,
         Command::NewFolder,
         out,
     );
@@ -178,6 +234,41 @@ pub fn panel_menu_items(ui: &mut egui::Ui, state: PanelMenuState, out: &mut Opti
         Command::ClosePanel,
         out,
     );
+}
+
+/// `비교` 줄과, 켜져 있으면 `한쪽에만 있는 것 선택` 줄 (FR-79)
+fn compare_items(ui: &mut egui::Ui, compare: &CompareMenu, out: &mut Option<Command>) {
+    let label = crate::i18n::menu_compare();
+    match compare {
+        CompareMenu::Pick(candidates) => {
+            // 하위 메뉴는 부모 스타일을 잇지 않는 별도 `Area`라 여기서 다시 세운다
+            ui.menu_button(label, |ui| {
+                theme::menu_style(ui);
+                for (panel, name) in candidates {
+                    item(ui, name, "", true, Command::CompareWith(*panel), out);
+                }
+            });
+        }
+        _ => {
+            let on = *compare == CompareMenu::On;
+            let button = egui::Button::new(label).selected(on);
+            let response = ui.add_enabled(compare.direct_command().is_some(), button);
+            if response.clicked() {
+                *out = compare.direct_command();
+                ui.close();
+            }
+        }
+    }
+    if *compare == CompareMenu::On {
+        item(
+            ui,
+            crate::i18n::menu_compare_select_only(),
+            "",
+            true,
+            Command::SelectCompareOnly,
+            out,
+        );
+    }
 }
 
 /// 열 메뉴 — 목록 머리글 우클릭으로 열린다 (인벤토리 #22~28).
@@ -195,7 +286,7 @@ pub fn column_menu_items(ui: &mut egui::Ui, flags: ColumnFlags, out: &mut Option
             .size(COLUMN_MENU_CAPTION_PX)
             .color(theme::TEXT_MUTED),
     );
-    for kind in ALL_COLUMNS {
+    for kind in MENU_COLUMNS {
         // 행 높이는 적지 않는다 — `menu_style`이 세운 공통 값(`theme::MENU_ITEM_HEIGHT`)을 따른다
         let button = egui::Button::new(column_menu_label(ui, kind, flags.shows(kind)));
         // 고정 열도 그리기는 한다 — 클릭만 무시한다(원본과 같은 동작).
@@ -425,13 +516,21 @@ fn targets_file_list(command: Command) -> bool {
         | Command::CheckUpdate
         | Command::StartUpdate
         | Command::OpenReleaseNotes
-        | Command::OpenSiteTab(_) => false,
+        | Command::OpenSiteTab(_)
+        | Command::QuickOpen
+        | Command::TogglePreview
+        // 비교는 패널 메뉴에서만 나간다 — 고른 항목이 아니라 패널이 대상이다 (FR-79)
+        | Command::CompareWith(_)
+        | Command::CompareOff
+        | Command::SelectCompareOnly => false,
         // 고른 항목이 대상이다 — 파일 목록이 키를 쥔 때만 나간다
         Command::Rename
         | Command::Delete { .. }
         | Command::ClipboardCopy
         | Command::ClipboardCut
-        | Command::ClipboardPaste => true,
+        | Command::ClipboardPaste
+        | Command::Undo
+        | Command::MoveSelection { .. } => true,
     }
 }
 
@@ -459,6 +558,11 @@ pub fn poll_shortcuts(ctx: &egui::Context, owner: KeyOwner) -> Option<Command> {
                 if targets_file_list(command) && owner != KeyOwner::FileList {
                     return None;
                 }
+                // `Space` 는 수식 키가 하나도 없을 때만이다 — egui 는 여분 Shift·Alt 를 무시하고
+                // 맞춰 `Alt+Space`(창 시스템 메뉴)까지 미리보기 토글로 읽는다 (FR-76)
+                if key == egui::Key::Space && !input.modifiers.is_none() {
+                    return None;
+                }
                 let shortcut = egui::KeyboardShortcut::new(modifiers, key);
                 input.consume_shortcut(&shortcut).then_some(command)
             })
@@ -473,7 +577,7 @@ pub fn poll_shortcuts(ctx: &egui::Context, owner: KeyOwner) -> Option<Command> {
 ///
 /// **이 표가 유일한 대응이며 사용자가 바꿀 길을 두지 않는다** — 키 매핑 설정 화면도,
 /// 그것을 담을 설정 항목도 만들지 않았다(요청에 없다 — plan T10 Design ④)
-fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 18] {
+fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 25] {
     let ctrl_shift = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
     let ctrl_alt = egui::Modifiers::CTRL | egui::Modifiers::ALT;
     [
@@ -517,6 +621,8 @@ fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 18] {
         (egui::Modifiers::CTRL, egui::Key::T, Command::NewTab),
         (egui::Modifiers::CTRL, egui::Key::W, Command::CloseTab),
         (egui::Modifiers::CTRL, egui::Key::B, Command::ToggleSidebar),
+        (egui::Modifiers::CTRL, egui::Key::Z, Command::Undo),
+        (egui::Modifiers::CTRL, egui::Key::P, Command::QuickOpen),
         (egui::Modifiers::ALT, egui::Key::ArrowLeft, Command::Back),
         (
             egui::Modifiers::ALT,
@@ -524,6 +630,46 @@ fn shortcut_table() -> [(egui::Modifiers, egui::Key, Command); 18] {
             Command::Forward,
         ),
         (egui::Modifiers::ALT, egui::Key::ArrowUp, Command::Up),
+        // **`Shift+↑/↓`가 `↑/↓`보다 앞이다** — egui 는 여분 Shift·Alt 를 무시하고 맞춘다
+        // (`consume_shortcut`). `Alt+↑`·`Ctrl+Alt+↑/↓`는 이미 위에 있다
+        (
+            egui::Modifiers::SHIFT,
+            egui::Key::ArrowUp,
+            Command::MoveSelection {
+                down: false,
+                extend: true,
+            },
+        ),
+        (
+            egui::Modifiers::SHIFT,
+            egui::Key::ArrowDown,
+            Command::MoveSelection {
+                down: true,
+                extend: true,
+            },
+        ),
+        (
+            egui::Modifiers::NONE,
+            egui::Key::ArrowUp,
+            Command::MoveSelection {
+                down: false,
+                extend: false,
+            },
+        ),
+        (
+            egui::Modifiers::NONE,
+            egui::Key::ArrowDown,
+            Command::MoveSelection {
+                down: true,
+                extend: false,
+            },
+        ),
+        // 수식 키를 든 `Space`(창 시스템 메뉴의 `Alt+Space` 등)는 `poll_shortcuts`가 거른다
+        (
+            egui::Modifiers::NONE,
+            egui::Key::Space,
+            Command::TogglePreview,
+        ),
         (egui::Modifiers::NONE, egui::Key::F5, Command::Refresh),
         (egui::Modifiers::NONE, egui::Key::F2, Command::Rename),
         (
@@ -866,6 +1012,118 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_z_는_되돌리기다() {
+        let 찾은 = shortcut_table()
+            .into_iter()
+            .find(|(modifiers, key, _)| *modifiers == egui::Modifiers::CTRL && *key == egui::Key::Z)
+            .map(|(_, _, command)| command);
+        assert_eq!(찾은, Some(Command::Undo));
+    }
+
+    #[test]
+    fn 화살표는_선택_옮기기다() {
+        // FR-77 — 무수식 ↑·↓ 는 한 걸음, Shift 를 들면 범위를 넓힌다
+        let 찾기 = |modifiers, key| {
+            shortcut_table()
+                .into_iter()
+                .find(|(m, k, _)| *m == modifiers && *k == key)
+                .map(|(_, _, command)| command)
+        };
+        assert_eq!(
+            찾기(egui::Modifiers::NONE, egui::Key::ArrowDown),
+            Some(Command::MoveSelection {
+                down: true,
+                extend: false
+            })
+        );
+        assert_eq!(
+            찾기(egui::Modifiers::SHIFT, egui::Key::ArrowUp),
+            Some(Command::MoveSelection {
+                down: false,
+                extend: true
+            })
+        );
+    }
+
+    #[test]
+    fn shift_화살표가_화살표보다_앞이다() {
+        // egui 의 `consume_shortcut` 은 여분 Shift·Alt 를 무시한다 — 무수식 ↑ 가 먼저 오면
+        // `Shift+↑`·`Alt+↑`(상위 폴더)·`Ctrl+Alt+↑`(위로 분할)가 그 줄에 먼저 걸린다
+        let table = shortcut_table();
+        let 자리 = |modifiers: egui::Modifiers, key| {
+            table
+                .iter()
+                .position(|(m, k, _)| *m == modifiers && *k == key)
+                .expect("표에 있어야 한다")
+        };
+        let ctrl_alt = egui::Modifiers::CTRL | egui::Modifiers::ALT;
+        for key in [egui::Key::ArrowUp, egui::Key::ArrowDown] {
+            let plain = 자리(egui::Modifiers::NONE, key);
+            assert!(자리(egui::Modifiers::SHIFT, key) < plain, "{key:?}");
+            assert!(자리(ctrl_alt, key) < plain, "{key:?}");
+        }
+        assert!(
+            자리(egui::Modifiers::ALT, egui::Key::ArrowUp)
+                < 자리(egui::Modifiers::NONE, egui::Key::ArrowUp)
+        );
+    }
+
+    /// 키 하나를 눌러 한 프레임 돌리고 그 프레임에 나간 명령을 돌려준다
+    fn press(key: egui::Key, modifiers: egui::Modifiers) -> Option<Command> {
+        let ctx = egui::Context::default();
+        let mut got = None;
+        let input = egui::RawInput {
+            modifiers,
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ctx| {
+            got = poll_shortcuts(ctx, KeyOwner::FileList);
+        });
+        got
+    }
+
+    #[test]
+    fn space_는_미리보기_토글이다() {
+        // FR-76 — 사이드바가 키를 가져도 켜고 끈다(파일 대상이 아니다)
+        assert_eq!(
+            press(egui::Key::Space, egui::Modifiers::NONE),
+            Some(Command::TogglePreview)
+        );
+        assert!(!targets_file_list(Command::TogglePreview));
+    }
+
+    #[test]
+    fn 수식_키를_든_space_는_받지_않는다() {
+        for modifiers in [egui::Modifiers::ALT, egui::Modifiers::SHIFT] {
+            assert_eq!(press(egui::Key::Space, modifiers), None, "{modifiers:?}");
+        }
+    }
+
+    #[test]
+    fn ctrl_p_는_빠른_이동이다() {
+        // FR-75 — 파일 목록이 키를 갖지 않아도(사이드바를 누른 뒤에도) 열린다
+        let 찾은 = shortcut_table()
+            .into_iter()
+            .find(|(modifiers, key, _)| *modifiers == egui::Modifiers::CTRL && *key == egui::Key::P)
+            .map(|(_, _, command)| command);
+        assert_eq!(찾은, Some(Command::QuickOpen));
+        assert!(!targets_file_list(Command::QuickOpen));
+    }
+
+    #[test]
+    fn 되돌리기는_파일_목록이_키를_가질_때만_나간다() {
+        // 사용자 답 Q3 — 사이드바·주소창이 키를 쥔 동안의 `Ctrl+Z` 는 되돌리기가 아니다
+        assert!(targets_file_list(Command::Undo));
+    }
+
+    #[test]
     fn 파일_대상_명령만_키_소유를_가린다() {
         // 고른 항목을 건드리는 명령만 파일 목록이 키를 쥔 때 나간다 (FR-12) —
         // 사이드바를 누른 뒤 `Delete`를 눌렀는데 파일이 지워지면 안 된다.
@@ -879,6 +1137,23 @@ mod tests {
             파일_대상,
             vec![
                 Command::Delete { permanent: true },
+                Command::Undo,
+                Command::MoveSelection {
+                    down: false,
+                    extend: true
+                },
+                Command::MoveSelection {
+                    down: true,
+                    extend: true
+                },
+                Command::MoveSelection {
+                    down: false,
+                    extend: false
+                },
+                Command::MoveSelection {
+                    down: true,
+                    extend: false
+                },
                 Command::Rename,
                 Command::Delete { permanent: false },
             ]
@@ -1113,7 +1388,7 @@ mod tests {
     fn menu_labels(state: PanelMenuState) -> Vec<String> {
         drawn_labels(|ui| {
             let mut command = None;
-            panel_menu_items(ui, state, &mut command);
+            panel_menu_items(ui, &state, &mut command);
         })
     }
 
@@ -1152,6 +1427,7 @@ mod tests {
             crate::i18n::menu_split_up(),
             crate::i18n::menu_split_down(),
             crate::i18n::menu_refresh(),
+            crate::i18n::menu_compare(),
             crate::i18n::menu_new_file(),
             crate::i18n::menu_new_folder(),
             crate::i18n::close(),
@@ -1245,9 +1521,9 @@ mod tests {
     }
 
     #[test]
-    fn 무수식_키는_셋뿐이다() {
-        // `F5`·`F2`·`Delete` 셋만 수식 키 없이 받는다 (FR-12). 글자 키를 여기 더하면
-        // 이름 편집 중 텍스트 입력을 가로챈다 — `F2`·`Delete`는 글자가 아니고,
+    fn 무수식_키는_정해진_것뿐이다() {
+        // 수식 키 없이 받는 키는 이 목록뿐이다 (FR-12·FR-77). 글자 키를 여기 더하면
+        // 이름 편집 중 텍스트 입력을 가로챈다 — 화살표·`F2`·`Delete`는 글자가 아니고,
         // 편집 중에는 `egui_wants_keyboard_input`이 먼저 걸러 낸다
         let 무수식: Vec<egui::Key> = shortcut_table()
             .into_iter()
@@ -1256,7 +1532,14 @@ mod tests {
             .collect();
         assert_eq!(
             무수식,
-            vec![egui::Key::F5, egui::Key::F2, egui::Key::Delete]
+            vec![
+                egui::Key::ArrowUp,
+                egui::Key::ArrowDown,
+                egui::Key::Space,
+                egui::Key::F5,
+                egui::Key::F2,
+                egui::Key::Delete
+            ]
         );
     }
 
@@ -1301,5 +1584,115 @@ mod tests {
             submenu_pos(screen, egui::Rangef::new(100.0, 1100.0), 700.0, sub),
             egui::pos2(950.0, 600.0)
         );
+    }
+
+    #[test]
+    fn 비교_줄은_후보가_하나면_바로_켠다() {
+        // FR-79 — 다른 로컬 패널이 하나뿐이면 고를 것 없이 곧바로 비교한다
+        assert_eq!(
+            CompareMenu::With(PanelId(2)).direct_command(),
+            Some(Command::CompareWith(PanelId(2)))
+        );
+    }
+
+    #[test]
+    fn 비교_줄은_후보가_여럿이면_하위_메뉴다() {
+        let _guard =
+            crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+        let pick = CompareMenu::Pick(vec![
+            (PanelId(1), "문서".to_owned()),
+            (PanelId(2), "사진".to_owned()),
+        ]);
+        assert_eq!(pick.direct_command(), None, "고르기 전에 비교를 걸었다");
+        let state = PanelMenuState {
+            compare: pick,
+            ..PanelMenuState::for_panes(3)
+        };
+        let labels = menu_labels(state);
+        assert!(
+            labels
+                .iter()
+                .any(|label| label == crate::i18n::menu_compare())
+        );
+    }
+
+    #[test]
+    fn 비교_줄은_후보가_없으면_흐리다() {
+        let _guard =
+            crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+        assert_eq!(CompareMenu::Unavailable.direct_command(), None);
+        // 줄 자체는 선다 — 사라지면 그 기능이 있는지조차 알 수 없다
+        let labels = menu_labels(PanelMenuState::for_panes(1));
+        assert!(
+            labels
+                .iter()
+                .any(|label| label == crate::i18n::menu_compare())
+        );
+    }
+
+    #[test]
+    fn zip_탭이면_새_파일_새_폴더가_흐리다() {
+        // D23 — 눌러도 아무 일이 없는 켜진 줄을 두지 않는다. 흐림은 글자의 칠 속성으로 잰다
+        let _guard =
+            crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+        fn look(state: PanelMenuState, label: &str) -> Option<(egui::Color32, u32)> {
+            let ctx = egui::Context::default();
+            crate::ui::app::install_fonts(&ctx, None);
+            let output = ctx.run_ui(Default::default(), |ui| {
+                let mut command = None;
+                panel_menu_items(ui, &state, &mut command);
+            });
+            output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some((text.fallback_color, text.opacity_factor.to_bits()))
+                    }
+                    _ => None,
+                })
+        }
+        for label in [crate::i18n::menu_new_file(), crate::i18n::menu_new_folder()] {
+            let writable = look(PanelMenuState::for_panes(2), label).expect("쓰기 가능 줄");
+            let zip = look(
+                PanelMenuState {
+                    can_write: false,
+                    ..PanelMenuState::for_panes(2)
+                },
+                label,
+            )
+            .expect("zip 탭 줄");
+            assert_ne!(writable, zip, "{label} 줄이 zip 탭에서도 켜져 보인다");
+        }
+    }
+
+    #[test]
+    fn 비교가_켜지면_한쪽에만_있는_것_선택이_선다() {
+        let _guard =
+            crate::i18n::LanguageGuard::lock(crate::app::settings::LanguageSetting::Korean);
+        assert_eq!(CompareMenu::On.direct_command(), Some(Command::CompareOff));
+        let on = menu_labels(PanelMenuState {
+            compare: CompareMenu::On,
+            ..PanelMenuState::for_panes(2)
+        });
+        assert!(
+            on.iter()
+                .any(|label| label == crate::i18n::menu_compare_select_only())
+        );
+        let off = menu_labels(PanelMenuState {
+            compare: CompareMenu::With(PanelId(1)),
+            ..PanelMenuState::for_panes(2)
+        });
+        assert!(
+            !off.iter()
+                .any(|label| label == crate::i18n::menu_compare_select_only())
+        );
+    }
+
+    #[test]
+    fn 비교_명령은_파일_대상이_아니다() {
+        assert!(!targets_file_list(Command::CompareWith(PanelId(1))));
+        assert!(!targets_file_list(Command::CompareOff));
+        assert!(!targets_file_list(Command::SelectCompareOnly));
     }
 }

@@ -65,6 +65,10 @@ pub struct Session {
     /// `settings`와 같이 스키마 버전을 올리지 않고 더한다 (D2)
     #[serde(default, deserialize_with = "favorites_or_default")]
     pub favorites: Vec<String>,
+    /// 최근에 가 본 로컬 폴더 (FR-75) — 가장 최근이 앞. 즐겨찾기와 같은 이유로 문자열이고,
+    /// 깨져 있어도 그 자리만 비운다(`favorites_or_default`와 같은 판단)
+    #[serde(default, deserialize_with = "favorites_or_default")]
+    pub recent: Vec<String>,
 }
 
 /// 손상된 `settings`를 **그 자리에서만** 삼킨다 — 세션 전체를 잃지 않기 위해서다.
@@ -83,7 +87,7 @@ where
     Ok(serde_json::from_value(raw).unwrap_or_default())
 }
 
-/// 손상된 `favorites`를 **그 자리에서만** 삼킨다 — `settings_or_default`와 같은 판단이다.
+/// 손상된 `favorites`·`recent`를 **그 자리에서만** 삼킨다 — `settings_or_default`와 같은 판단이다.
 ///
 /// 즐겨찾기 목록이 손으로 편집돼 타입이 어긋나면(문자열 하나가 통째로 들어오는 등) 그 오류가
 /// `Session` 역직렬화 전체로 번져 워크스페이스·분할·탭·큐까지 함께 폴백된다. 즐겨찾기 하나
@@ -763,6 +767,7 @@ mod tests {
             dock: DockSession::default(),
             settings: AppSettings::default(),
             favorites: Vec::new(),
+            recent: Vec::new(),
             window: WindowState {
                 x: 100,
                 y: 50,
@@ -1221,5 +1226,34 @@ mod tests {
         );
         assert_eq!(back.queue, session.queue, "전송 큐까지 잃었다");
         assert_eq!(back.window, session.window);
+    }
+
+    #[test]
+    fn recent_가_없는_옛_파일도_읽힌다() {
+        // 최근 경로가 생기기 전에 저장된 파일 — 세션 전체가 폴백되면 안 된다
+        let mut value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&sample()).expect("직렬화")).expect("값");
+        value.as_object_mut().expect("객체").remove("recent");
+
+        let back = parse_session(&value.to_string()).expect("recent 키가 없다고 폴백됐다");
+        assert!(back.recent.is_empty());
+        assert_eq!(back.workspaces, sample().workspaces);
+    }
+
+    #[test]
+    fn 깨진_recent_는_그_자리만_비운다() {
+        let mut session = sample();
+        session.favorites = vec![r"D:\작업".to_owned()];
+        let mut value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&session).expect("직렬화")).expect("값");
+        value["recent"] = serde_json::Value::String("망가짐".to_owned());
+
+        let back = parse_session(&value.to_string()).expect("recent 때문에 세션을 잃었다");
+        assert!(back.recent.is_empty(), "깨진 값을 그대로 받았다");
+        assert_eq!(back.favorites, session.favorites, "즐겨찾기까지 잃었다");
+        assert_eq!(
+            back.workspaces, session.workspaces,
+            "워크스페이스까지 잃었다"
+        );
     }
 }

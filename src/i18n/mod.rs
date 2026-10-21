@@ -304,6 +304,8 @@ strings! {
     address_up => "상위 폴더" / "Up";
     /// 주소창 오른쪽 이름 필터 입력란의 자리표시자 (FR-65)
     address_filter_hint => "이름으로 거르기" / "Filter by name";
+    /// 필터란 Enter 로 시작한 하위 폴더 검색이 도는 동안 상태 줄에 붙는다 (FR-70)
+    search_running => "하위 폴더에서 찾는 중…" / "Searching subfolders…";
 
     // ── 폴더 트리 (FR-9) ──
     /// 아직 읽는 중인 노드의 자리 표시 — 로컬·원격 트리가 같은 문구를 쓴다
@@ -330,6 +332,8 @@ strings! {
     column_modified => "수정한 날짜" / "Date modified";
     column_permissions => "권한" / "Permissions";
     column_owner => "소유자" / "Owner";
+    /// 하위 폴더 검색 결과에만 서는 열 — 검색 시작 폴더 기준 상대 폴더 (FR-70)
+    column_location => "경로" / "Path";
     /// 상태 표시줄의 큐 토글 (인벤토리 #53)
     status_queue => "전송 큐" / "Transfer queue";
     /// 실패 알약의 낱말 (인벤토리 #57) — 건수는 `dynamic::status_failed_count`가 붙인다
@@ -365,6 +369,63 @@ strings! {
     /// 끌어다 놓은 것을 하나도 복사에 걸지 못했을 때 (FR-60) — 원본이 그 사이 전부
     /// 사라졌거나 셸이 그 경로를 다루지 못하는 경우다
     copy_no_source => "복사할 파일을 찾지 못했습니다" / "Could not find the files to copy";
+    /// 이름을 바꿀 항목을 하나도 셸에 걸지 못했을 때 (FR-73) — 그 사이 전부 사라진 경우다
+    rename_no_source => "이름을 바꿀 파일을 찾지 못했습니다" / "Could not find the files to rename";
+    /// 일괄 이름 바꾸기 대화 (FR-73)
+    bulk_rename_title => "이름 한꺼번에 바꾸기" / "Rename items";
+    /// 우클릭 메뉴의 진입 줄 — 둘 이상 골랐을 때만 선다 (FR-73)
+    menu_bulk_rename => "이름 한꺼번에 바꾸기…" / "Rename items…";
+    bulk_mode_replace => "찾아 바꾸기" / "Find and replace";
+    bulk_mode_number => "접두·접미·번호" / "Prefix, suffix, number";
+    bulk_mode_regex => "정규식" / "Regular expression";
+    bulk_find => "찾을 글자" / "Find";
+    bulk_with => "바꿀 글자" / "Replace with";
+    bulk_prefix => "앞에 붙일 글자" / "Prefix";
+    bulk_suffix => "뒤에 붙일 글자" / "Suffix";
+    bulk_start => "시작 번호" / "Start at";
+    bulk_digits => "자릿수" / "Digits";
+    bulk_keep_name => "원래 이름 남기기" / "Keep original name";
+    bulk_pattern => "정규식" / "Pattern";
+    bulk_include_ext => "확장자도 바꾸기" / "Include extension";
+    bulk_col_current => "현재 이름" / "Current name";
+    bulk_col_new => "새 이름" / "New name";
+    /// 충돌 판정에 쓸 폴더 안 이름 목록을 모으는 동안 — 그동안 `적용`은 흐리다
+    bulk_scanning => "폴더의 이름을 확인하는 중…" / "Checking names in the folder…";
+    bulk_block_empty => "이름이 비었습니다" / "Name is empty";
+    bulk_block_invalid => "쓸 수 없는 글자가 있습니다" / "Contains invalid characters";
+    bulk_block_duplicate => "새 이름끼리 겹칩니다" / "Duplicates another new name";
+    bulk_block_exists => "이미 있는 이름입니다" / "Name already exists";
+    bulk_block_pattern => "정규식이 잘못됐습니다" / "Invalid pattern";
+    bulk_apply => "적용" / "Apply";
+    /// 빠른 이동 팔레트(`Ctrl+P`, FR-75)의 입력란 안내
+    palette_placeholder => "가 본 곳·즐겨찾기·탭·워크스페이스 찾기" / "Go to a recent folder, favorite, tab or workspace";
+    /// 팔레트에 걸리는 후보가 없을 때
+    palette_empty => "찾은 곳이 없습니다" / "No matches";
+    /// 팔레트 줄 오른쪽의 출처 표시 — 넷
+    palette_source_recent => "최근" / "Recent";
+    palette_source_favorite => "즐겨찾기" / "Favorite";
+    palette_source_tab => "탭" / "Tab";
+    palette_source_workspace => "워크스페이스" / "Workspace";
+    /// 미리보기 창(`Space`, FR-76)의 사유 한 줄 — 보일 것이 없을 때
+    preview_nothing => "고른 파일이 없습니다" / "No file selected";
+    preview_remote => "원격 파일은 미리보지 않습니다" / "Remote files are not previewed";
+    preview_binary => "미리볼 수 없는 형식입니다" / "This file can't be previewed";
+    preview_failed => "읽지 못했습니다" / "Couldn't read this file";
+    preview_loading => "읽는 중…" / "Loading…";
+    /// 패널 메뉴 — 다른 로컬 패널과 견준다 (FR-79)
+    menu_compare => "비교" / "Compare";
+    /// 패널 메뉴 — 비교 결과에서 이 패널에만 있는 항목을 고른다 (FR-79)
+    menu_compare_select_only => "한쪽에만 있는 것 선택" / "Select items only here";
+    /// zip 항목을 풀지 못한 사유 (FR-78) — 이름이 zip 바깥(`..`·절대 경로)을 가리킨다
+    zip_unsafe_name => "zip 바깥을 가리키는 이름입니다" / "The name points outside the zip";
+    /// zip 항목을 풀지 못한 사유 (FR-78) — Windows 파일 이름에 쓸 수 없는 글자가 있다
+    zip_bad_name => "Windows에서 쓸 수 없는 이름입니다" / "The name isn't valid on Windows";
+    /// 앱 안에서 Shift 를 든 채 끄는 동안 그림 옆에 붙는 표시 (FR-60 — 놓으면 이동한다)
+    drag_moving => "이동" / "Move";
+    /// `Ctrl+Z`를 눌렀는데 되돌릴 기록이 없을 때 (FR-74)
+    undo_nothing => "되돌릴 작업이 없습니다" / "Nothing to undo";
+    /// 되돌릴 항목을 하나도 셸에 걸지 못했을 때 (FR-74)
+    undo_no_source => "되돌릴 파일을 찾지 못했습니다" / "Could not find the files to undo";
     /// 같은 이름이 이미 여럿이라 번호를 붙일 자리를 다 써 버렸을 때 —
     /// "무엇을 하다 실패했는지"가 없으면 사용자는 이 말을 알아들을 수 없다
     create_no_name
@@ -839,6 +900,32 @@ pub mod dynamic {
         }
     }
 
+    /// 두 패널 비교 중일 때 상태 줄 요약 (FR-79) — 차이가 없으면 그렇다고 적는다
+    pub fn compare_summary(only: usize, differs: usize) -> String {
+        match (current(), only + differs) {
+            (Language::Korean, 0) => "비교 · 차이 없음".to_owned(),
+            (Language::English, 0) => "Compare · no differences".to_owned(),
+            (Language::Korean, _) => format!("비교 · 한쪽에만 {only} · 다름 {differs}"),
+            (Language::English, _) => format!("Compare · only here {only} · differ {differs}"),
+        }
+    }
+
+    /// zip 항목을 풀다 못 푼 것이 있을 때 (FR-78) — 몇 개인지와 첫 사유를 적는다
+    pub fn zip_extract_failed(count: usize, first: &str) -> String {
+        match current() {
+            Language::Korean => format!("zip 항목 {count}개를 풀지 못했습니다 — {first}"),
+            Language::English => format!("Could not extract {count} zip item(s) — {first}"),
+        }
+    }
+
+    /// zip 안을 읽지 못했을 때 상태 줄 문구 (FR-78) — 자리는 그대로 지킨다
+    pub fn zip_open_failed(error: &str) -> String {
+        match current() {
+            Language::Korean => format!("zip 을 열지 못했습니다 — {error}"),
+            Language::English => format!("Could not open the zip — {error}"),
+        }
+    }
+
     /// 상태 줄 실패 알약 (인벤토리 #57) — 종전 `실패 3`은 무엇이 3인지 적지 않았다.
     /// 한국어는 수 뒤에 단위가 붙고 영어는 수가 앞에 선다
     pub fn status_failed_count(count: usize) -> String {
@@ -863,6 +950,22 @@ pub mod dynamic {
             Language::Korean => format!("구성 요소 {count}개"),
             Language::English if count == 1 => "1 component".to_owned(),
             Language::English => format!("{count} components"),
+        }
+    }
+
+    /// 하위 폴더 검색이 상한에서 끊겼을 때 상태 줄 문구 (FR-70)
+    pub fn search_truncated(limit: usize) -> String {
+        match current() {
+            Language::Korean => format!("결과가 많아 처음 {limit}개만 보입니다"),
+            Language::English => format!("Too many results — showing the first {limit}"),
+        }
+    }
+
+    /// 상태 줄의 선택 통계 — 고른 수와 파일 크기 합 (FR-72). 크기 문자열은 호출부가 만든다
+    pub fn selection_summary(count: usize, size: &str) -> String {
+        match current() {
+            Language::Korean => format!("{count}개 선택 · {size}"),
+            Language::English => format!("{count} selected · {size}"),
         }
     }
 
@@ -943,6 +1046,16 @@ pub mod dynamic {
         }
     }
 
+    /// 일괄 이름 바꾸기가 도중에 멈춰 **임시 이름으로 남은 항목**이 있을 때 (FR-73).
+    ///
+    /// 원래 이름으로 되돌리지 못한 것이라 사용자가 찾아 고칠 수 있게 경로를 그대로 싣는다
+    pub fn rename_temp_left(paths: &str) -> String {
+        match current() {
+            Language::Korean => format!("임시 이름으로 남은 항목이 있습니다: {paths}"),
+            Language::English => format!("Some items were left with a temporary name: {paths}"),
+        }
+    }
+
     /// 로컬 복사가 셸 오류로 끝났을 때 (FR-60).
     ///
     /// `detail`은 셸이 준 사유라 **그대로 싣는다** — 문장 틀만 카탈로그가 만든다
@@ -963,6 +1076,45 @@ pub mod dynamic {
             Language::Korean => format!("복사를 그만뒀습니다 — {count}개 항목"),
             Language::English if count == 1 => "Copy stopped — 1 item".to_owned(),
             Language::English => format!("Copy stopped — {count} items"),
+        }
+    }
+
+    /// 되돌리기가 끝났을 때 (FR-74) — 상태가 바뀌어 건너뛴 수가 있으면 함께 적는다 (사용자 답 Q6)
+    pub fn undo_done(done: usize, skipped: usize) -> String {
+        match (current(), skipped) {
+            (Language::Korean, 0) => format!("되돌렸습니다 — {done}개"),
+            (Language::Korean, _) => {
+                format!("되돌렸습니다 — {done}개 · {skipped}개는 상태가 바뀌어 건너뛰었습니다")
+            }
+            (Language::English, 0) => format!("Undone — {done}"),
+            (Language::English, _) => {
+                format!("Undone — {done} · skipped {skipped} that changed since")
+            }
+        }
+    }
+
+    /// 되돌리기가 셸 오류로 끝났을 때 (FR-74)
+    pub fn undo_failed(detail: &str) -> String {
+        match current() {
+            Language::Korean => format!("되돌리지 못했습니다 — {detail}"),
+            Language::English => format!("Could not undo — {detail}"),
+        }
+    }
+
+    /// 앱 안 드래그 이동(Shift)이 셸 오류로 끝났을 때 (FR-60) — 복사와 같은 틀이다
+    pub fn local_move_failed(detail: &str) -> String {
+        match current() {
+            Language::Korean => format!("옮기지 못했습니다 — {detail}"),
+            Language::English => format!("Could not move — {detail}"),
+        }
+    }
+
+    /// 사용자가 셸 이동 대화에서 그만뒀을 때 (FR-60) — `count`는 걸었던 항목 수다
+    pub fn local_move_cancelled(count: usize) -> String {
+        match current() {
+            Language::Korean => format!("옮기기를 그만뒀습니다 — {count}개 항목"),
+            Language::English if count == 1 => "Move stopped — 1 item".to_owned(),
+            Language::English => format!("Move stopped — {count} items"),
         }
     }
 
@@ -1681,6 +1833,67 @@ mod tests {
     }
 
     #[test]
+    fn 되돌리기_문구는_건너뛴_수를_적는다() {
+        // 사용자 답 Q6 — 건너뛴 것이 있으면 그 수를 알린다
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(dynamic::undo_done(3, 0), "되돌렸습니다 — 3개");
+        assert_eq!(
+            dynamic::undo_done(2, 1),
+            "되돌렸습니다 — 2개 · 1개는 상태가 바뀌어 건너뛰었습니다"
+        );
+        assert_eq!(undo_nothing(), "되돌릴 작업이 없습니다");
+        set_language(LanguageSetting::English);
+        assert_eq!(
+            dynamic::undo_done(2, 1),
+            "Undone — 2 · skipped 1 that changed since"
+        );
+    }
+
+    #[test]
+    fn 이동_문구는_복사와_다르다() {
+        // Shift 이동(FR-60)이 실패·취소되면 「복사」라고 알리지 않는다 (후보 5)
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(dynamic::local_move_failed("x"), "옮기지 못했습니다 — x");
+        assert_eq!(
+            dynamic::local_move_cancelled(2),
+            "옮기기를 그만뒀습니다 — 2개 항목"
+        );
+        assert_eq!(drag_moving(), "이동");
+        set_language(LanguageSetting::English);
+        assert_eq!(dynamic::local_move_failed("x"), "Could not move — x");
+        assert_eq!(dynamic::local_move_cancelled(1), "Move stopped — 1 item");
+        assert_eq!(drag_moving(), "Move");
+    }
+
+    #[test]
+    fn 검색과_선택_통계_문구는_두_언어를_모두_낸다() {
+        // FR-70·FR-72 — 기대값은 원문 리터럴이고 언어를 잠근다
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(search_running(), "하위 폴더에서 찾는 중…");
+        assert_eq!(column_location(), "경로");
+        assert_eq!(
+            dynamic::search_truncated(100_000),
+            "결과가 많아 처음 100000개만 보입니다"
+        );
+        assert_eq!(
+            dynamic::selection_summary(3, "1.20 MB"),
+            "3개 선택 · 1.20 MB"
+        );
+
+        set_language(LanguageSetting::English);
+        assert_eq!(search_running(), "Searching subfolders…");
+        assert_eq!(column_location(), "Path");
+        assert_eq!(
+            dynamic::search_truncated(100_000),
+            "Too many results — showing the first 100000"
+        );
+        assert_eq!(
+            dynamic::selection_summary(3, "1.20 MB"),
+            "3 selected · 1.20 MB"
+        );
+    }
+
+    #[test]
     fn 언어에_따라_다른_문구를_돌려준다() {
         let _guard = LanguageGuard::lock(LanguageSetting::Korean);
         assert_eq!(settings_title(), "설정");
@@ -1998,5 +2211,90 @@ mod tests {
         let _guard = LanguageGuard::lock(LanguageSetting::Korean);
         CURRENT.store(99, Ordering::Relaxed);
         assert_eq!(current(), Language::Korean);
+    }
+
+    #[test]
+    fn 팔레트_문구는_두_언어를_모두_낸다() {
+        // FR-75 — 기대값은 원문 리터럴이고 언어를 잠근다
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(palette_empty(), "찾은 곳이 없습니다");
+        assert_eq!(palette_source_recent(), "최근");
+        assert_eq!(palette_source_favorite(), "즐겨찾기");
+        assert_eq!(palette_source_tab(), "탭");
+        assert_eq!(palette_source_workspace(), "워크스페이스");
+        assert!(palette_placeholder().starts_with("가 본 곳"));
+
+        set_language(LanguageSetting::English);
+        assert_eq!(palette_empty(), "No matches");
+        assert_eq!(palette_source_recent(), "Recent");
+        assert_eq!(palette_source_favorite(), "Favorite");
+        assert_eq!(palette_source_tab(), "Tab");
+        assert_eq!(palette_source_workspace(), "Workspace");
+        assert!(palette_placeholder().starts_with("Go to"));
+    }
+
+    #[test]
+    fn 비교_문구는_두_언어를_모두_낸다() {
+        // FR-79 — 기대값은 원문 리터럴이고 언어를 잠근다
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(menu_compare(), "비교");
+        assert_eq!(menu_compare_select_only(), "한쪽에만 있는 것 선택");
+        assert_eq!(dynamic::compare_summary(0, 0), "비교 · 차이 없음");
+        assert_eq!(dynamic::compare_summary(2, 1), "비교 · 한쪽에만 2 · 다름 1");
+
+        set_language(LanguageSetting::English);
+        assert_eq!(menu_compare(), "Compare");
+        assert_eq!(menu_compare_select_only(), "Select items only here");
+        assert_eq!(dynamic::compare_summary(0, 0), "Compare · no differences");
+        assert_eq!(
+            dynamic::compare_summary(2, 1),
+            "Compare · only here 2 · differ 1"
+        );
+    }
+
+    #[test]
+    fn zip_문구는_두_언어를_모두_낸다() {
+        // FR-78 — 기대값은 원문 리터럴이고 언어를 잠근다
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(zip_unsafe_name(), "zip 바깥을 가리키는 이름입니다");
+        assert_eq!(zip_bad_name(), "Windows에서 쓸 수 없는 이름입니다");
+        assert_eq!(
+            dynamic::zip_open_failed("깨짐"),
+            "zip 을 열지 못했습니다 — 깨짐"
+        );
+        assert_eq!(
+            dynamic::zip_extract_failed(2, "a.txt: 이유"),
+            "zip 항목 2개를 풀지 못했습니다 — a.txt: 이유"
+        );
+
+        set_language(LanguageSetting::English);
+        assert_eq!(zip_unsafe_name(), "The name points outside the zip");
+        assert_eq!(zip_bad_name(), "The name isn't valid on Windows");
+        assert_eq!(
+            dynamic::zip_open_failed("broken"),
+            "Could not open the zip — broken"
+        );
+        assert_eq!(
+            dynamic::zip_extract_failed(1, "x"),
+            "Could not extract 1 zip item(s) — x"
+        );
+    }
+
+    #[test]
+    fn 미리보기_문구는_두_언어를_모두_낸다() {
+        // FR-76 — 기대값은 원문 리터럴이고 언어를 잠근다
+        let _guard = LanguageGuard::lock(LanguageSetting::Korean);
+        assert_eq!(preview_nothing(), "고른 파일이 없습니다");
+        assert_eq!(preview_remote(), "원격 파일은 미리보지 않습니다");
+        assert_eq!(preview_binary(), "미리볼 수 없는 형식입니다");
+        assert_eq!(preview_failed(), "읽지 못했습니다");
+        assert_eq!(preview_loading(), "읽는 중…");
+
+        set_language(LanguageSetting::English);
+        assert_eq!(preview_nothing(), "No file selected");
+        assert_eq!(preview_remote(), "Remote files are not previewed");
+        assert_eq!(preview_binary(), "This file can't be previewed");
+        assert_eq!(preview_failed(), "Couldn't read this file");
+        assert_eq!(preview_loading(), "Loading…");
     }
 }

@@ -4,7 +4,7 @@ MOA가 쓰는 오픈소스 구성 요소와 그 라이선스 전문이다. `carg
 
 같은 자료를 앱 안에서도 볼 수 있다(타이틀바 설정 메뉴의 `오픈소스 라이선스`). MOA 자체의 라이선스는 [LICENSE](LICENSE)에 있다.
 
-구성 요소 158개 · 라이선스 전문 93종.
+구성 요소 162개 · 라이선스 전문 96종.
 
 ## 구성 요소
 
@@ -38,6 +38,7 @@ MOA가 쓰는 오픈소스 구성 요소와 그 라이선스 전문이다. `carg
 | either | 1.18.0 | MIT OR Apache-2.0 |  |
 | emath | 0.35.0 | MIT OR Apache-2.0 | Emil Ernerfeldt |
 | epaint | 0.35.0 | MIT OR Apache-2.0 | Emil Ernerfeldt |
+| equivalent | 1.0.2 | Apache-2.0 OR MIT |  |
 | error-code | 3.4.0 | BSL-1.0 | Douman |
 | euclid | 0.22.14 | MIT OR Apache-2.0 | The Servo Project Developers |
 | fdeflate | 0.3.7 | MIT OR Apache-2.0 | The image-rs Developers |
@@ -64,6 +65,7 @@ MOA가 쓰는 오픈소스 구성 요소와 그 라이선스 전문이다. `carg
 | idna | 1.1.0 | MIT OR Apache-2.0 | The rust-url developers |
 | idna_adapter | 1.2.2 | Apache-2.0 OR MIT | The rust-url developers |
 | image | 0.25.10 | MIT OR Apache-2.0 | The image-rs Developers |
+| indexmap | 2.14.0 | Apache-2.0 OR MIT |  |
 | itertools | 0.14.0 | MIT OR Apache-2.0 | bluss |
 | itoa | 1.0.18 | MIT OR Apache-2.0 | David Tolnay |
 | kurbo | 0.13.1 | Apache-2.0 OR MIT |  |
@@ -128,6 +130,7 @@ MOA가 쓰는 오픈소스 구성 요소와 그 라이선스 전문이다. `carg
 | tinystr | 0.8.4 | Unicode-3.0 | The ICU4X Project Developers |
 | tracing | 0.1.44 | MIT | Eliza Weisman, Tokio Contributors |
 | tracing-core | 0.1.36 | MIT | Tokio Contributors |
+| typed-path | 0.12.4 | MIT OR Apache-2.0 | Chip Senkbeil |
 | unicode-general-category | 1.1.0 | Apache-2.0 | YesLogic Pty. Ltd. |
 | unicode-ident | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | David Tolnay |
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | kwantam, Manish Goregaokar |
@@ -166,6 +169,7 @@ MOA가 쓰는 오픈소스 구성 요소와 그 라이선스 전문이다. `carg
 | zerotrie | 0.2.5 | Unicode-3.0 | The ICU4X Project Developers |
 | zerovec | 0.11.8 | Unicode-3.0 | The ICU4X Project Developers |
 | zerovec-derive | 0.11.6 | Unicode-3.0 | Manish Goregaokar |
+| zip | 9.0.5 | MIT | Mathijs van de Nes, Marli Frost, Ryan Levick, Chris Hennick |
 | zlib (libz-sys 번들) | 1.1.29 | Zlib |  |
 | zmij | 1.0.23 | MIT | David Tolnay |
 
@@ -205,7 +209,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### 2. Apache-2.0
 
-적용: accesskit · ecolor · eframe · egui · egui-winit · egui_glow · emath · epaint · itoa · libc · litrs · proc-macro2 · profiling · quote · serde · serde_core · serde_derive · serde_json · suppaftp · syn · syn · thiserror · thiserror-impl · unicode-ident
+적용: accesskit · ecolor · eframe · egui · egui-winit · egui_glow · emath · epaint · itoa · libc · litrs · proc-macro2 · profiling · quote · serde · serde_core · serde_derive · serde_json · suppaftp · syn · syn · thiserror · thiserror-impl · typed-path · unicode-ident
 
 ```text
                               Apache License
@@ -388,7 +392,7 @@ END OF TERMS AND CONDITIONS
 
 ### 3. Apache-2.0
 
-적용: ahash · arrayvec · bitflags · cfg-if · displaydoc · either · euclid · flate2 · form_urlencoded · glow · hashbrown · idna · idna_adapter · itertools · libssh2-sys · libz-sys · lock_api · log · num-traits · once_cell · parking_lot · parking_lot_core · percent-encoding · png · regex · regex-automata · regex-syntax · scopeguard · smallvec · smol_str · ssh2 · stable_deref_trait · unicode-segmentation · url · uuid
+적용: ahash · arrayvec · bitflags · cfg-if · displaydoc · either · equivalent · euclid · flate2 · form_urlencoded · glow · hashbrown · idna · idna_adapter · indexmap · itertools · libssh2-sys · libz-sys · lock_api · log · num-traits · once_cell · parking_lot · parking_lot_core · percent-encoding · png · regex · regex-automata · regex-syntax · scopeguard · smallvec · smol_str · ssh2 · stable_deref_trait · unicode-segmentation · url · uuid
 
 ```text
                               Apache License
@@ -660,7 +664,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### 6. MIT
 
-적용: adler2 · displaydoc · glow · itoa · once_cell · pin-project-lite · proc-macro2 · quote · serde · serde_core · serde_derive · serde_json · smol_str · syn · syn · thiserror · thiserror-impl · unicode-ident · zmij
+적용: adler2 · displaydoc · glow · itoa · once_cell · pin-project-lite · proc-macro2 · quote · serde · serde_core · serde_derive · serde_json · smol_str · syn · syn · thiserror · thiserror-impl · typed-path · unicode-ident · zmij
 
 ```text
 Permission is hereby granted, free of charge, to any
@@ -6282,7 +6286,99 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### 92. BSD-3-Clause
+### 92. MIT
+
+적용: zip
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2014 Mathijs van de Nes
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### 93. MIT
+
+적용: indexmap
+
+```text
+Copyright (c) 2016--2017
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### 94. MIT
+
+적용: equivalent
+
+```text
+Copyright (c) 2016--2023
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### 95. BSD-3-Clause
 
 적용: libssh2 (libssh2-sys 번들)
 
@@ -6332,7 +6428,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
  */
 ```
 
-### 93. Zlib
+### 96. Zlib
 
 적용: zlib (libz-sys 번들)
 

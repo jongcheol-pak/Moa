@@ -56,6 +56,8 @@ pub struct ButtonSpec<'a> {
     pub label: &'a str,
     /// 굵게 그린다 — 확인·삭제·연결처럼 그 대화의 주 동작인 자리
     pub emphasis: bool,
+    /// 누를 수 있는가 — 거짓이면 흐리게 그리고 눌림을 받지 않는다
+    pub enabled: bool,
 }
 
 impl<'a> ButtonSpec<'a> {
@@ -64,6 +66,7 @@ impl<'a> ButtonSpec<'a> {
         Self {
             label,
             emphasis: false,
+            enabled: true,
         }
     }
 
@@ -72,7 +75,13 @@ impl<'a> ButtonSpec<'a> {
         Self {
             label,
             emphasis: true,
+            enabled: true,
         }
+    }
+
+    /// 지금은 누를 수 없게 한다 — 일괄 이름 바꾸기의 `적용`처럼 막을 사유가 있을 때
+    pub fn enabled_if(self, enabled: bool) -> Self {
+        Self { enabled, ..self }
     }
 }
 
@@ -233,12 +242,16 @@ fn footer(ui: &egui::Ui, rect: egui::Rect, buttons: &[ButtonSpec<'_>]) -> Option
     let slots = footer_slots(rect, buttons.len());
     let mut clicked = None;
 
-    for (index, slot) in slots.iter().enumerate() {
-        let response = ui.interact(
-            *slot,
-            ui.id().with(("dialog_footer", index)),
-            egui::Sense::click(),
-        );
+    for (index, (slot, spec)) in slots.iter().zip(buttons).enumerate() {
+        let sense = if spec.enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        };
+        let response = ui.interact(*slot, ui.id().with(("dialog_footer", index)), sense);
+        if !spec.enabled {
+            continue;
+        }
         // 포커스에도 같은 표식을 준다 — `Sense::click()`이 포커스와 Space·Enter 활성화를
         // 함께 주는데(egui `context.rs`), 표식이 없으면 키보드로 옮겨 다닐 때 지금 어느
         // 버튼에 있는지 보이지 않는다. 종전 `ui.button`은 egui가 포커스 테두리를 그려 줬다
@@ -279,21 +292,20 @@ fn footer(ui: &egui::Ui, rect: egui::Rect, buttons: &[ButtonSpec<'_>]) -> Option
     for (slot, spec) in slots.iter().zip(buttons) {
         // 라벨이 칸보다 길면 잘라 옆 칸을 침범하지 않게 한다
         let label = ui.painter_at(*slot);
+        let color = if spec.enabled {
+            theme::TEXT_BUTTON
+        } else {
+            theme::TEXT_DIM
+        };
         if spec.emphasis {
-            faux_bold_text(
-                &label,
-                slot.center(),
-                spec.label,
-                font.clone(),
-                theme::TEXT_BUTTON,
-            );
+            faux_bold_text(&label, slot.center(), spec.label, font.clone(), color);
         } else {
             label.text(
                 slot.center(),
                 egui::Align2::CENTER_CENTER,
                 spec.label,
                 font.clone(),
-                theme::TEXT_BUTTON,
+                color,
             );
         }
     }

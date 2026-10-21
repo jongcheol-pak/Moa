@@ -53,6 +53,17 @@ pub const FOLDER_ICON: egui::Color32 = egui::Color32::from_rgb(0xE8, 0xB3, 0x4D)
 
 /// 강조 파랑 — 선택된 탭 밑줄·진행 막대·라디오 선택
 pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x4A, 0x9E, 0xFF);
+/// 비교 표시의 행 배경색 (FR-79)
+pub fn compare_fill(mark: crate::app::compare::Mark) -> egui::Color32 {
+    match mark {
+        crate::app::compare::Mark::OnlyHere => COMPARE_ONLY,
+        crate::app::compare::Mark::Differs => COMPARE_DIFF,
+    }
+}
+/// 두 패널 비교 — 이쪽에만 있는 행의 배경 (FR-79). `ACCENT`를 알파 40 으로 미리 곱한 값이다
+pub const COMPARE_ONLY: egui::Color32 = egui::Color32::from_rgba_premultiplied(12, 25, 40, 40);
+/// 두 패널 비교 — 양쪽에 있는데 다른 행의 배경 (FR-79). `WARN`을 알파 40 으로 미리 곱한 값이다
+pub const COMPARE_DIFF: egui::Color32 = egui::Color32::from_rgba_premultiplied(36, 28, 12, 40);
 
 /// 연결됨(성공) 계열 — 점 / 글자 / 채움 / 테두리
 pub const OK_DOT: egui::Color32 = egui::Color32::from_rgb(0x4A, 0xDE, 0x80);
